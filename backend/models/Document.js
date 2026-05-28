@@ -1,0 +1,25 @@
+import mongoose from "mongoose";
+
+const ChunkSchema = new mongoose.Schema(
+  {
+    index: Number,
+    text: String,
+    keywords: [String],
+  },
+  { _id: false }
+);
+
+const DocumentSchema = new mongoose.Schema(
+  {
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    originalName: String,
+    fileName: String,
+    mimeType: String,
+    size: Number,
+    text: String,
+    chunks: [ChunkSchema],
+  },
+  { timestamps: true }
+);
+
+export const Document = mongoose.models.Document || mongoose.model("Document", DocumentSchema);
