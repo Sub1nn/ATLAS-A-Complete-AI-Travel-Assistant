@@ -4,6 +4,9 @@ import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
 import chatRoutes from "./routes/chat.js";
+import authRoutes from "./routes/auth.js";
+import conversationRoutes from "./routes/conversations.js";
+import documentRoutes from "./routes/documents.js";
 import { rateLimiter } from "./config/rateLimiter.js";
 
 const app = express();
@@ -41,7 +44,7 @@ if (process.env.NODE_ENV === "production") {
 }
 
 // Body parsing middleware
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "15mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // Request timing middleware
@@ -57,6 +60,9 @@ app.use(express.static("public"));
 app.use(rateLimiter);
 
 // Routes
+app.use("/api/auth", authRoutes);
+app.use("/api/conversations", conversationRoutes);
+app.use("/api/documents", documentRoutes);
 app.use("/api", chatRoutes);
 
 // Health check endpoint
@@ -83,11 +89,16 @@ app.use((err, req, res, next) => {
   console.error("❌ Global error:", err);
 
   const isDevelopment = process.env.NODE_ENV !== "production";
+  const isClientError = err.name === "MulterError" || /Only PDF, DOCX and TXT|file too large|Unexpected field/i.test(err.message || "");
 
-  res.status(err.status || 500).json({
-    error: "Internal server error",
-    message: isDevelopment ? err.message : "Something went wrong",
-    stack: isDevelopment ? err.stack : undefined,
+  res.status(isClientError ? 400 : err.status || 500).json({
+    error: isClientError ? "Invalid request" : "Internal server error",
+    message: isClientError
+      ? err.message
+      : isDevelopment
+      ? err.message
+      : "Something went wrong",
+    stack: !isClientError && isDevelopment ? err.stack : undefined,
   });
 });
 
