@@ -1,224 +1,718 @@
-# 🌍 ATLAS — AI-Powered Travel Intelligence Assistant
+# ATLAS AI Travel Assistant
 
-> **ATLAS** is a production-ready, multi-agent, API-integrated AI travel assistant built with **Node.js (Express)** and **React**.  
-> It analyzes travel queries, retrieves live weather & safety information, identifies attractions & cuisines, and produces structured, human-readable travel intelligence reports.
+ATLAS is a full-stack AI travel assistant designed to help users plan trips, explore destinations, understand local context, and manage travel conversations in one workspace.
 
----
-
-## 🚀 Overview
-
-ATLAS uses:
-
-- **LLM reasoning**
-- **External travel intelligence APIs**
-- **A custom intent classification engine**
-- **A multi-tool execution pipeline**
-- **A beautiful, structured response formatter**
-
-This enables the assistant to provide actionable insights for any location in seconds.
+The application combines a React frontend, Node.js/Express backend, MongoDB persistence, JWT authentication, document upload, saved chat history, and external travel APIs. Users can create an account, continue previous conversations, upload travel-related files, and receive contextual AI responses supported by weather, location, safety, and document information where available.
 
 ---
 
-## ✨ Features
+## Features
 
-### 🧠 Intelligent Query Understanding
+### User authentication
 
-- Detects user intent across:
-  - Weather
-  - Safety
-  - Accommodation
-  - Attractions
-  - Culture & etiquette
-  - Local cuisines
-- Weighted keyword + contextual scoring system
+- User signup and login
+- JWT-based authentication
+- Protected backend routes
+- Persistent frontend session
+- Automatic session validation on page reload
 
-### 🔧 Multi-Agent Tool Integration
+### AI travel assistant
 
-ATLAS fetches real-time results from:
+- Chat-based travel planning interface
+- Destination-aware responses
+- Context memory inside each conversation
+- Support for travel planning, local guidance, safety context, weather, accommodation guidance, and practical trip advice
+- Response formatting designed for clean user-facing output
 
-- Weather APIs
-- Safety intelligence feeds
-- Local cuisine search
-- Tourist attraction discovery
+### Conversation history
 
-### 🎨 Beautiful Structured Responses
+- Saved conversations per authenticated user
+- Conversation list sidebar
+- Continue previous chats
+- Delete individual conversations
+- Clear all conversations
 
-Every final output includes:
+### Document upload and document-aware chat
 
-- 🕑 **Timestamp**
-- 📊 **Intelligence Analysis**
-- 📑 **Executive Summary**
-- 🎯 **Key Recommendations**
-- 🔧 **Tools Used**
-- Optional sections:
-  - 🌤️ _Weather Outlook_
-  - 🛡️ _Safety Advisory_
-  - 🕌 _Cultural Etiquette_
-  - 📍 _Local Experiences & Attractions_
-  - 🍽️ _Cuisine Highlights & Dining Recommendations_
-  - 🏨 _Accommodation Insights & Stay Recommendations_
+- Upload PDF, DOCX, and TXT files
+- Extract and store document text
+- Split documents into searchable chunks
+- Ask questions about uploaded files
+- Attach documents to conversations
+
+### External API integration
+
+ATLAS can use external services for live or contextual travel information:
+
+- Groq LLM API for AI responses
+- Google Maps / Places APIs for location and place information
+- OpenWeather API for weather data
+- NewsAPI for current safety or destination context
+- Yelp API support for local recommendations
+
+### Deployment support
+
+- Dockerized frontend
+- Dockerized backend
+- MongoDB container using Docker Compose
+- Nginx-based frontend production server
+- Backend health check endpoint
+- Environment-based configuration
 
 ---
 
-## 🧠 System Architecture
+## Tech Stack
 
-```
+### Frontend
 
-📦 user_assistant_app/
+- React 18
+- Vite
+- Tailwind CSS
+- Axios
+- Lucide React
+
+### Backend
+
+- Node.js
+- Express.js
+- MongoDB
+- Mongoose
+- JWT
+- bcryptjs
+- Multer
+- pdf-parse
+- mammoth
+- Helmet
+- Morgan
+- Express Rate Limit
+- Zod
+
+### Infrastructure
+
+- Docker
+- Docker Compose
+- Nginx
+- MongoDB 7
+
+---
+
+## Project Structure
+
+```text
+ATLAS-AI-Travel_Assistant/
+│
 ├── backend/
-│   ├── app.js                    # Express app entry
-│   ├── routes/
-│   │   └── chat.js              # Chat API routes
+│   ├── config/
+│   │   ├── intelligentConfig.js
+│   │   └── rateLimiter.js
+│   │
 │   ├── controllers/
-│   │   └── chatController.js    # Orchestrates intents → tools → LLM → formatter
+│   │   ├── authController.js
+│   │   ├── chatController.js
+│   │   ├── conversationController.js
+│   │   └── documentController.js
+│   │
+│   ├── db/
+│   │   └── mongoose.js
+│   │
+│   ├── middleware/
+│   │   └── auth.js
+│   │
+│   ├── models/
+│   │   ├── User.js
+│   │   ├── Conversation.js
+│   │   └── Document.js
+│   │
+│   ├── routes/
+│   │   ├── auth.js
+│   │   ├── chat.js
+│   │   ├── conversations.js
+│   │   └── documents.js
+│   │
 │   ├── services/
-│   │   ├── responseEngine.js    # Core intelligence engine (formatting, intent analysis)
-│   │   ├── toolService.js       # Weather, safety, cuisine, attractions integrations
+│   │   ├── contextService.js
+│   │   ├── documentService.js
+│   │   ├── responseEngine.js
+│   │   └── toolService.js
+│   │
 │   ├── utils/
-│   │   ├── systemPrompts.js
-│   │   ├── locationUtils.js
 │   │   ├── fallbackResponses.js
-│   └── ...
-└── frontend/
-├── src/
-│   ├── components/          # UI components (chat window, message bubble, response cards)
-│   ├── services/            # API bridge to backend
-│   ├── App.jsx
-│   ├── main.jsx
-
+│   │   ├── locationUtils.js
+│   │   ├── networkTest.js
+│   │   ├── profileUtils.js
+│   │   ├── responseMonitor.js
+│   │   ├── systemPrompts.js
+│   │   └── validation.js
+│   │
+│   ├── app.js
+│   ├── index.js
+│   ├── Dockerfile
+│   └── package.json
+│
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── auth/
+│   │   │   ├── chat/
+│   │   │   ├── documents/
+│   │   │   ├── features/
+│   │   │   ├── sidebar/
+│   │   │   └── ui/
+│   │   │
+│   │   ├── hooks/
+│   │   │   ├── useAuth.js
+│   │   │   └── useChat.js
+│   │   │
+│   │   ├── services/
+│   │   │   └── api.js
+│   │   │
+│   │   ├── utils/
+│   │   │   ├── formatMessage.jsx
+│   │   │   └── toolIcons.js
+│   │   │
+│   │   ├── App.jsx
+│   │   ├── main.jsx
+│   │   └── index.css
+│   │
+│   ├── Dockerfile
+│   ├── nginx.conf
+│   ├── vite.config.js
+│   └── package.json
+│
+├── docker-compose.yml
+├── DOCKER_DEPLOYMENT.md
+├── README.md
+└── .gitignore
 ```
 
 ---
 
-## ⚙️ Tech Stack
+## System Architecture
 
-| Layer     | Technologies                                                         | Purpose                                 |
-| --------- | -------------------------------------------------------------------- | --------------------------------------- |
-| Frontend  | React, Vite, TailwindCSS, shadcn/ui                                  | Clean, modern chat UI                   |
-| Backend   | Node.js, Express, Vector DB                                          | API routing, tool orchestration         |
-| AI Engine | Custom `responseEngine` Agentic flow                                 | Intent detection, structured formatting |
-| LLM       | OpenAI / Gemini / Any compatible model                               | Natural language reasoning              |
-| APIs      | Weather API, Safety API, Attractions API, Cuisine & Accomodation API | Real-time travel intelligence           |
-
----
-
-## 📡 API Usage
-
-### `POST /api/chat`
-
-Send a user query to the assistant.
-
-#### **Request**
-
-```json
-{
-  "message": "I am traveling to Nepal next week"
-}
-```
-
-#### **Sample Response**
-
-```
-🕑 23:19:57
-
-📊 INTELLIGENCE ANALYSIS
-• Weather Analysis
-• Safety Intelligence
-• Local Experiences & Attractions
-
-📑 EXECUTIVE SUMMARY
-Nepal is a beautiful destination with cultural richness and scenic landscapes.
-Light rainfall is expected next week — pack accordingly.
-
-🎯 KEY RECOMMENDATIONS
-• Register with your embassy
-• Avoid large gatherings
-• Explore heritage sites in Kathmandu
-• Check daily weather forecasts
-
-🔧 TOOLS USED
-• Weather API
-• Safety API
+```text
+User
+  │
+  ▼
+React + Vite Frontend
+  │
+  │  Authenticated API requests
+  ▼
+Express Backend API
+  │
+  ├── Auth Controller
+  │     └── Signup, login, JWT validation
+  │
+  ├── Chat Controller
+  │     └── AI response generation and conversation updates
+  │
+  ├── Conversation Controller
+  │     └── Saved chat history
+  │
+  ├── Document Controller
+  │     └── File upload, text extraction, document search
+  │
+  ├── Tool Service
+  │     └── Weather, places, news, location and travel APIs
+  │
+  └── MongoDB
+        ├── Users
+        ├── Conversations
+        └── Documents
 ```
 
 ---
 
-## 🧪 Local Development Guide
+## Backend API Overview
 
-### Backend Setup
+### Authentication
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/api/auth/signup` | Create a new user account |
+| POST | `/api/auth/login` | Log in and receive JWT token |
+| GET | `/api/auth/me` | Get the authenticated user profile |
+
+### Chat
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/api/chat` | Send a message to the AI travel assistant |
+| POST | `/api/reset-context` | Reset conversation context |
+| GET | `/api/context/:userId` | Get user context |
+| GET | `/api/quality-analytics` | Get response quality analytics |
+| GET | `/api/network-test` | Test external API connectivity |
+
+### Conversations
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/api/conversations` | List user conversations |
+| POST | `/api/conversations` | Create a new conversation |
+| GET | `/api/conversations/:id` | Get one conversation |
+| DELETE | `/api/conversations/:id` | Delete one conversation |
+| DELETE | `/api/conversations` | Delete all conversations |
+
+### Documents
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/api/documents` | List uploaded documents |
+| POST | `/api/documents/upload` | Upload PDF, DOCX, or TXT file |
+| DELETE | `/api/documents/:id` | Delete uploaded document |
+
+### Health Check
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/health` | Backend health check |
+
+---
+
+## Environment Variables
+
+Create a `.env` file inside the `backend/` directory.
+
+```env
+NODE_ENV=development
+PORT=4000
+CORS_ORIGIN=http://localhost:5173
+
+# Database
+MONGODB_URI=mongodb://localhost:27017/atlas_travel
+
+# Authentication
+JWT_SECRET=change_this_to_a_long_random_secret
+JWT_EXPIRES_IN=7d
+
+# LLM provider
+GROQ_API_KEY=your_groq_api_key
+GROQ_MODEL=llama-3.3-70b-versatile
+
+# Optional vector database placeholder
+PINECONE_API_KEY=your_pinecone_api_key
+
+# Rate limiting
+RATE_LIMIT_WINDOW_MS=900000
+RATE_LIMIT_MAX_REQUESTS=100
+
+# Travel APIs
+GOOGLE_API_KEY=your_google_maps_or_places_key
+GOOGLE_MAPS_API_KEY=your_google_maps_or_places_key
+GOOGLE_PLACES_API_KEY=your_google_places_key
+OPEN_WEATHER_KEY=your_openweather_key
+NEWS_API_KEY=your_newsapi_key
+YELP_API_KEY=your_yelp_key
+```
+
+Create a `.env` file inside the `frontend/` directory.
+
+```env
+VITE_API_BASE_URL=http://localhost:4000/api
+```
+
+For Docker production builds, the frontend uses `/api` through the Nginx reverse proxy.
+
+---
+
+## Security Notes
+
+Do not commit real `.env` files to GitHub.
+
+The repository should only include safe example files such as:
+
+```text
+backend/.env.example
+frontend/.env.example
+```
+
+Recommended `.gitignore` entries:
+
+```gitignore
+# Environment files
+.env
+**/.env
+*.env.local
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+dist/
+**/dist/
+build/
+**/build/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# OS/editor files
+.DS_Store
+**/.DS_Store
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.swp
+```
+
+For production deployment, use a long random value for `JWT_SECRET`.
+
+Example:
+
+```text
+JWT_SECRET=replace_with_a_secure_random_string_at_least_32_characters_long
+```
+
+---
+
+## Local Development Setup
+
+### 1. Clone the repository
 
 ```bash
-cd user_assistant_app/backend
+git clone https://github.com/your-username/ATLAS-AI-Travel_Assistant.git
+cd ATLAS-AI-Travel_Assistant
+```
+
+### 2. Install backend dependencies
+
+```bash
+cd backend
 npm install
+```
+
+### 3. Install frontend dependencies
+
+```bash
+cd ../frontend
+npm install
+```
+
+### 4. Start MongoDB locally
+
+If MongoDB is installed locally:
+
+```bash
+mongod
+```
+
+Or start MongoDB using Docker:
+
+```bash
+docker run --name atlas-mongo -p 27017:27017 -d mongo:7
+```
+
+### 5. Start the backend
+
+```bash
+cd backend
 npm run dev
 ```
 
-Create a `.env`:
+The backend runs on:
 
-```
-PORT=5000
-GROQ_API_KEY = LLM response
-GOOGLE_API_KEY = Live traffic data
-GOOGLE_PLACES_API_KEY = Live accomodation
-PINECONE_API_KEY = Vector DB
-NEWS_API_KEY = Current situation
-OPEN_WEATHER_KEY = Live weather
-YELP_API_KEY = Live news
+```text
+http://localhost:4000
 ```
 
----
+Health check:
 
-### Frontend Setup
+```text
+http://localhost:4000/health
+```
+
+### 6. Start the frontend
+
+Open a second terminal:
 
 ```bash
-cd user_assistant_app/frontend
-npm install
+cd frontend
 npm run dev
 ```
 
----
+The frontend runs on:
 
-## 🔐 Security Considerations
-
-- API key protection via environment variables
-- Rate limiting
-- XSS-safe output sanitization
-- CORS enforcement
-- Graceful error handling for all endpoints
+```text
+http://localhost:5173
+```
 
 ---
 
-## 🧭 Future Roadmap
+## Running with Docker Compose
 
-- 🗺️ Interactive map view
-- 🧠 Vector semantic search for destinations
-- 🗣️ Multi-language support
-- 📱 Progressive Web App (PWA)
-- 🎒 AI itinerary generator
-- 🎧 Voice-enabled assistant mode
+The project includes a full Docker Compose setup with:
+
+- MongoDB
+- Backend API
+- Frontend served through Nginx
+
+### Start the full application
+
+```bash
+docker compose up --build
+```
+
+Frontend:
+
+```text
+http://localhost:5173
+```
+
+Backend:
+
+```text
+http://localhost:4000
+```
+
+MongoDB:
+
+```text
+mongodb://localhost:27017/atlas_travel
+```
+
+### Stop containers
+
+```bash
+docker compose down
+```
+
+### Stop containers and remove MongoDB data volume
+
+```bash
+docker compose down -v
+```
 
 ---
 
-## 👤 Author
+## Build Checks
 
-**Subin Khatiwada**
-Creator & Lead Engineer — ATLAS Travel Intelligence Assistant
+### Frontend production build
+
+```bash
+cd frontend
+npm run build
+```
+
+### Backend start check
+
+```bash
+cd backend
+npm start
+```
+
+### Backend diagnostic scripts
+
+```bash
+cd backend
+npm run diagnostic
+npm run test-setup
+```
 
 ---
 
-## 🧾 License
+## Document Upload Workflow
 
-**MIT License**
-Feel free to use, modify, or extend with attribution.
+ATLAS supports PDF, DOCX, and TXT upload.
+
+The document workflow is:
+
+```text
+Upload file
+  │
+  ▼
+Validate file type
+  │
+  ▼
+Extract text
+  │
+  ├── PDF through pdf-parse
+  ├── DOCX through mammoth
+  └── TXT through buffer text parsing
+  │
+  ▼
+Split text into chunks
+  │
+  ▼
+Generate keyword metadata
+  │
+  ▼
+Store document and chunks in MongoDB
+  │
+  ▼
+Retrieve relevant chunks during chat
+```
+
+Current document retrieval is keyword and chunk based. A future improvement would be to add embedding-based vector search with a vector database such as Pinecone, Weaviate, Qdrant, or MongoDB Atlas Vector Search.
 
 ---
 
-## ⭐ Support & Contributions
+## Main User Flow
 
-If you find ATLAS useful:
+```text
+1. User creates an account or logs in
+2. Frontend stores the JWT token
+3. User starts a travel chat
+4. Backend creates or updates a conversation
+5. User may upload travel documents
+6. Backend extracts and stores document content
+7. User asks travel questions
+8. Backend combines:
+   - conversation memory
+   - user message
+   - document context
+   - external API data
+   - LLM response generation
+9. Assistant response is saved and shown in the chat UI
+10. User can return later and continue the conversation
+```
 
-- ⭐ Star the repository
-- 📣 Share it
-- 🤝 Contribute improvements
+---
 
-Together, let’s build the smartest AI travel assistant in the world!
+## Production Considerations
+
+Before deploying this application publicly, review the following:
+
+### Required
+
+- Use secure production API keys
+- Use a strong `JWT_SECRET`
+- Store secrets in the hosting provider secret manager
+- Remove all real `.env` files from Git tracking
+- Enable HTTPS
+- Configure production CORS origin
+- Use a managed MongoDB instance
+- Add request and error monitoring
+- Review rate limits for external APIs
+
+### Recommended
+
+- Add automated tests
+- Add refresh token support
+- Move authentication tokens from localStorage to secure httpOnly cookies
+- Add email verification
+- Add password reset flow
+- Add input validation for all request bodies
+- Add file size limits per user
+- Add document storage cleanup
+- Add vector-based document retrieval
+- Add CI/CD pipeline
+- Add deployment-specific logging
+
+---
+
+## Current Limitations
+
+This project is functional as a full-stack portfolio application, but some parts can be improved before production use:
+
+- Document search currently uses keyword matching rather than semantic vector search.
+- JWT tokens are stored in frontend localStorage.
+- There is no refresh-token flow yet.
+- There is no email verification or password reset feature yet.
+- External API results depend on available API keys and provider limits.
+- Test coverage is not yet implemented.
+- Some diagnostic and legacy files may be cleaned or moved into a dedicated scripts folder.
+
+---
+
+## Suggested GitHub Repository Checklist
+
+Before pushing the updated version:
+
+```bash
+# Check tracked environment files
+git ls-files | grep ".env"
+
+# Check ignored files
+git status --ignored
+
+# Remove macOS files if present
+find . -name ".DS_Store" -delete
+
+# Reinstall dependencies if needed
+cd backend && rm -rf node_modules && npm install
+cd ../frontend && rm -rf node_modules && npm install
+
+# Run build check
+cd frontend
+npm run build
+```
+
+Recommended files to commit:
+
+```text
+README.md
+DOCKER_DEPLOYMENT.md
+docker-compose.yml
+backend/
+frontend/
+backend/package-lock.json
+frontend/package-lock.json
+.env.example files
+```
+
+Files that should not be committed:
+
+```text
+.env
+backend/.env
+frontend/.env
+node_modules/
+dist/
+.DS_Store
+```
+
+---
+
+## Future Improvements
+
+Planned improvements that would make ATLAS stronger:
+
+- Embedding-based document retrieval
+- Itinerary builder with editable day-by-day plans
+- Map-based place visualization
+- User profile preferences
+- Saved destinations
+- Trip budget estimation
+- PDF export for itineraries
+- Multi-language support
+- Admin dashboard for analytics
+- Cloud deployment with CI/CD
+- Better automated tests for backend routes and frontend components
+
+---
+
+## Portfolio Value
+
+This project demonstrates practical full-stack development skills:
+
+- React frontend development
+- Node.js and Express API design
+- MongoDB data modeling
+- Authentication and authorization
+- AI API integration
+- External API orchestration
+- File upload and document parsing
+- Docker-based deployment
+- Production-aware project structure
+
+ATLAS is designed as a realistic AI travel assistant application rather than a simple chatbot demo.
+
+---
+
+## License
+
+This project is licensed under the MIT License.
+
+---
+
+## Author
+
+Subin Khatiwada
+
+Master’s student in robotics and machine learning with interests in full-stack development, AI systems, intelligent automation, and practical machine learning applications.
