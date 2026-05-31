@@ -13,14 +13,50 @@ const cleanMessage = (content = "") =>
     .trim();
 
 const renderInlineBold = (text) => {
-  const parts = String(text).split(/(\*\*[^*]+\*\*)/g);
+  const source = String(text);
+  const parts = source.split(/(\[[^\]]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s]+|\*\*[^*]+\*\*)/g);
 
   return parts.map((part, index) => {
+    if (!part) return null;
+
     if (part.startsWith("**") && part.endsWith("**")) {
       return (
         <strong key={index} className="font-semibold text-slate-100">
           {part.slice(2, -2)}
         </strong>
+      );
+    }
+
+    const markdownLink = part.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);
+    if (markdownLink) {
+      return (
+        <a
+          key={index}
+          href={markdownLink[2]}
+          target="_blank"
+          rel="noreferrer"
+          className="font-medium text-sky-300 underline decoration-sky-500/40 underline-offset-4 hover:text-sky-200"
+        >
+          {markdownLink[1]}
+        </a>
+      );
+    }
+
+    if (/^https?:\/\//.test(part)) {
+      const cleanUrl = part.replace(/[),.;:!?]+$/, "");
+      const suffix = part.slice(cleanUrl.length);
+      return (
+        <React.Fragment key={index}>
+          <a
+            href={cleanUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="font-medium text-sky-300 underline decoration-sky-500/40 underline-offset-4 hover:text-sky-200"
+          >
+            source
+          </a>
+          {suffix}
+        </React.Fragment>
       );
     }
 
