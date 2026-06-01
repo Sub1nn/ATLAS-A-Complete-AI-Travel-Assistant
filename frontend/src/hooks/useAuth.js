@@ -74,6 +74,7 @@ export const useAuth = () => {
     return data.user;
   };
 
+
   const logout = () => {
     clearSession();
     setAuthError("");
