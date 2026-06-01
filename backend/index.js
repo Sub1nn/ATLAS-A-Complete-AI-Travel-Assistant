@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import app from "./app.js";
+import { assertProductionEnvironment } from "./utils/security.js";
 import { connectDatabase } from "./db/mongoose.js";
 
 dotenv.config();
@@ -21,6 +22,7 @@ process.on("unhandledRejection", (reason) => {
   console.error("❌ Unhandled Rejection:", reason);
 });
 
+assertProductionEnvironment();
 await connectDatabase();
 
 app.listen(PORT, () => {
