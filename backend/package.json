@@ -7,9 +7,12 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "test-setup": "node test-setup.js",
-    "diagnostic": "node diagnostic.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test-setup": "node scripts/test-setup.js",
+    "diagnostic": "node scripts/diagnostic.js",
+    "test": "node --test scripts/*.test.js",
+    "smoke": "node scripts/smoke-tests.js",
+    "groq:test": "node scripts/groq-test.js",
+    "app-flow:test": "node scripts/app-flow-test.js"
   },
   "keywords": [
     "travel",
