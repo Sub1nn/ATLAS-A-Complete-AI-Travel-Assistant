@@ -58,7 +58,7 @@ function isDocumentFocusedRequest(message = "", documentIds = []) {
   return documentTerms.some((term) => text.includes(term)) || text.length < 80;
 }
 
-function buildTravelSystemPrompt(resolved, docContext = "", toolResults = []) {
+function buildTravelSystemPrompt(resolved, docContext = "", toolResults = [], userPreferences = {}) {
   const contextLine = contextService.contextLabel(resolved.memory);
   const hasToolResults = Array.isArray(toolResults) && toolResults.length > 0;
   const qualityLines = hasToolResults
@@ -77,6 +77,14 @@ Write like a careful human travel advisor: clear, grounded, practical and calm. 
 
 Current conversation context: ${contextLine || "no established context yet"}.
 Detected intent: ${resolved.intent.type}.
+User profile preferences: ${JSON.stringify({
+  travelStyle: userPreferences.travelStyle || "balanced",
+  budgetLevel: userPreferences.budgetLevel || "balanced",
+  preferredLanguage: userPreferences.preferredLanguage || "English",
+  dietaryNeeds: userPreferences.dietaryNeeds || "",
+  interests: userPreferences.interests || [],
+  familyMode: Boolean(userPreferences.familyMode),
+}).slice(0, 700)}.
 
 Response rules:
 - Start with the most useful answer, not a generic introduction.
@@ -89,6 +97,7 @@ Response rules:
 - Use 3 to 5 clean sections with short headings. Use bullets only when they improve scanning. Avoid brochure-like introductions such as "rich history and culture" unless it adds useful guidance. End with one useful follow-up only if needed.
 - If the user asks for hourly weather and verified hourly data is present, answer with the returned hourly forecast. If verified hourly data is not present, clearly say that live hourly data is unavailable instead of guessing.
 - For safety/legal/health decisions, suggest verifying official sources.
+- If preferredLanguage is not English, answer in that language unless the user wrote in English and context suggests English is expected.
 
 Data quality for this response:
 ${qualityLines}
@@ -785,7 +794,7 @@ async function getOrCreateConversation(req, message) {
   });
 }
 
-async function buildFinalAnswer(message, conversation, resolved, toolResults, retrievedDocs, documentFocused) {
+async function buildFinalAnswer(message, conversation, resolved, toolResults, retrievedDocs, documentFocused, userPreferences = {}) {
   const docContext = documentService.buildDocumentContext(retrievedDocs, documentFocused ? 6500 : 3500);
 
   if (documentFocused) {
@@ -802,7 +811,7 @@ async function buildFinalAnswer(message, conversation, resolved, toolResults, re
     return sanitize(finalMessage?.content || "");
   }
 
-  const system = buildTravelSystemPrompt(resolved, docContext, toolResults);
+  const system = buildTravelSystemPrompt(resolved, docContext, toolResults, userPreferences);
   const recent = conversation.messages
     .slice(-6)
     .map((m) => ({ role: m.role, content: String(m.content).slice(0, 900) }));
@@ -867,7 +876,7 @@ export const chatController = {
         answer = fallbackAnswer(message, resolved, retrievedDocs, documentFocused);
       } else {
         try {
-          answer = await buildFinalAnswer(message, conversation, resolved, toolResults, retrievedDocs, documentFocused);
+          answer = await buildFinalAnswer(message, conversation, resolved, toolResults, retrievedDocs, documentFocused, req.user.preferences || {});
         } catch (error) {
           console.warn("⚠️ Final response generation fallback:", error.message);
           answer = fallbackAnswer(message, resolved, retrievedDocs, documentFocused);
