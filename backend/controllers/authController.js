@@ -1,16 +1,22 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { getJwtSecret } from "../utils/security.js";
 import { User } from "../models/User.js";
 import { authLoginSchema, authSignupSchema, validate } from "../utils/validation.js";
 
 const signToken = (user) => {
-  const secret = process.env.JWT_SECRET || "dev_secret_change_me";
+  const secret = getJwtSecret();
   return jwt.sign({ userId: user._id.toString(), email: user.email }, secret, {
     expiresIn: process.env.JWT_EXPIRES_IN || "7d",
   });
 };
 
-const safeUser = (user) => ({ id: user._id.toString(), name: user.name, email: user.email });
+const safeUser = (user) => ({
+  id: user._id.toString(),
+  name: user.name,
+  email: user.email,
+  preferences: user.preferences || {},
+});
 
 export const authController = {
   async signup(req, res) {
