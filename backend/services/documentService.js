@@ -1,7 +1,7 @@
 import { Document } from "../models/Document.js";
 
 const STOP_WORDS = new Set(
-  "the a an and or but of to in on for with from by at as is are was were be been this that these those it its into about can should could would i you me my your we our they them please summarize summary explain pdf document file uploaded attached".split(
+  "the a an and or but of to in on for with from by at as is are was were be been this that these those it its into about can should could would i you me my your we our they them please summarize summary explain pdf document file uploaded attached according what where when how why".split(
     " "
   )
 );
@@ -20,10 +20,56 @@ const GENERIC_DOCUMENT_QUERIES = [
   "can you please summarize this",
 ];
 
+const EMBEDDING_DIMS = 192;
+
+function normalizeText(text = "") {
+  return String(text || "")
+    .normalize("NFKC")
+    .replace(/[^\p{L}\p{N}\s.-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function keywords(text = "") {
-  return [...new Set(String(text).toLowerCase().match(/[a-z0-9]{3,}/g) || [])]
+  return [...new Set(normalizeText(text).toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || [])]
     .filter((w) => !STOP_WORDS.has(w))
-    .slice(0, 100);
+    .slice(0, 180);
+}
+
+function hashToken(token = "") {
+  let h = 2166136261;
+  for (let i = 0; i < token.length; i += 1) {
+    h ^= token.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return Math.abs(h >>> 0);
+}
+
+function embeddingFor(text = "") {
+  const vector = new Array(EMBEDDING_DIMS).fill(0);
+  const words = keywords(text);
+
+  for (const word of words) {
+    const idx = hashToken(word) % EMBEDDING_DIMS;
+    vector[idx] += 1;
+
+    // Add light character n-gram features so document retrieval can match similar phrases,
+    // names and spelling variants better than pure exact keyword matching.
+    for (let i = 0; i < Math.max(0, word.length - 3); i += 1) {
+      const gram = word.slice(i, i + 4);
+      vector[hashToken(`g:${gram}`) % EMBEDDING_DIMS] += 0.25;
+    }
+  }
+
+  const norm = Math.sqrt(vector.reduce((sum, v) => sum + v * v, 0)) || 1;
+  return vector.map((v) => Number((v / norm).toFixed(6)));
+}
+
+function cosine(a = [], b = []) {
+  if (!a.length || !b.length) return 0;
+  let dot = 0;
+  for (let i = 0; i < Math.min(a.length, b.length); i += 1) dot += Number(a[i] || 0) * Number(b[i] || 0);
+  return dot;
 }
 
 function isGenericDocumentQuery(query = "") {
@@ -35,12 +81,13 @@ function isGenericDocumentQuery(query = "") {
 }
 
 function chunkText(text = "", maxChars = 1200) {
-  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  const clean = normalizeText(text);
   const chunks = [];
 
   for (let i = 0; i < clean.length; i += maxChars) {
-    const slice = clean.slice(i, i + maxChars);
-    chunks.push({ index: chunks.length, text: slice, keywords: keywords(slice) });
+    const slice = clean.slice(i, i + maxChars).trim();
+    if (!slice) continue;
+    chunks.push({ index: chunks.length, text: slice, keywords: keywords(slice), embedding: embeddingFor(slice) });
   }
 
   return chunks.slice(0, 300);
@@ -91,18 +138,21 @@ async function searchUserDocuments(userId, query = "", documentIds = []) {
         score: 1 / (order + 1),
         text: chunk.text,
         chunkIndex: chunk.index,
-        source: genericQuery ? "document_overview" : "keyword_match",
+        source: "document_overview",
       }));
-    }).slice(0, 10);
+    }).slice(0, 12);
   }
 
   const q = new Set(keywords(query));
+  const qEmbedding = embeddingFor(query);
   const scored = [];
 
   for (const doc of docs) {
     for (const chunk of doc.chunks || []) {
-      const score = (chunk.keywords || []).reduce((sum, word) => sum + (q.has(word) ? 1 : 0), 0);
-      if (score > 0) scored.push({ score, doc, chunk });
+      const keywordScore = (chunk.keywords || []).reduce((sum, word) => sum + (q.has(word) ? 1 : 0), 0);
+      const semanticScore = cosine(qEmbedding, chunk.embedding || embeddingFor(chunk.text || ""));
+      const score = keywordScore * 1.5 + semanticScore * 6;
+      if (score > 0.25) scored.push({ score, doc, chunk, semanticScore, keywordScore });
     }
   }
 
@@ -119,14 +169,14 @@ async function searchUserDocuments(userId, query = "", documentIds = []) {
 
   return scored
     .sort((a, b) => b.score - a.score)
-    .slice(0, 8)
-    .map(({ doc, chunk, score }) => ({
+    .slice(0, 10)
+    .map(({ doc, chunk, score, semanticScore, keywordScore }) => ({
       documentId: doc._id.toString(),
       name: doc.originalName,
-      score,
+      score: Number(score.toFixed(3)),
       text: chunk.text,
       chunkIndex: chunk.index,
-      source: "keyword_match",
+      source: semanticScore > keywordScore ? "embedding_match" : "hybrid_match",
     }));
 }
 
@@ -143,7 +193,7 @@ function buildDocumentContext(matches = [], maxChars = 5000) {
   for (const doc of byDoc.values()) {
     const body = doc.chunks
       .slice(0, 8)
-      .map((chunk) => `[chunk ${chunk.chunkIndex}] ${String(chunk.text || "").trim()}`)
+      .map((chunk) => `[chunk ${chunk.chunkIndex}, ${chunk.source || "match"}] ${String(chunk.text || "").trim()}`)
       .join("\n\n");
     sections.push(`Document: ${doc.name}\n${body}`);
   }
@@ -155,6 +205,7 @@ export const documentService = {
   extractText,
   chunkText,
   keywords,
+  embeddingFor,
   isGenericDocumentQuery,
   searchUserDocuments,
   buildDocumentContext,
