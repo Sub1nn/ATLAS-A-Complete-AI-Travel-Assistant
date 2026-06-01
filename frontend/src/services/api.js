@@ -100,6 +100,7 @@ export const documentAPI = {
   },
 };
 
+
 export const chatAPI = {
   async sendMessage({ message, conversationId, documentIds = [] }) {
     const { data } = await apiClient.post("/chat", {
