@@ -5,6 +5,7 @@ const ChunkSchema = new mongoose.Schema(
     index: Number,
     text: String,
     keywords: [String],
+    embedding: [Number],
   },
   { _id: false }
 );
