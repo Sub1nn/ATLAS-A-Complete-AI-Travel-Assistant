@@ -1,4 +1,4 @@
-// app.js - Express Application Setup
+// Express Application Setup
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -10,6 +10,7 @@ import documentRoutes from "./routes/documents.js";
 import { rateLimiter } from "./config/rateLimiter.js";
 
 const app = express();
+app.set("trust proxy", 1); // trust proxy
 
 // Security middleware - Helmet
 app.use(
@@ -24,17 +25,34 @@ app.use(
       },
     },
     crossOriginEmbedderPolicy: false,
-  })
+  }),
 );
 
 // CORS configuration
+const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:5173")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
 app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error("Not allowed by CORS"));
+    },
+    credentials: true,
+    optionsSuccessStatus: 200,
+  }),
+);
+/* app.use(
   cors({
     origin: process.env.CORS_ORIGIN || "http://localhost:5173",
     credentials: true,
     optionsSuccessStatus: 200,
   })
-);
+); */
 
 // Logging middleware
 if (process.env.NODE_ENV === "production") {
@@ -89,15 +107,19 @@ app.use((err, req, res, next) => {
   console.error("❌ Global error:", err);
 
   const isDevelopment = process.env.NODE_ENV !== "production";
-  const isClientError = err.name === "MulterError" || /Only PDF, DOCX and TXT|file too large|Unexpected field/i.test(err.message || "");
+  const isClientError =
+    err.name === "MulterError" ||
+    /Only PDF, DOCX and TXT|file too large|Unexpected field/i.test(
+      err.message || "",
+    );
 
   res.status(isClientError ? 400 : err.status || 500).json({
     error: isClientError ? "Invalid request" : "Internal server error",
     message: isClientError
       ? err.message
       : isDevelopment
-      ? err.message
-      : "Something went wrong",
+        ? err.message
+        : "Something went wrong",
     stack: !isClientError && isDevelopment ? err.stack : undefined,
   });
 });
