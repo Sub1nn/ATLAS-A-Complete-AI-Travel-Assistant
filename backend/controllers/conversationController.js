@@ -1,9 +1,10 @@
 import { Conversation } from "../models/Conversation.js";
+import { Message } from "../models/Message.js";
 
 export const conversationController = {
   async list(req, res) {
     const conversations = await Conversation.find({ userId: req.user._id })
-      .select("title updatedAt createdAt memory messages")
+      .select("title updatedAt createdAt memory lastMessagePreview messageCount documentIds")
       .sort({ updatedAt: -1 })
       .limit(50)
       .lean();
@@ -14,8 +15,9 @@ export const conversationController = {
         title: c.title,
         updatedAt: c.updatedAt,
         createdAt: c.createdAt,
-        preview: c.messages?.at(-1)?.content?.slice(0, 140) || "",
-        messageCount: c.messages?.length || 0,
+        preview: c.lastMessagePreview || "",
+        messageCount: c.messageCount || 0,
+        documentCount: c.documentIds?.length || 0,
       })),
     });
   },
@@ -24,8 +26,9 @@ export const conversationController = {
     const conversation = await Conversation.create({
       userId: req.user._id,
       title: req.body?.title || "New travel chat",
-      messages: [],
       memory: { locations: [], interests: [], travelDates: [] },
+      lastMessagePreview: "",
+      messageCount: 0,
     });
     res.status(201).json({ conversation: { id: conversation._id.toString(), title: conversation.title } });
   },
@@ -33,13 +36,23 @@ export const conversationController = {
   async get(req, res) {
     const conversation = await Conversation.findOne({ _id: req.params.id, userId: req.user._id }).lean();
     if (!conversation) return res.status(404).json({ message: "Conversation not found" });
+
+    const storedMessages = await Message.find({ conversationId: conversation._id, userId: req.user._id })
+      .sort({ createdAt: 1 })
+      .limit(300)
+      .lean();
+
+    const legacyMessages = conversation.messages || [];
+    const messages = storedMessages.length ? storedMessages : legacyMessages;
+
     res.json({
       conversation: {
         id: conversation._id.toString(),
         title: conversation.title,
         memory: conversation.memory,
+        summary: conversation.summary || "",
         documentIds: conversation.documentIds?.map(String) || [],
-        messages: (conversation.messages || []).map((m) => ({
+        messages: messages.map((m) => ({
           id: m._id?.toString(),
           type: m.role === "user" ? "user" : "assistant",
           role: m.role,
@@ -52,12 +65,22 @@ export const conversationController = {
   },
 
   async clearAll(req, res) {
-    const result = await Conversation.deleteMany({ userId: req.user._id });
-    res.json({ ok: true, deletedCount: result.deletedCount || 0 });
+    const conversations = await Conversation.find({ userId: req.user._id }).select("_id").lean();
+    const ids = conversations.map((c) => c._id);
+    const [messagesResult, conversationsResult] = await Promise.all([
+      Message.deleteMany({ userId: req.user._id, conversationId: { $in: ids } }),
+      Conversation.deleteMany({ userId: req.user._id }),
+    ]);
+    res.json({ ok: true, deletedCount: conversationsResult.deletedCount || 0, deletedMessages: messagesResult.deletedCount || 0 });
   },
 
   async remove(req, res) {
-    await Conversation.deleteOne({ _id: req.params.id, userId: req.user._id });
+    const conversation = await Conversation.findOne({ _id: req.params.id, userId: req.user._id }).select("_id").lean();
+    if (!conversation) return res.status(404).json({ message: "Conversation not found" });
+    await Promise.all([
+      Message.deleteMany({ conversationId: conversation._id, userId: req.user._id }),
+      Conversation.deleteOne({ _id: conversation._id, userId: req.user._id }),
+    ]);
     res.json({ ok: true });
   },
 };
