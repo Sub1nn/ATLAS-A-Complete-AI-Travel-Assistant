@@ -380,17 +380,17 @@ export const responseEngine = {
       // false positives for normal travel questions, for example:
       // "what are your concerns on travelling to Nepal this weekend?"
       const identityPatterns = [
-        /^who\s+are\s+you/i,
-        /^what\s+are\s+you/i,
-        /^what\s+is\s+atlas/i,
-        /^tell\s+me\s+about\s+atlas/i,
-        /^tell\s+me\s+about\s+yourself/i,
-        /^who\s+(created|made|built|developed)\s+you/i,
-        /(who\s+is\s+)?your\s+(creator|developer)/i,
-        /creator\s+name/i,
-        /name\s+of\s+your\s+creator/i,
-        /created\s+by\s+who/i,
-        /made\s+by\s+whom/i,
+        /^who\s+are\s+you/i,
+        /^what\s+are\s+you/i,
+        /^what\s+is\s+atlas/i,
+        /^tell\s+me\s+about\s+atlas/i,
+        /^tell\s+me\s+about\s+yourself/i,
+        /^who\s+(created|made|built|developed)\s+you/i,
+        /(who\s+is\s+)?your\s+(creator|developer)/i,
+        /creator\s+name/i,
+        /name\s+of\s+your\s+creator/i,
+        /created\s+by\s+who/i,
+        /made\s+by\s+whom/i,
       ];
 
       const isDefinitelyIdentityQuestion = identityPatterns.some((pattern) =>
