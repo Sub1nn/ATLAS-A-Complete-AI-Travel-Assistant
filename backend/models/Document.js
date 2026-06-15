@@ -7,7 +7,7 @@ const ChunkSchema = new mongoose.Schema(
     keywords: [String],
     embedding: [Number],
   },
-  { _id: false }
+  { _id: false },
 );
 
 const DocumentSchema = new mongoose.Schema(
@@ -20,7 +20,10 @@ const DocumentSchema = new mongoose.Schema(
     text: String,
     chunks: [ChunkSchema],
   },
-  { timestamps: true }
+  { timestamps: true },
 );
+
+DocumentSchema.index({ userId: 1, createdAt: -1 });
+DocumentSchema.index({ userId: 1, originalName: 1 });
 
 export const Document = mongoose.models.Document || mongoose.model("Document", DocumentSchema);
