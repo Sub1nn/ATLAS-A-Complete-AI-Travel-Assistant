@@ -123,3 +123,25 @@ export const itinerarySchema = z.object({
   }).optional(),
   days: z.array(itineraryDaySchema).max(60).optional().default([]),
 });
+
+
+export const emailOnlySchema = z.object({
+  email: z
+    .string({ required_error: "Email is required" })
+    .transform((value) => cleanText(value, 160).toLowerCase())
+    .pipe(z.string().email("Enter a valid email address")),
+});
+
+export const tokenSchema = z.object({
+  token: z.string({ required_error: "Token is required" }).transform((value) => cleanText(value, 256)).refine((value) => value.length >= 32, "Invalid token"),
+});
+
+export const resetPasswordSchema = z.object({
+  token: z.string({ required_error: "Token is required" }).transform((value) => cleanText(value, 256)).refine((value) => value.length >= 32, "Invalid token"),
+  password: z
+    .string({ required_error: "Password is required" })
+    .min(10, "Password must be at least 10 characters")
+    .max(128, "Password is too long")
+    .regex(/[A-Za-z]/, "Password must include a letter")
+    .regex(/[0-9]/, "Password must include a number"),
+});
