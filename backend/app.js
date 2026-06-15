@@ -8,6 +8,7 @@ import authRoutes from "./routes/auth.js";
 import conversationRoutes from "./routes/conversations.js";
 import documentRoutes from "./routes/documents.js";
 import { rateLimiter } from "./config/rateLimiter.js";
+import { databaseReady } from "./db/mongoose.js";
 
 const app = express();
 app.set("trust proxy", 1); // trust proxy
@@ -62,8 +63,8 @@ if (process.env.NODE_ENV === "production") {
 }
 
 // Body parsing middleware
-app.use(express.json({ limit: "15mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "2mb" }));
+app.use(express.urlencoded({ extended: true, limit: process.env.URLENCODED_BODY_LIMIT || "1mb" }));
 
 // Request timing middleware
 app.use((req, res, next) => {
@@ -91,6 +92,7 @@ app.get("/health", (req, res) => {
     environment: process.env.NODE_ENV || "development",
     version: "1.0.0",
     uptime: process.uptime(),
+    database: databaseReady() ? "connected" : "unavailable",
   });
 });
 
@@ -104,7 +106,11 @@ app.use("*", (req, res) => {
 
 // Global error handler
 app.use((err, req, res, next) => {
-  console.error("❌ Global error:", err);
+  if (process.env.NODE_ENV === "production") {
+    console.error("❌ Global error:", err.message);
+  } else {
+    console.error("❌ Global error:", err);
+  }
 
   const isDevelopment = process.env.NODE_ENV !== "production";
   const isClientError =
