@@ -3,26 +3,17 @@ import { chatController } from "../controllers/chatController.js";
 import { chatRateLimiter } from "../config/rateLimiter.js";
 import { networkTest } from "../utils/networkTest.js";
 import { requireAuth } from "../middleware/auth.js";
+import { asyncHandler, validateObjectIdParam } from "../utils/asyncHandler.js";
 
 const router = express.Router();
-router.post("/chat", requireAuth, chatRateLimiter, chatController.handleChat);
-router.post("/reset-context", requireAuth, chatController.resetContext);
-router.get("/context/:userId", requireAuth, chatController.getContext);
-router.get(
-  "/quality-analytics",
-  requireAuth,
-  chatController.getQualityAnalytics,
-);
+router.post("/chat", requireAuth, chatRateLimiter, asyncHandler(chatController.handleChat));
+router.post("/reset-context", requireAuth, asyncHandler(chatController.resetContext));
+router.get("/context/:conversationId", requireAuth, validateObjectIdParam("conversationId"), asyncHandler(chatController.getContext));
+router.get("/quality-analytics", requireAuth, asyncHandler(chatController.getQualityAnalytics));
 if (process.env.NODE_ENV !== "production") {
-  router.get("/network-test", async (req, res) => {
-    try {
-      const results = await networkTest.testAllAPIs();
-      res.json({ timestamp: new Date().toISOString(), connectivity: results });
-    } catch (error) {
-      res
-        .status(500)
-        .json({ error: "Network test failed", message: error.message });
-    }
-  });
+  router.get("/network-test", asyncHandler(async (req, res) => {
+    const results = await networkTest.testAllAPIs();
+    res.json({ timestamp: new Date().toISOString(), connectivity: results });
+  }));
 }
 export default router;
