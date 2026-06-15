@@ -11,17 +11,26 @@ const PreferencesSchema = new mongoose.Schema(
     accessibilityNeeds: { type: String, trim: true, maxlength: 160, default: "" },
     familyMode: { type: Boolean, default: false },
   },
-  { _id: false }
+  { _id: false },
 );
 
 const UserSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true, maxlength: 80 },
     email: { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
-    passwordHash: { type: String, required: true },
+    passwordHash: { type: String, required: true, select: false },
+    emailVerified: { type: Boolean, default: false, index: true },
+    emailVerifiedAt: Date,
+    emailVerificationTokenHash: { type: String, select: false, index: true },
+    emailVerificationExpires: { type: Date, select: false },
+    passwordResetTokenHash: { type: String, select: false, index: true },
+    passwordResetExpires: { type: Date, select: false },
     preferences: { type: PreferencesSchema, default: () => ({}) },
+    lastLoginAt: Date,
   },
-  { timestamps: true }
+  { timestamps: true },
 );
+
+UserSchema.index({ createdAt: -1 });
 
 export const User = mongoose.models.User || mongoose.model("User", UserSchema);
