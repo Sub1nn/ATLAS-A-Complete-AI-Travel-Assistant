@@ -1,15 +1,27 @@
 import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.resolve(__dirname, ".env") });
+
 import app from "./app.js";
 import { assertProductionEnvironment } from "./utils/security.js";
 import { connectDatabase } from "./db/mongoose.js";
 
-dotenv.config();
-
 const PORT = process.env.PORT || 4000;
+let server;
 
-const gracefulShutdown = (signal) => {
+const gracefulShutdown = async (signal) => {
   console.log(`\n🛑 Received ${signal}. Shutting down gracefully...`);
-  process.exit(0);
+  if (server) {
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(1), 10000).unref();
+  } else {
+    process.exit(0);
+  }
 };
 
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
@@ -20,16 +32,16 @@ process.on("uncaughtException", (error) => {
 });
 process.on("unhandledRejection", (reason) => {
   console.error("❌ Unhandled Rejection:", reason);
+  if (process.env.NODE_ENV === "production") process.exit(1);
 });
 
 assertProductionEnvironment();
 await connectDatabase();
 
-app.listen(PORT, () => {
+server = app.listen(PORT, () => {
   console.log(`🚀 ATLAS Travel Assistant running on http://localhost:${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || "development"}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
-  console.log("🛡️  Production security enabled");
 });
 
 export default app;
