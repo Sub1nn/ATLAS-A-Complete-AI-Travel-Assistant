@@ -8,14 +8,18 @@ const MessageSchema = new mongoose.Schema(
     metadata: { type: Object, default: {} },
     createdAt: { type: Date, default: Date.now },
   },
-  { _id: true }
+  { _id: true },
 );
 
 const ConversationSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
     title: { type: String, default: "New travel chat", maxlength: 120 },
-    messages: [MessageSchema],
+    // Legacy field retained for backward compatibility with older local data. New messages are stored in Message collection.
+    messages: { type: [MessageSchema], default: [] },
+    summary: { type: String, default: "", maxlength: 4000 },
+    lastMessagePreview: { type: String, default: "", maxlength: 180 },
+    messageCount: { type: Number, default: 0 },
     memory: {
       destination: String,
       locations: [String],
@@ -29,7 +33,10 @@ const ConversationSchema = new mongoose.Schema(
     },
     documentIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Document" }],
   },
-  { timestamps: true }
+  { timestamps: true },
 );
+
+ConversationSchema.index({ userId: 1, updatedAt: -1 });
+ConversationSchema.index({ userId: 1, createdAt: -1 });
 
 export const Conversation = mongoose.models.Conversation || mongoose.model("Conversation", ConversationSchema);
