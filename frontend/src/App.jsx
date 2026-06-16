@@ -8,10 +8,16 @@ function App() {
     user,
     login,
     signup,
+    verifyEmail,
+    forgotPassword,
+    resetPassword,
+    resendVerification,
     logout,
     isCheckingAuth,
     authError,
+    authNotice,
     clearAuthError,
+    clearAuthNotice,
   } = useAuth();
 
   if (isCheckingAuth) {
@@ -25,18 +31,33 @@ function App() {
     );
   }
 
-  if (!user) {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("token");
+  const authMode = window.location.pathname.includes("reset-password")
+    ? "reset"
+    : window.location.pathname.includes("verify-email")
+      ? "verify"
+      : null;
+
+  if (!user || authMode) {
     return (
       <AuthPage
         onLogin={login}
         onSignup={signup}
+        onVerifyEmail={verifyEmail}
+        onForgotPassword={forgotPassword}
+        onResetPassword={resetPassword}
+        initialMode={authMode || "login"}
+        actionToken={token}
         initialError={authError}
+        initialNotice={authNotice}
         onClearInitialError={clearAuthError}
+        onClearInitialNotice={clearAuthNotice}
       />
     );
   }
 
-  return <TravelAssistant user={user} onLogout={logout} />;
+  return <TravelAssistant user={user} onLogout={logout} onResendVerification={resendVerification} />;
 }
 
 export default App;
