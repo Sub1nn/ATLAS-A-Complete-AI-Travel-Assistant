@@ -23,6 +23,7 @@ export const useAuth = () => {
   const [user, setUser] = useState(stored.user);
   const [isCheckingAuth, setIsCheckingAuth] = useState(Boolean(stored.token));
   const [authError, setAuthError] = useState("");
+  const [authNotice, setAuthNotice] = useState("");
 
   const clearSession = useCallback(() => {
     authAPI.logout();
@@ -62,31 +63,60 @@ export const useAuth = () => {
 
   const login = async (payload) => {
     setAuthError("");
+    setAuthNotice("");
     const data = await authAPI.login(payload);
     setUser(data.user);
+    if (data.emailVerificationRequired) {
+      setAuthNotice("Please verify your email when possible. Some production features may require verification.");
+    }
     return data.user;
   };
 
   const signup = async (payload) => {
     setAuthError("");
+    setAuthNotice("");
     const data = await authAPI.signup(payload);
     setUser(data.user);
+    setAuthNotice(data.message || "Account created. Please verify your email.");
     return data.user;
   };
 
+  const verifyEmail = async (token) => {
+    setAuthError("");
+    const data = await authAPI.verifyEmail(token);
+    if (data.user) setUser(data.user);
+    setAuthNotice(data.message || "Email verified successfully.");
+    return data;
+  };
+
+  const resendVerification = async () => {
+    const data = await authAPI.resendVerification();
+    setAuthNotice(data.message || "Verification email sent.");
+    return data;
+  };
+
+  const forgotPassword = async (email) => authAPI.forgotPassword(email);
+  const resetPassword = async (payload) => authAPI.resetPassword(payload);
 
   const logout = () => {
     clearSession();
     setAuthError("");
+    setAuthNotice("");
   };
 
   return {
     user,
     login,
     signup,
+    verifyEmail,
+    resendVerification,
+    forgotPassword,
+    resetPassword,
     logout,
     isCheckingAuth,
     authError,
+    authNotice,
     clearAuthError: () => setAuthError(""),
+    clearAuthNotice: () => setAuthNotice(""),
   };
 };
