@@ -10,6 +10,8 @@ const HistorySidebar = ({
   onDeleteConversation,
   onClearHistory,
   onLogout,
+  isMobileOpen = false,
+  onClose,
 }) => {
   const [confirmClear, setConfirmClear] = useState(false);
 
@@ -25,11 +27,21 @@ const HistorySidebar = ({
   };
 
   return (
-    <aside className="hidden h-full w-80 shrink-0 border-r border-slate-800 bg-slate-950/95 lg:flex lg:flex-col">
+    <>
+      {isMobileOpen && (
+        <button
+          type="button"
+          aria-label="Close history sidebar"
+          onClick={onClose}
+          className="fixed inset-0 z-40 bg-black/60 lg:hidden"
+        />
+      )}
+      <aside className={`${isMobileOpen ? "fixed inset-y-0 left-0 z-50 flex" : "hidden"} h-full w-80 shrink-0 flex-col border-r border-slate-800 bg-slate-950/95 lg:relative lg:inset-auto lg:z-auto lg:flex`}>
+
       <div className="border-b border-slate-800 p-4">
         <button
           type="button"
-          onClick={onNewChat}
+          onClick={() => { onNewChat?.(); onClose?.(); }}
           className="flex w-full items-center justify-center gap-2 rounded-2xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-sky-400"
         >
           <MessageSquarePlus className="h-4 w-4" />
@@ -86,7 +98,7 @@ const HistorySidebar = ({
             >
               <button
                 type="button"
-                onClick={() => onLoadConversation(item.id)}
+                onClick={() => { onLoadConversation(item.id); onClose?.(); }}
                 className="block w-full text-left"
               >
                 <p className="line-clamp-1 text-sm font-medium text-slate-100">
@@ -125,6 +137,7 @@ const HistorySidebar = ({
         </button>
       </div>
     </aside>
+    </>
   );
 };
 
