@@ -52,6 +52,30 @@ export const authAPI = {
     localStorage.setItem("atlas_user", JSON.stringify(data.user));
     return data;
   },
+
+  async verifyEmail(token) {
+    const { data } = await apiClient.get(`/auth/verify-email?token=${encodeURIComponent(token)}`);
+    if (data.token) localStorage.setItem("atlas_token", data.token);
+    if (data.user) localStorage.setItem("atlas_user", JSON.stringify(data.user));
+    return data;
+  },
+  async resendVerification() {
+    const { data } = await apiClient.post("/auth/resend-verification");
+    return data;
+  },
+  async forgotPassword(email) {
+    const { data } = await apiClient.post("/auth/forgot-password", { email });
+    return data;
+  },
+  async resetPassword({ token, password }) {
+    const { data } = await apiClient.post("/auth/reset-password", { token, password });
+    return data;
+  },
+  async updatePreferences(payload) {
+    const { data } = await apiClient.patch("/auth/preferences", payload);
+    if (data.user) localStorage.setItem("atlas_user", JSON.stringify(data.user));
+    return data;
+  },
   logout() {
     clearStoredSession();
   },
