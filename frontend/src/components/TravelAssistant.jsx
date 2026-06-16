@@ -7,6 +7,7 @@ import {
   Hotel,
   Landmark,
   Map,
+  Menu,
   ShieldCheck,
   Sparkles,
   Utensils,
@@ -50,7 +51,7 @@ const features = [
   },
 ];
 
-const TravelAssistant = ({ user, onLogout }) => {
+const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
   const {
     messages,
     inputMessage,
@@ -72,6 +73,7 @@ const TravelAssistant = ({ user, onLogout }) => {
   } = useChat();
 
   const [showScrollButton, setShowScrollButton] = useState(false);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const messagesContainerRef = useRef(null);
   const messagesEndRef = useRef(null);
   const landingContainerRef = useRef(null);
@@ -158,11 +160,22 @@ const TravelAssistant = ({ user, onLogout }) => {
           onDeleteConversation={deleteConversation}
           onClearHistory={clearHistory}
           onLogout={onLogout}
+          isMobileOpen={isHistoryOpen}
+          onClose={() => setIsHistoryOpen(false)}
         />
 
         <div className="flex min-w-0 flex-1 flex-col">
           <header className="shrink-0 border-b border-slate-800 bg-slate-950/95">
             <div className="mx-auto flex h-20 w-full max-w-7xl items-center justify-between px-5 sm:px-6 lg:px-8">
+              <button
+                type="button"
+                onClick={() => setIsHistoryOpen(true)}
+                className="mr-2 rounded-2xl border border-slate-700 bg-slate-900 p-3 text-slate-300 transition hover:border-sky-400/40 hover:text-sky-200 lg:hidden"
+                aria-label="Open chat history"
+              >
+                <Menu className="h-5 w-5" />
+              </button>
+
               <button
                 type="button"
                 onClick={goHome}
@@ -208,6 +221,21 @@ const TravelAssistant = ({ user, onLogout }) => {
               </div>
             </div>
           </header>
+
+          {!user?.emailVerified && (
+            <div className="border-b border-amber-400/20 bg-amber-500/10 px-5 py-3 text-sm text-amber-100 sm:px-6 lg:px-8">
+              <div className="mx-auto flex max-w-7xl flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <span>Please verify your email to keep your ATLAS account production-ready.</span>
+                <button
+                  type="button"
+                  onClick={onResendVerification}
+                  className="w-fit rounded-full border border-amber-300/30 px-3 py-1 text-xs font-semibold text-amber-100 transition hover:bg-amber-300/10"
+                >
+                  Resend verification link
+                </button>
+              </div>
+            </div>
+          )}
 
           <main className="relative min-h-0 flex-1 overflow-hidden">
             {!hasStartedChat ? (
