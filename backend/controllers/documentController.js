@@ -1,6 +1,8 @@
 import multer from "multer";
 import { Document } from "../models/Document.js";
 import { documentService } from "../services/documentService.js";
+import { vectorStore } from "../services/vectorStore.js";
+import { Conversation } from "../models/Conversation.js";
 
 const MAX_FILE_SIZE = Number(process.env.MAX_UPLOAD_BYTES || 12 * 1024 * 1024);
 const MAX_USER_DOCUMENTS = Number(process.env.MAX_USER_DOCUMENTS || 100);
@@ -8,16 +10,19 @@ const MAX_USER_STORAGE_BYTES = Number(process.env.MAX_USER_STORAGE_BYTES || 150 
 
 const ALLOWED_EXTENSIONS = new Set(["pdf", "docx", "txt"]);
 
-function extensionOf(name = "") {
+export function extensionOf(name = "") {
   return String(name).split(".").pop()?.toLowerCase() || "";
 }
 
-function hasAllowedSignature(file) {
+export function hasAllowedSignature(file) {
   const ext = extensionOf(file.originalname);
   const buffer = file.buffer || Buffer.alloc(0);
   if (ext === "pdf") return buffer.slice(0, 4).toString() === "%PDF";
-  if (ext === "txt") return true;
-  if (ext === "docx") return buffer.slice(0, 2).toString("hex") === "504b";
+  if (ext === "txt") return !buffer.includes(0);
+  if (ext === "docx") {
+    const signature = buffer.slice(0, 4).toString("hex");
+    return ["504b0304", "504b0506", "504b0708"].includes(signature);
+  }
   return false;
 }
 
@@ -58,15 +63,33 @@ export const documentController = {
       return res.status(400).json({ message: "I could not extract enough readable text from this file." });
     }
 
+    const maxTextChars = Number(process.env.MAX_DOCUMENT_TEXT_CHARS || 250000);
+    const boundedText = text.slice(0, maxTextChars);
     const doc = await Document.create({
       userId: req.user._id,
       originalName: req.file.originalname,
       fileName: req.file.originalname,
       mimeType: req.file.mimetype,
       size: req.file.size,
-      text: text.slice(0, Number(process.env.MAX_DOCUMENT_TEXT_CHARS || 250000)),
-      chunks: documentService.chunkText(text),
+      text: boundedText,
+      chunks: documentService.chunkText(boundedText),
+      vectorStatus: vectorStore.isConfigured() ? "pending" : "skipped",
+      vectorProvider: vectorStore.isConfigured() ? "pinecone" : "none",
+      vectorIndexName: vectorStore.isConfigured() ? vectorStore.indexName() : undefined,
+      vectorNamespace: vectorStore.isConfigured() ? vectorStore.namespaceFor(req.user._id) : undefined,
+      vectorEmbeddingModel: vectorStore.isConfigured() ? vectorStore.embeddingModel() : undefined,
     });
+
+    const indexing = await vectorStore.upsertDocumentChunks(doc);
+    doc.vectorStatus = indexing.stored ? "indexed" : indexing.status || (vectorStore.isConfigured() ? "failed" : "skipped");
+    doc.vectorProvider = indexing.provider || doc.vectorProvider;
+    doc.vectorNamespace = indexing.namespace || doc.vectorNamespace;
+    doc.vectorIndexName = indexing.indexName || doc.vectorIndexName;
+    doc.vectorEmbeddingModel = indexing.embeddingModel || doc.vectorEmbeddingModel;
+    doc.vectorRecordCount = indexing.count || 0;
+    doc.vectorIndexedAt = indexing.stored ? new Date() : undefined;
+    doc.indexingError = indexing.stored ? undefined : indexing.reason;
+    await doc.save();
 
     res.status(201).json({
       document: {
@@ -75,13 +98,18 @@ export const documentController = {
         size: doc.size,
         chunks: doc.chunks.length,
         createdAt: doc.createdAt,
+        vectorStore: indexing.stored ? "pinecone" : "local_fallback",
+        vectorStatus: doc.vectorStatus,
+        vectorProvider: doc.vectorProvider,
+        vectorNamespace: doc.vectorNamespace,
+        indexingError: doc.vectorStatus === "failed" ? doc.indexingError : undefined,
       },
     });
   },
 
   async list(req, res) {
     const docs = await Document.find({ userId: req.user._id })
-      .select("originalName size createdAt chunks")
+      .select("originalName size createdAt chunks vectorStatus vectorProvider vectorRecordCount vectorIndexedAt indexingError")
       .sort({ createdAt: -1 })
       .limit(100)
       .lean();
@@ -92,13 +120,23 @@ export const documentController = {
         size: d.size,
         chunks: d.chunks?.length || 0,
         createdAt: d.createdAt,
+        vectorStatus: d.vectorStatus || "unknown",
+        vectorProvider: d.vectorProvider || "none",
+        vectorRecordCount: d.vectorRecordCount || 0,
+        vectorIndexedAt: d.vectorIndexedAt,
+        indexingError: d.vectorStatus === "failed" ? d.indexingError : undefined,
       })),
     });
   },
 
   async remove(req, res) {
-    const result = await Document.deleteOne({ _id: req.params.id, userId: req.user._id });
-    if (!result.deletedCount) return res.status(404).json({ message: "Document not found" });
+    const doc = await Document.findOne({ _id: req.params.id, userId: req.user._id }).select("_id userId chunks vectorNamespace").lean();
+    if (!doc) return res.status(404).json({ message: "Document not found" });
+    await vectorStore.deleteDocumentChunks({ userId: req.user._id, documentId: doc._id, chunkCount: doc.chunks?.length || 0 });
+    await Promise.all([
+      Document.deleteOne({ _id: req.params.id, userId: req.user._id }),
+      Conversation.updateMany({ userId: req.user._id, documentIds: doc._id }, { $pull: { documentIds: doc._id } }),
+    ]);
     res.json({ ok: true });
   },
 };
