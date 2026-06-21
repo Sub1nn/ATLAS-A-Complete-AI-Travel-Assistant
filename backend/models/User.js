@@ -26,11 +26,16 @@ const UserSchema = new mongoose.Schema(
     passwordResetTokenHash: { type: String, select: false, index: true },
     passwordResetExpires: { type: Date, select: false },
     preferences: { type: PreferencesSchema, default: () => ({}) },
+    failedLoginAttempts: { type: Number, default: 0, select: false },
+    lockedUntil: { type: Date, select: false },
+    tokenVersion: { type: Number, default: 0 },
     lastLoginAt: Date,
   },
   { timestamps: true },
 );
 
 UserSchema.index({ createdAt: -1 });
+UserSchema.index({ passwordResetExpires: 1 }, { sparse: true });
+UserSchema.index({ emailVerificationExpires: 1 }, { sparse: true });
 
 export const User = mongoose.models.User || mongoose.model("User", UserSchema);
