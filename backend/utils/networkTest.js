@@ -1,20 +1,75 @@
-// utils/networkTest.js - Network connectivity testing with Google Places API
+// utils/networkTest.js - Network connectivity testing for ATLAS backend
 import axios from "axios";
+
+function googlePlacesKey() {
+  return process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || "";
+}
+
+function googlePlacesHeaders() {
+  return {
+    "Content-Type": "application/json",
+    "X-Goog-Api-Key": googlePlacesKey(),
+    "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.googleMapsUri,places.location,places.types",
+  };
+}
+
+async function googlePlacesTextSearch(textQuery, { maxResultCount = 5, locationBias } = {}) {
+  const key = googlePlacesKey();
+  if (!key) throw new Error("GOOGLE_PLACES_API_KEY, GOOGLE_MAPS_API_KEY or GOOGLE_API_KEY is not configured");
+
+  const body = {
+    textQuery,
+    maxResultCount: Math.max(1, Math.min(Number(maxResultCount) || 5, 20)),
+  };
+  if (locationBias) body.locationBias = locationBias;
+
+  const response = await axios.post(
+    "https://places.googleapis.com/v1/places:searchText",
+    body,
+    {
+      headers: googlePlacesHeaders(),
+      timeout: 8000,
+      validateStatus: (status) => status < 500,
+    }
+  );
+
+  const places = Array.isArray(response.data?.places) ? response.data.places : [];
+  const apiStatus = response.status === 200 ? (places.length ? "OK" : "ZERO_RESULTS") : "FAILED";
+
+  if (response.status >= 400) {
+    return {
+      success: false,
+      status: response.status,
+      api_status: apiStatus,
+      error: response.data?.error?.message || `Places API (New) returned HTTP ${response.status}`,
+      details: response.data,
+    };
+  }
+
+  return {
+    success: true,
+    status: response.status,
+    results_count: places.length,
+    api_status: apiStatus,
+    sample: places.slice(0, 3).map((place) => ({
+      name: place.displayName?.text,
+      address: place.formattedAddress,
+      rating: place.rating,
+    })),
+  };
+}
 
 export const networkTest = {
   async testGroqConnectivity() {
     try {
       console.log("🔍 Testing Groq API connectivity...");
 
-      const response = await axios.get(
-        "https://api.groq.com/openai/v1/models",
-        {
-          headers: {
-            Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-          },
-          timeout: 10000,
-        }
-      );
+      const response = await axios.get("https://api.groq.com/openai/v1/models", {
+        headers: {
+          Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+        },
+        timeout: 10000,
+      });
 
       console.log("✅ Groq API is reachable");
       return { success: true, status: response.status };
@@ -30,13 +85,14 @@ export const networkTest = {
   },
 
   async testAllAPIs() {
-    const results = {
-      groq: await this.testGroqConnectivity(),
-      google: await this.testGoogleMaps(),
-      openweather: await this.testOpenWeather(),
-      googleplaces: await this.testGooglePlaces(), // Changed from yelp
-      news: await this.testNewsAPI(),
-    };
+    const [groq, google, openweather, googleplaces, news] = await Promise.all([
+      this.testGroqConnectivity(),
+      this.testGoogleMaps(),
+      this.testOpenWeather(),
+      this.testGooglePlaces(),
+      this.testNewsAPI(),
+    ]);
+    const results = { groq, google, openweather, googleplaces, news };
 
     console.log("📊 API Connectivity Results:", results);
     return results;
@@ -44,48 +100,41 @@ export const networkTest = {
 
   async testGoogleMaps() {
     try {
-      const response = await axios.get(
-        `https://maps.googleapis.com/maps/api/geocode/json?address=test&key=${process.env.GOOGLE_API_KEY}`,
-        { timeout: 5000 }
-      );
-      return { success: true, status: response.status };
+      const key = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_PLACES_API_KEY;
+      if (!key) return { success: false, error: "Google Maps API key is not configured" };
+      const response = await axios.get("https://maps.googleapis.com/maps/api/geocode/json", {
+        params: { address: "Helsinki", key },
+        timeout: 5000,
+      });
+      const apiStatus = response.data?.status;
+      return {
+        success: response.status === 200 && ["OK", "ZERO_RESULTS"].includes(apiStatus),
+        status: response.status,
+        api_status: apiStatus,
+        error: ["OK", "ZERO_RESULTS"].includes(apiStatus) ? undefined : response.data?.error_message || apiStatus,
+      };
     } catch (error) {
-      return { success: false, error: error.message, code: error.code };
+      return { success: false, error: error.message, code: error.code, status: error.response?.status };
     }
   },
 
   async testOpenWeather() {
     try {
-      const response = await axios.get(
-        `https://api.openweathermap.org/data/2.5/weather?lat=0&lon=0&appid=${process.env.OPEN_WEATHER_KEY}`,
-        { timeout: 5000 }
-      );
-      return { success: true, status: response.status };
+      const key = process.env.OPEN_WEATHER_KEY || process.env.OPENWEATHER_API_KEY;
+      if (!key) return { success: false, error: "OpenWeather API key is not configured" };
+      const response = await axios.get("https://api.openweathermap.org/data/2.5/weather", {
+        params: { lat: 60.1699, lon: 24.9384, appid: key },
+        timeout: 5000,
+      });
+      return { success: response.status === 200, status: response.status };
     } catch (error) {
-      return { success: false, error: error.message, code: error.code };
+      return { success: false, error: error.message, code: error.code, status: error.response?.status };
     }
   },
 
   async testGooglePlaces() {
     try {
-      // Test Google Places API with a valid location (New York City)
-      const response = await axios.get(
-        `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=40.7128,-74.0060&radius=1000&type=restaurant&key=${process.env.GOOGLE_PLACES_API_KEY}`,
-        {
-          timeout: 8000,
-        }
-      );
-
-      // Check if the response has results
-      const hasResults =
-        response.data.results && response.data.results.length > 0;
-
-      return {
-        success: true,
-        status: response.status,
-        results_count: response.data.results?.length || 0,
-        api_status: response.data.status,
-      };
+      return await googlePlacesTextSearch("tennis courts in Riihimäki Finland", { maxResultCount: 3 });
     } catch (error) {
       return {
         success: false,
@@ -99,64 +148,38 @@ export const networkTest = {
 
   async testNewsAPI() {
     try {
-      const response = await axios.get(
-        `https://newsapi.org/v2/top-headlines?country=us&pageSize=1&apiKey=${process.env.NEWS_API_KEY}`,
-        { timeout: 5000 }
-      );
-      return { success: true, status: response.status };
+      if (!process.env.NEWS_API_KEY) return { success: false, error: "News API key is not configured" };
+      const response = await axios.get("https://newsapi.org/v2/top-headlines", {
+        params: { country: "us", pageSize: 1, apiKey: process.env.NEWS_API_KEY },
+        timeout: 5000,
+      });
+      return { success: response.status === 200 && response.data?.status === "ok", status: response.status, api_status: response.data?.status };
     } catch (error) {
-      return { success: false, error: error.message, code: error.code };
+      return { success: false, error: error.message, code: error.code, status: error.response?.status };
     }
   },
 
-  // Enhanced Google Places testing with detailed diagnostics
   async testGooglePlacesDetailed() {
     try {
-      console.log("🔍 Testing Google Places API with detailed diagnostics...");
+      console.log("🔍 Testing Google Places API (New) with detailed diagnostics...");
 
-      // Test restaurant search
-      const restaurantTest = await axios.get(
-        `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=40.7128,-74.0060&radius=2000&type=restaurant&key=${process.env.GOOGLE_PLACES_API_KEY}`,
-        { timeout: 8000 }
-      );
+      const restaurantTest = await googlePlacesTextSearch("restaurants in New York City", { maxResultCount: 5 });
+      const hotelTest = await googlePlacesTextSearch("hotels in London", { maxResultCount: 5 });
+      const attractionTest = await googlePlacesTextSearch("tourist attractions in Paris", { maxResultCount: 5 });
 
-      console.log(
-        `✅ Google Places restaurant search: Found ${
-          restaurantTest.data.results?.length || 0
-        } results`
-      );
+      console.log(`✅ Google Places restaurant search: Found ${restaurantTest.results_count || 0} results`);
+      console.log(`✅ Google Places hotel search: Found ${hotelTest.results_count || 0} results`);
+      console.log(`✅ Google Places attraction search: Found ${attractionTest.results_count || 0} results`);
 
-      // Test accommodation search
-      const hotelTest = await axios.get(
-        `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=40.7128,-74.0060&radius=5000&type=lodging&key=${process.env.GOOGLE_PLACES_API_KEY}`,
-        { timeout: 8000 }
-      );
-
-      console.log(
-        `✅ Google Places hotel search: Found ${
-          hotelTest.data.results?.length || 0
-        } results`
-      );
-
-      // Test tourist attraction search
-      const attractionTest = await axios.get(
-        `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=40.7128,-74.0060&radius=5000&type=tourist_attraction&key=${process.env.GOOGLE_PLACES_API_KEY}`,
-        { timeout: 8000 }
-      );
-
-      console.log(
-        `✅ Google Places attraction search: Found ${
-          attractionTest.data.results?.length || 0
-        } results`
-      );
-
+      const allSuccessful = [restaurantTest, hotelTest, attractionTest].every((result) => result.success);
       return {
-        success: true,
-        status: hotelTest.status,
-        restaurant_results: restaurantTest.data.results?.length || 0,
-        hotel_results: hotelTest.data.results?.length || 0,
-        attraction_results: attractionTest.data.results?.length || 0,
-        api_status: restaurantTest.data.status,
+        success: allSuccessful,
+        status: allSuccessful ? 200 : 400,
+        restaurant_results: restaurantTest.results_count || 0,
+        hotel_results: hotelTest.results_count || 0,
+        attraction_results: attractionTest.results_count || 0,
+        api_status: allSuccessful ? "OK" : "PARTIAL_FAILURE",
+        details: { restaurantTest, hotelTest, attractionTest },
       };
     } catch (error) {
       console.error("❌ Detailed Google Places test failed:", error.message);
@@ -170,7 +193,6 @@ export const networkTest = {
     }
   },
 
-  // Test API rate limits and response times
   async performanceTest() {
     console.log("🚀 Running API performance tests...");
     const results = {};
@@ -192,19 +214,10 @@ export const networkTest = {
         results[api.name] = {
           ...result,
           responseTime: `${responseTime}ms`,
-          performance:
-            responseTime < 1000
-              ? "fast"
-              : responseTime < 3000
-              ? "moderate"
-              : "slow",
+          performance: responseTime < 1000 ? "fast" : responseTime < 3000 ? "moderate" : "slow",
         };
 
-        console.log(
-          `📊 ${api.name.toUpperCase()}: ${responseTime}ms (${
-            results[api.name].performance
-          })`
-        );
+        console.log(`📊 ${api.name.toUpperCase()}: ${responseTime}ms (${results[api.name].performance})`);
       } catch (error) {
         results[api.name] = {
           success: false,
@@ -217,48 +230,32 @@ export const networkTest = {
     return results;
   },
 
-  // Test Google Places quota usage
   async testGooglePlacesQuota() {
     try {
-      console.log("💰 Testing Google Places API quota usage...");
-
+      console.log("💰 Testing Google Places API (New) quota usage...");
       const startTime = Date.now();
-
-      // Make a few test requests to estimate quota usage
       const testRequests = [
-        axios.get(
-          `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=40.7128,-74.0060&radius=1000&type=restaurant&key=${process.env.GOOGLE_PLACES_API_KEY}`
-        ),
-        axios.get(
-          `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=51.5074,-0.1278&radius=1000&type=lodging&key=${process.env.GOOGLE_PLACES_API_KEY}`
-        ),
-        axios.get(
-          `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=48.8566,2.3522&radius=1000&type=tourist_attraction&key=${process.env.GOOGLE_PLACES_API_KEY}`
-        ),
+        googlePlacesTextSearch("restaurants in New York City", { maxResultCount: 3 }),
+        googlePlacesTextSearch("hotels in London", { maxResultCount: 3 }),
+        googlePlacesTextSearch("tourist attractions in Paris", { maxResultCount: 3 }),
       ];
 
       const results = await Promise.allSettled(testRequests);
-      const successCount = results.filter(
-        (r) => r.status === "fulfilled"
-      ).length;
+      const successCount = results.filter((r) => r.status === "fulfilled" && r.value.success).length;
       const totalTime = Date.now() - startTime;
+      console.log(`✅ Google Places quota test: ${successCount}/3 requests succeeded in ${totalTime}ms`);
 
-      console.log(
-        `✅ Google Places quota test: ${successCount}/3 requests succeeded in ${totalTime}ms`
-      );
-
-      // Estimate monthly usage based on response time and success rate
       const avgResponseTime = totalTime / 3;
       const successRate = successCount / 3;
 
       return {
-        success: true,
+        success: successCount === 3,
         successful_requests: successCount,
         total_requests: 3,
         success_rate: Math.round(successRate * 100) + "%",
         average_response_time: Math.round(avgResponseTime) + "ms",
-        estimated_monthly_cost: this.estimateMonthlyCost(1000), // Estimate for 1000 monthly requests
-        quota_status: "healthy",
+        estimated_monthly_cost: this.estimateMonthlyCost(1000),
+        quota_status: successCount === 3 ? "healthy" : "partial",
       };
     } catch (error) {
       return {
@@ -269,52 +266,54 @@ export const networkTest = {
     }
   },
 
-  // Estimate Google Places API monthly cost
   estimateMonthlyCost(monthlyRequests) {
-    // Google Places Nearby Search costs $32 per 1,000 requests
-    const costPer1000 = 32;
-    const estimatedCost = (monthlyRequests / 1000) * costPer1000;
-
-    // Google provides $200 monthly credit
-    const freeCredit = 200;
-    const netCost = Math.max(0, estimatedCost - freeCredit);
+    // Places API (New) pricing depends on field masks and SKU. Keep this as a rough planning estimate only.
+    const costPerThousand = 32;
+    const estimatedCost = (monthlyRequests / 1000) * costPerThousand;
 
     return {
-      gross_cost: `$${estimatedCost.toFixed(2)}`,
-      free_credit: `$${freeCredit}`,
-      net_cost: `$${netCost.toFixed(2)}`,
-      requests_covered_free: Math.floor((freeCredit / costPer1000) * 1000),
+      requests: monthlyRequests,
+      estimated_cost_usd: `$${estimatedCost.toFixed(2)}`,
+      note: "Rough estimate only. Check current Google Maps Platform pricing for Places API (New) and your selected fields.",
     };
   },
 
-  // Comprehensive network diagnostic
-  async fullDiagnostic() {
-    console.log("🔧 Running comprehensive network diagnostic...");
+  async generateDiagnosticReport() {
+    const report = {
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || "development",
+      api_keys_configured: {
+        groq: !!process.env.GROQ_API_KEY && !process.env.GROQ_API_KEY.includes("your_"),
+        google: !!process.env.GOOGLE_API_KEY && !process.env.GOOGLE_API_KEY.includes("your_"),
+        openweather: !!process.env.OPEN_WEATHER_KEY && !process.env.OPEN_WEATHER_KEY.includes("your_"),
+        google_places: !!googlePlacesKey() && !googlePlacesKey().includes("your_"),
+        news: !!process.env.NEWS_API_KEY && !process.env.NEWS_API_KEY.includes("your_"),
+      },
+      connectivity: await this.testAllAPIs(),
+      performance: await this.performanceTest(),
+      quota: await this.testGooglePlacesQuota(),
+    };
 
-    const basic = await this.testAllAPIs();
-    const detailed = await this.testGooglePlacesDetailed();
-    const performance = await this.performanceTest();
-    const quota = await this.testGooglePlacesQuota();
+    return report;
+  },
+
+  async quickHealthCheck() {
+    const critical = await Promise.allSettled([
+      this.testGroqConnectivity(),
+      this.testGooglePlaces(),
+      this.testOpenWeather(),
+    ]);
+
+    const results = critical.map((result) => result.status === "fulfilled" && result.value.success);
 
     return {
-      basic,
-      google_places_detailed: detailed,
-      performance,
-      quota_analysis: quota,
-      summary: {
-        total_apis: Object.keys(basic).length,
-        working_apis: Object.values(basic).filter((r) => r.success).length,
-        avg_response_time: Object.values(performance)
-          .filter((r) => r.responseTime && !r.responseTime.includes("timeout"))
-          .reduce((acc, curr, _, arr) => {
-            const time = parseInt(curr.responseTime);
-            return acc + time / arr.length;
-          }, 0),
-        google_places_status: basic.googleplaces?.success
-          ? "operational"
-          : "degraded",
-        estimated_monthly_usage: quota.estimated_monthly_cost || "unknown",
+      healthy: results.every(Boolean),
+      services: {
+        groq: results[0],
+        google_places: results[1],
+        weather: results[2],
       },
+      timestamp: new Date().toISOString(),
     };
   },
 };
