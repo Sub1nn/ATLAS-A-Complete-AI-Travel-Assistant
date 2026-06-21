@@ -36,6 +36,7 @@ const chunks = documentService.chunkText(
 
 assert.ok(chunks.length > 0);
 assert.ok(chunks[0].text.length > 0);
-assert.ok(chunks[0].embedding.length > 0);
+assert.ok(Array.isArray(chunks[0].keywords));
+assert.ok(documentService.embeddingFor(chunks[0].text).length > 0);
 
 console.log("✅ ATLAS smoke checks passed");
