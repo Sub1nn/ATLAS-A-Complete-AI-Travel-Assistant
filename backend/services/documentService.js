@@ -1,4 +1,5 @@
 import { Document } from "../models/Document.js";
+import { vectorStore } from "./vectorStore.js";
 
 const STOP_WORDS = new Set(
   "the a an and or but of to in on for with from by at as is are was were be been this that these those it its into about can should could would i you me my your we our they them please summarize summary explain pdf document file uploaded attached according what where when how why".split(
@@ -20,7 +21,10 @@ const GENERIC_DOCUMENT_QUERIES = [
   "can you please summarize this",
 ];
 
-const EMBEDDING_DIMS = 192;
+// Local hash vectors are kept only as an offline fallback for development/testing when
+// Pinecone is not configured. Production semantic retrieval should use Pinecone Inference
+// embeddings through vectorStore, not these deterministic fallback vectors.
+const FALLBACK_EMBEDDING_DIMS = 192;
 
 function normalizeText(text = "") {
   return String(text || "")
@@ -45,19 +49,15 @@ function hashToken(token = "") {
   return Math.abs(h >>> 0);
 }
 
-function embeddingFor(text = "") {
-  const vector = new Array(EMBEDDING_DIMS).fill(0);
+function fallbackEmbeddingFor(text = "") {
+  const vector = new Array(FALLBACK_EMBEDDING_DIMS).fill(0);
   const words = keywords(text);
 
   for (const word of words) {
-    const idx = hashToken(word) % EMBEDDING_DIMS;
-    vector[idx] += 1;
-
-    // Add light character n-gram features so document retrieval can match similar phrases,
-    // names and spelling variants better than pure exact keyword matching.
+    vector[hashToken(word) % FALLBACK_EMBEDDING_DIMS] += 1;
     for (let i = 0; i < Math.max(0, word.length - 3); i += 1) {
       const gram = word.slice(i, i + 4);
-      vector[hashToken(`g:${gram}`) % EMBEDDING_DIMS] += 0.25;
+      vector[hashToken(`g:${gram}`) % FALLBACK_EMBEDDING_DIMS] += 0.25;
     }
   }
 
@@ -80,14 +80,23 @@ function isGenericDocumentQuery(query = "") {
   return qWords.length <= 2 && /(summari[sz]e|explain|document|pdf|file|this)/i.test(text);
 }
 
-function chunkText(text = "", maxChars = 1200) {
+function chunkText(text = "", maxChars = 1200, overlapChars = 160) {
   const clean = normalizeText(text);
   const chunks = [];
 
-  for (let i = 0; i < clean.length; i += maxChars) {
-    const slice = clean.slice(i, i + maxChars).trim();
+  const overlap = Math.max(0, Math.min(overlapChars, maxChars / 3));
+  let i = 0;
+  while (i < clean.length) {
+    let end = Math.min(clean.length, i + maxChars);
+    if (end < clean.length) {
+      const boundary = clean.lastIndexOf(" ", end);
+      if (boundary > i + Math.floor(maxChars * 0.7)) end = boundary;
+    }
+    const slice = clean.slice(i, end).trim();
     if (!slice) continue;
-    chunks.push({ index: chunks.length, text: slice, keywords: keywords(slice), embedding: embeddingFor(slice) });
+    chunks.push({ index: chunks.length, text: slice, keywords: keywords(slice) });
+    if (end >= clean.length) break;
+    i = Math.max(i + 1, end - overlap);
   }
 
   return chunks.slice(0, 300);
@@ -118,53 +127,35 @@ async function extractText(file) {
   throw new Error("Unsupported file type. Please upload PDF, DOCX or TXT files.");
 }
 
-async function searchUserDocuments(userId, query = "", documentIds = []) {
-  const filter = { userId };
-  if (documentIds?.length) filter._id = { $in: documentIds };
+function buildOverviewMatches(docs = []) {
+  return docs.flatMap((doc) => {
+    const chunks = doc.chunks || [];
+    const firstChunks = chunks.slice(0, 8);
+    const sampledChunks = chunks.length > 10 ? [chunks[Math.floor(chunks.length / 2)], chunks[chunks.length - 1]].filter(Boolean) : [];
+    return [...firstChunks, ...sampledChunks].map((chunk, order) => ({
+      documentId: doc._id.toString(),
+      name: doc.originalName,
+      score: Number((1 / (order + 1)).toFixed(3)),
+      text: chunk.text,
+      chunkIndex: chunk.index,
+      source: "document_overview",
+      provider: "mongodb",
+    }));
+  }).slice(0, 12);
+}
 
-  const docs = await Document.find(filter).limit(20).lean();
-  if (!docs.length) return [];
-
-  const genericQuery = isGenericDocumentQuery(query);
-
-  if (genericQuery) {
-    return docs.flatMap((doc) => {
-      const chunks = doc.chunks || [];
-      const firstChunks = chunks.slice(0, 8);
-      const sampledChunks = chunks.length > 10 ? [chunks[Math.floor(chunks.length / 2)], chunks[chunks.length - 1]].filter(Boolean) : [];
-      return [...firstChunks, ...sampledChunks].map((chunk, order) => ({
-        documentId: doc._id.toString(),
-        name: doc.originalName,
-        score: 1 / (order + 1),
-        text: chunk.text,
-        chunkIndex: chunk.index,
-        source: "document_overview",
-      }));
-    }).slice(0, 12);
-  }
-
+function localFallbackSearch(docs = [], query = "") {
   const q = new Set(keywords(query));
-  const qEmbedding = embeddingFor(query);
+  const qEmbedding = fallbackEmbeddingFor(query);
   const scored = [];
 
   for (const doc of docs) {
     for (const chunk of doc.chunks || []) {
       const keywordScore = (chunk.keywords || []).reduce((sum, word) => sum + (q.has(word) ? 1 : 0), 0);
-      const semanticScore = cosine(qEmbedding, chunk.embedding || embeddingFor(chunk.text || ""));
+      const semanticScore = cosine(qEmbedding, chunk.embedding || fallbackEmbeddingFor(chunk.text || ""));
       const score = keywordScore * 1.5 + semanticScore * 6;
       if (score > 0.25) scored.push({ score, doc, chunk, semanticScore, keywordScore });
     }
-  }
-
-  if (!scored.length) {
-    return docs.flatMap((doc) => (doc.chunks || []).slice(0, 4).map((chunk, index) => ({
-      documentId: doc._id.toString(),
-      name: doc.originalName,
-      score: 0.1 / (index + 1),
-      text: chunk.text,
-      chunkIndex: chunk.index,
-      source: "fallback_overview",
-    }))).slice(0, 6);
   }
 
   return scored
@@ -176,8 +167,61 @@ async function searchUserDocuments(userId, query = "", documentIds = []) {
       score: Number(score.toFixed(3)),
       text: chunk.text,
       chunkIndex: chunk.index,
-      source: semanticScore > keywordScore ? "embedding_match" : "hybrid_match",
+      source: semanticScore > keywordScore ? "local_fallback_vector_match" : "local_fallback_keyword_match",
+      provider: "mongodb",
     }));
+}
+
+async function searchUserDocuments(userId, query = "", documentIds = []) {
+  const filter = { userId };
+  if (documentIds?.length) filter._id = { $in: documentIds };
+
+  const docs = await Document.find(filter).limit(20).lean();
+  if (!docs.length) return [];
+
+  if (isGenericDocumentQuery(query)) return buildOverviewMatches(docs);
+
+  const pineconeMatches = await vectorStore.queryDocumentChunks({
+    userId,
+    query,
+    documentIds,
+    topK: Number(process.env.PINECONE_TOP_K || 8),
+  });
+
+  if (pineconeMatches.length) {
+    return pineconeMatches.slice(0, 10).map((match) => {
+      const doc = docs.find((item) => String(item._id) === String(match.documentId));
+      const chunk = (doc?.chunks || []).find((item) => Number(item.index) === Number(match.chunkIndex));
+      return {
+        documentId: String(match.documentId),
+        name: match.name || doc?.originalName || "Uploaded document",
+        score: Number(Number(match.score || 0).toFixed(3)),
+        text: match.text || chunk?.text || "",
+        chunkIndex: Number(match.chunkIndex || 0),
+        source: match.source || "pinecone_semantic_match",
+        provider: "pinecone",
+      };
+    }).filter((match) => match.text);
+  }
+
+  const fallback = localFallbackSearch(docs, query);
+  if (fallback.length) return fallback;
+
+  return docs.flatMap((doc) => (doc.chunks || []).slice(0, 4).map((chunk, index) => ({
+    documentId: doc._id.toString(),
+    name: doc.originalName,
+    score: Number((0.1 / (index + 1)).toFixed(3)),
+    text: chunk.text,
+    chunkIndex: chunk.index,
+    source: "fallback_overview",
+    provider: "mongodb",
+  }))).slice(0, 6);
+}
+
+async function validateUserDocumentIds(userId, documentIds = []) {
+  if (!documentIds.length) return [];
+  const docs = await Document.find({ userId, _id: { $in: documentIds } }).select("_id").lean();
+  return docs.map((doc) => doc._id.toString());
 }
 
 function buildDocumentContext(matches = [], maxChars = 5000) {
@@ -205,8 +249,10 @@ export const documentService = {
   extractText,
   chunkText,
   keywords,
-  embeddingFor,
+  embeddingFor: fallbackEmbeddingFor,
+  fallbackEmbeddingFor,
   isGenericDocumentQuery,
   searchUserDocuments,
+  validateUserDocumentIds,
   buildDocumentContext,
 };
