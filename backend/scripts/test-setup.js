@@ -15,19 +15,23 @@ console.log("🔍 Checking environment setup...");
 
 const requiredEnvVars = [
   "GROQ_API_KEY",
-  "GOOGLE_API_KEY",
-  "OPEN_WEATHER_KEY",
-  "GOOGLE_PLACES_API_KEY",
-  "NEWS_API_KEY",
+  "JWT_SECRET",
+  "MONGODB_URI",
+  "RESEND_API_KEY",
+  "EMAIL_FROM",
 ];
 
 const optionalEnvVars = [
   "GOOGLE_MAPS_API_KEY",
+  "GOOGLE_API_KEY",
+  "GOOGLE_PLACES_API_KEY",
+  "OPEN_WEATHER_KEY",
+  "NEWS_API_KEY",
   "YELP_API_KEY",
   "PINECONE_API_KEY",
+  "PINECONE_INDEX_NAME",
+  "PINECONE_INDEX_HOST",
   "HUGGINGFACE_API_KEY",
-  "JWT_SECRET",
-  "MONGODB_URI",
 ];
 
 function isPlaceholder(value) {
