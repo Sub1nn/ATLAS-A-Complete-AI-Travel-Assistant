@@ -3,15 +3,29 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
+import crypto from "crypto";
 import chatRoutes from "./routes/chat.js";
 import authRoutes from "./routes/auth.js";
 import conversationRoutes from "./routes/conversations.js";
 import documentRoutes from "./routes/documents.js";
 import { rateLimiter } from "./config/rateLimiter.js";
 import { databaseReady } from "./db/mongoose.js";
+import { cacheStatus } from "./services/cacheService.js";
+import { logger } from "./utils/logger.js";
 
 const app = express();
-app.set("trust proxy", 1); // trust proxy
+app.disable("x-powered-by");
+const trustProxy = process.env.TRUST_PROXY;
+if (trustProxy && trustProxy !== "false" && trustProxy !== "0") {
+  app.set("trust proxy", /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
+}
+
+app.use((req, res, next) => {
+  const incoming = String(req.headers["x-request-id"] || "");
+  req.requestId = /^[a-zA-Z0-9_-]{8,80}$/.test(incoming) ? incoming : crypto.randomUUID();
+  res.setHeader("X-Request-Id", req.requestId);
+  next();
+});
 
 // Security middleware - Helmet
 app.use(
@@ -41,7 +55,9 @@ app.use(
       if (!origin || allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
-      return callback(new Error("Not allowed by CORS"));
+      const error = new Error("Origin is not allowed by CORS");
+      error.status = 403;
+      return callback(error);
     },
     credentials: true,
     optionsSuccessStatus: 200,
@@ -56,8 +72,10 @@ app.use(
 ); */
 
 // Logging middleware
+morgan.token("url", (req) => logger.redact(req.originalUrl || req.url));
+morgan.token("request-id", (req) => req.requestId || "-");
 if (process.env.NODE_ENV === "production") {
-  app.use(morgan("combined"));
+  app.use(morgan(':remote-addr - :remote-user [:date[clf]] ":method :url HTTP/:http-version" :status :res[content-length] ":referrer" ":user-agent" request_id=:request-id'));
 } else {
   app.use(morgan("dev"));
 }
@@ -85,15 +103,27 @@ app.use("/api/documents", documentRoutes);
 app.use("/api", chatRoutes);
 
 // Health check endpoint
-app.get("/health", (req, res) => {
-  res.json({
-    status: "healthy",
+function healthPayload() {
+  const cache = cacheStatus();
+  const ready = databaseReady() && (process.env.REDIS_REQUIRED !== "true" || cache.redisConnected);
+  return {
+    status: ready ? "healthy" : "degraded",
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || "development",
     version: "1.0.0",
     uptime: process.uptime(),
     database: databaseReady() ? "connected" : "unavailable",
-  });
+    cache,
+  };
+}
+
+app.get("/health/live", (req, res) => {
+  res.json({ status: "alive", timestamp: new Date().toISOString(), uptime: process.uptime() });
+});
+
+app.get(["/health", "/health/ready"], (req, res) => {
+  const payload = healthPayload();
+  res.status(payload.status === "healthy" ? 200 : 503).json(payload);
 });
 
 // 404 handler
@@ -107,9 +137,9 @@ app.use("*", (req, res) => {
 // Global error handler
 app.use((err, req, res, next) => {
   if (process.env.NODE_ENV === "production") {
-    console.error("❌ Global error:", err.message);
+    logger.error("Global error", { reason: err.message, requestId: req.requestId });
   } else {
-    console.error("❌ Global error:", err);
+    logger.error("Global error", { reason: err.message, requestId: req.requestId });
   }
 
   const isDevelopment = process.env.NODE_ENV !== "production";
@@ -119,14 +149,16 @@ app.use((err, req, res, next) => {
       err.message || "",
     );
 
-  res.status(isClientError ? 400 : err.status || 500).json({
-    error: isClientError ? "Invalid request" : "Internal server error",
+  const status = isClientError ? 400 : Number(err.status || 500);
+  res.status(status).json({
+    error: isClientError ? "Invalid request" : status < 500 ? "Request rejected" : "Internal server error",
     message: isClientError
       ? err.message
-      : isDevelopment
+      : status < 500 || isDevelopment
         ? err.message
         : "Something went wrong",
     stack: !isClientError && isDevelopment ? err.stack : undefined,
+    requestId: req.requestId,
   });
 });
 
