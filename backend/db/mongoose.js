@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { logger } from "../utils/logger.js";
 
 let isConnected = false;
 
@@ -8,7 +9,7 @@ export async function connectDatabase() {
   if (!uri) {
     const message = "MONGODB_URI is not set. Persistent users, chat history and document memory cannot work.";
     if (process.env.NODE_ENV === "production") throw new Error(message);
-    console.warn(`⚠️ ${message}`);
+    logger.warn(message);
     return false;
   }
 
@@ -18,28 +19,33 @@ export async function connectDatabase() {
     mongoose.set("strictQuery", true);
     mongoose.connection.on("disconnected", () => {
       isConnected = false;
-      console.warn("⚠️ MongoDB disconnected");
+      logger.warn("MongoDB disconnected");
     });
 
     await mongoose.connect(uri, {
       serverSelectionTimeoutMS: 8000,
       maxPoolSize: Number(process.env.MONGODB_MAX_POOL_SIZE || 20),
       minPoolSize: Number(process.env.MONGODB_MIN_POOL_SIZE || 1),
-      autoIndex: process.env.NODE_ENV !== "production",
+      autoIndex: process.env.NODE_ENV !== "production" || process.env.MONGODB_AUTO_INDEX === "true",
     });
 
     isConnected = true;
-    console.log("✅ MongoDB connected");
+    logger.info("MongoDB connected");
     return true;
   } catch (error) {
     isConnected = false;
-    console.error("❌ MongoDB connection failed:", error.message);
+    logger.error("MongoDB connection failed", { reason: error.message });
     if (process.env.NODE_ENV === "production") throw error;
-    console.warn("⚠️ The app will continue in development, but login/history/document chat will not work until MongoDB is available.");
+    logger.warn("The app will continue in development, but login/history/document chat will not work until MongoDB is available.");
     return false;
   }
 }
 
 export function databaseReady() {
   return isConnected && mongoose.connection.readyState === 1;
+}
+
+export async function closeDatabase() {
+  if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
+  isConnected = false;
 }
