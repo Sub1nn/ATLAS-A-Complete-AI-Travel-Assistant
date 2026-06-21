@@ -1,4 +1,6 @@
 import axios from "axios";
+import { cacheKey as buildCacheKey, getOrSetCache } from "../services/cacheService.js";
+import { logger } from "./logger.js";
 
 const GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json";
 const OPEN_WEATHER_GEOCODE_URL = "https://api.openweathermap.org/geo/1.0/direct";
@@ -18,14 +20,6 @@ const AMBIGUOUS_COUNTRY_OR_REGION_VALUES = new Set([
   "afghanistan",
   "yemen",
 ]);
-
-const EUROPEAN_COUNTRY_HINTS = [
-  "Finland", "Sweden", "Norway", "Denmark", "Estonia", "Latvia", "Lithuania",
-  "Germany", "France", "Spain", "Italy", "Netherlands", "Belgium", "Austria",
-  "Switzerland", "Poland", "Czechia", "Portugal", "Ireland", "United Kingdom",
-  "Iceland", "Greece", "Croatia", "Slovenia", "Hungary", "Romania", "Bulgaria",
-  "Slovakia", "Serbia", "Turkey"
-];
 
 const NON_LOCATION_VALUES = new Set([
   "some", "there", "here", "nearby", "same place", "same area", "same city", "be sure", "just to be sure", "sure", "ok then", "then", "weather", "forecast",
@@ -129,11 +123,10 @@ function buildLocationVariants(location = "") {
   const plain = stripDiacritics(raw);
   const variants = [raw, plain];
 
-  // European cities are often typed without accents. These hints improve recall without
-  // hardcoding one city such as Riihimäki. Google/OpenWeather still decide the match.
-  for (const country of EUROPEAN_COUNTRY_HINTS) {
-    variants.push(`${raw}, ${country}`);
-    if (plain !== raw) variants.push(`${plain}, ${country}`);
+  const countryHint = normalizeLocationText(process.env.LOCATION_COUNTRY_HINT || "");
+  if (countryHint) {
+    variants.push(`${raw}, ${countryHint}`);
+    if (plain !== raw) variants.push(`${plain}, ${countryHint}`);
   }
 
   return unique(variants);
@@ -184,34 +177,44 @@ async function geocodeWithGoogle(query) {
   const key = getGoogleKey();
   if (!key) return null;
 
-  const res = await axios.get(GOOGLE_GEOCODE_URL, {
-    params: { address: query, key },
-    timeout: 10000,
+  const cacheKey = buildCacheKey("geocode:google", { query });
+  const { value } = await getOrSetCache(cacheKey, Number(process.env.CACHE_GEOCODE_TTL_SECONDS || 7 * 24 * 60 * 60), async () => {
+    const res = await axios.get(GOOGLE_GEOCODE_URL, {
+      params: { address: query, key },
+      timeout: 10000,
+    });
+
+    if (res.data.status !== "OK" || !res.data.results?.length) return null;
+
+    const result =
+      res.data.results.find((item) =>
+        item.types?.some((type) =>
+          ["locality", "postal_town", "administrative_area_level_3", "administrative_area_level_2"].includes(type)
+        )
+      ) || res.data.results[0];
+
+    return mapGoogleResult(result);
   });
 
-  if (res.data.status !== "OK" || !res.data.results?.length) return null;
-
-  const result =
-    res.data.results.find((item) =>
-      item.types?.some((type) =>
-        ["locality", "postal_town", "administrative_area_level_3", "administrative_area_level_2"].includes(type)
-      )
-    ) || res.data.results[0];
-
-  return mapGoogleResult(result);
+  return value;
 }
 
 async function geocodeWithOpenWeather(query) {
   const key = getOpenWeatherKey();
   if (!key) return null;
 
-  const res = await axios.get(OPEN_WEATHER_GEOCODE_URL, {
-    params: { q: query, limit: 5, appid: key },
-    timeout: 10000,
+  const cacheKey = buildCacheKey("geocode:openweather", { query });
+  const { value } = await getOrSetCache(cacheKey, Number(process.env.CACHE_GEOCODE_TTL_SECONDS || 7 * 24 * 60 * 60), async () => {
+    const res = await axios.get(OPEN_WEATHER_GEOCODE_URL, {
+      params: { q: query, limit: 5, appid: key },
+      timeout: 10000,
+    });
+
+    if (!Array.isArray(res.data) || !res.data.length) return null;
+    return mapOpenWeatherResult(res.data[0]);
   });
 
-  if (!Array.isArray(res.data) || !res.data.length) return null;
-  return mapOpenWeatherResult(res.data[0]);
+  return value;
 }
 
 export async function getLocationData(location) {
@@ -231,7 +234,7 @@ export async function getLocationData(location) {
   for (const query of variants) {
     try {
       const result = await geocodeWithGoogle(query);
-      if (result?.lat && result?.lon) {
+      if (Number.isFinite(Number(result?.lat)) && Number.isFinite(Number(result?.lon))) {
         locationCache.set(key, result);
         return result;
       }
@@ -243,7 +246,7 @@ export async function getLocationData(location) {
   for (const query of variants) {
     try {
       const result = await geocodeWithOpenWeather(query);
-      if (result?.lat && result?.lon) {
+      if (Number.isFinite(Number(result?.lat)) && Number.isFinite(Number(result?.lon))) {
         locationCache.set(key, result);
         return result;
       }
@@ -260,8 +263,8 @@ export async function getLocationData(location) {
     ? `Configured geocoders tried: ${configured.join(", ")}.`
     : "No geocoding API key is configured. Set GOOGLE_MAPS_API_KEY or OPEN_WEATHER_KEY.";
 
-  console.warn(`Location data error for "${cleaned}" from input "${normalizeLocationText(location)}": Location not found. ${configMessage}`);
-  if (errors.length) console.warn(errors.slice(0, 3).join(" | "));
+  logger.warn(`Location data error: Location not found. ${configMessage}`);
+  if (errors.length) logger.debug("Location resolver details", { errors: errors.slice(0, 3).join(" | ") });
 
   throw new Error(`Location not found for "${cleaned}". ${configMessage}`);
 }
