@@ -35,7 +35,15 @@ export function getJwtSecret() {
 export function assertProductionEnvironment() {
   if (process.env.NODE_ENV !== "production") return;
 
-  const required = ["JWT_SECRET", "MONGODB_URI", "GROQ_API_KEY", "APP_BASE_URL"];
+  const required = [
+    "JWT_SECRET",
+    "MONGODB_URI",
+    "GROQ_API_KEY",
+    "APP_BASE_URL",
+    "CORS_ORIGIN",
+    "RESEND_API_KEY",
+    "EMAIL_FROM",
+  ];
   const unsafe = required.filter((key) => isPlaceholderSecret(process.env[key]));
 
   if (unsafe.length) {
@@ -44,6 +52,38 @@ export function assertProductionEnvironment() {
 
   if (String(process.env.JWT_SECRET || "").length < 32) {
     throw new Error("JWT_SECRET must be at least 32 characters in production.");
+  }
+
+  if (String(process.env.CORS_ORIGIN || "").includes("*")) {
+    throw new Error("CORS_ORIGIN must be an explicit allowlist in production, not a wildcard.");
+  }
+
+  const publicUrls = [
+    ["APP_BASE_URL", process.env.APP_BASE_URL],
+    ...String(process.env.CORS_ORIGIN || "").split(",").filter(Boolean).map((value) => ["CORS_ORIGIN", value]),
+  ];
+  for (const [key, value] of publicUrls) {
+    try {
+      const url = new URL(value.trim());
+      const local = ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+      if (url.protocol !== "https:" && !local) throw new Error("HTTPS required");
+    } catch {
+      throw new Error(`${key} must contain a valid HTTPS URL in production (HTTP is allowed only for localhost).`);
+    }
+  }
+
+  if (process.env.REDIS_REQUIRED === "true" && isPlaceholderSecret(process.env.REDIS_URL)) {
+    throw new Error("REDIS_URL is required when REDIS_REQUIRED=true.");
+  }
+
+  if (process.env.PINECONE_ENABLED === "true") {
+    const missingPinecone = ["PINECONE_API_KEY"].filter((key) => isPlaceholderSecret(process.env[key]));
+    if (missingPinecone.length) {
+      throw new Error(`Pinecone is enabled but missing: ${missingPinecone.join(", ")}`);
+    }
+    if (isPlaceholderSecret(process.env.PINECONE_INDEX_NAME) && isPlaceholderSecret(process.env.PINECONE_INDEX_HOST)) {
+      throw new Error("Pinecone is enabled but PINECONE_INDEX_NAME or PINECONE_INDEX_HOST is missing.");
+    }
   }
 }
 
