@@ -4,6 +4,10 @@
   "description": "Advanced Travel & Location Assistant System - Backend API",
   "main": "index.js",
   "type": "module",
+  "engines": {
+    "node": ">=20.19.0",
+    "npm": ">=10"
+  },
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
@@ -12,7 +16,10 @@
     "test": "node --test scripts/*.test.js",
     "smoke": "node scripts/smoke-tests.js",
     "groq:test": "node scripts/groq-test.js",
-    "app-flow:test": "node scripts/app-flow-test.js"
+    "app-flow:test": "node --test scripts/context-service.test.js scripts/production-hardening.test.js scripts/app-security.test.js",
+    "pinecone:setup": "node scripts/pinecone-setup.js",
+    "places:test": "node scripts/places-new-test.js",
+    "db:indexes": "node scripts/sync-indexes.js"
   },
   "keywords": [
     "travel",
@@ -23,6 +30,7 @@
   "author": "SUBIN",
   "license": "MIT",
   "dependencies": {
+    "@pinecone-database/pinecone": "^7.2.0",
     "axios": "^1.4.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
@@ -36,9 +44,11 @@
     "morgan": "^1.10.0",
     "multer": "^2.1.1",
     "pdf-parse": "^1.1.1",
+    "redis": "^4.7.1",
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "nodemon": "^3.0.1"
+    "nodemon": "^3.0.1",
+    "supertest": "^7.2.2"
   }
 }
