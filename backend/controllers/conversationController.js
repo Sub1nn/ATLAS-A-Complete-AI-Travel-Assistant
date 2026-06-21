@@ -1,5 +1,6 @@
 import { Conversation } from "../models/Conversation.js";
 import { Message } from "../models/Message.js";
+import { titleSchema, validate } from "../utils/validation.js";
 
 export const conversationController = {
   async list(req, res) {
@@ -23,9 +24,11 @@ export const conversationController = {
   },
 
   async create(req, res) {
+    const parsed = validate(titleSchema, req.body?.title);
+    if (parsed.error) return res.status(400).json({ message: parsed.error });
     const conversation = await Conversation.create({
       userId: req.user._id,
-      title: req.body?.title || "New travel chat",
+      title: parsed.data || "New travel chat",
       memory: { locations: [], interests: [], travelDates: [] },
       lastMessagePreview: "",
       messageCount: 0,
@@ -38,9 +41,10 @@ export const conversationController = {
     if (!conversation) return res.status(404).json({ message: "Conversation not found" });
 
     const storedMessages = await Message.find({ conversationId: conversation._id, userId: req.user._id })
-      .sort({ createdAt: 1 })
+      .sort({ createdAt: -1 })
       .limit(300)
-      .lean();
+      .lean()
+      .then((items) => items.reverse());
 
     const legacyMessages = conversation.messages || [];
     const messages = storedMessages.length ? storedMessages : legacyMessages;
@@ -65,10 +69,8 @@ export const conversationController = {
   },
 
   async clearAll(req, res) {
-    const conversations = await Conversation.find({ userId: req.user._id }).select("_id").lean();
-    const ids = conversations.map((c) => c._id);
     const [messagesResult, conversationsResult] = await Promise.all([
-      Message.deleteMany({ userId: req.user._id, conversationId: { $in: ids } }),
+      Message.deleteMany({ userId: req.user._id }),
       Conversation.deleteMany({ userId: req.user._id }),
     ]);
     res.json({ ok: true, deletedCount: conversationsResult.deletedCount || 0, deletedMessages: messagesResult.deletedCount || 0 });
