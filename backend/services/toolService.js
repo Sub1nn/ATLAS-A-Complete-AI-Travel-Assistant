@@ -1,4 +1,7 @@
 import axios from "axios";
+import { cacheKey, getOrSetCache } from "./cacheService.js";
+import { logger } from "../utils/logger.js";
+import { getLocationData } from "../utils/locationUtils.js";
 
 const tools = [
   {
@@ -102,11 +105,28 @@ const tools = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "route_and_transport_planner",
+      description: "Plan a route or transport options between two places using Google Directions when available, with Google Maps fallback links.",
+      parameters: {
+        type: "object",
+        properties: {
+          origin: { type: "string", description: "Starting point or address" },
+          destination: { type: "string", description: "Destination place or address" },
+          mode: { type: "string", description: "Preferred mode: transit, walking, driving, bicycling" },
+        },
+        required: ["origin", "destination"],
+      },
+    },
+  },
 ];
 
 const TIMEOUTS = {
   weather: 10000,
   google_places: 9000,
+  yelp: 9000,
   news: 12000,
   default: 10000,
 };
@@ -126,6 +146,10 @@ function openWeatherKey() {
 
 function yelpKey() {
   return process.env.YELP_API_KEY || "";
+}
+
+function yelpHeaders(key = yelpKey()) {
+  return key ? { Authorization: `Bearer ${key}` } : {};
 }
 
 function normalize(value = "") {
@@ -152,9 +176,27 @@ function toNumber(value, name) {
   return n;
 }
 
-async function httpGet(url, params = {}, service = "default") {
+function ttlForService(service = "default") {
+  if (service === "google_geocode") return Number(process.env.CACHE_GEOCODE_TTL_SECONDS || 7 * 24 * 60 * 60);
+  if (service === "weather") return Number(process.env.CACHE_WEATHER_TTL_SECONDS || 15 * 60);
+  if (service === "google_places") return Number(process.env.CACHE_PLACES_TTL_SECONDS || 12 * 60 * 60);
+  if (service === "yelp") return Number(process.env.CACHE_PLACES_TTL_SECONDS || 12 * 60 * 60);
+  if (service === "news") return Number(process.env.CACHE_NEWS_TTL_SECONDS || 45 * 60);
+  return Number(process.env.CACHE_DEFAULT_TTL_SECONDS || 5 * 60);
+}
+
+function safeCachePayload(url, params = {}) {
+  const cleanParams = { ...params };
+  for (const key of Object.keys(cleanParams)) {
+    if (/key|token|secret|appid|authorization|apiKey/i.test(key)) cleanParams[key] = "[configured]";
+  }
+  return { url, params: cleanParams };
+}
+
+async function uncachedHttpGet(url, params = {}, service = "default", headers = {}) {
   const response = await axios.get(url, {
     params,
+    headers,
     timeout: TIMEOUTS[service] || TIMEOUTS.default,
     validateStatus: (status) => status < 500,
   });
@@ -164,6 +206,35 @@ async function httpGet(url, params = {}, service = "default") {
   }
 
   return response.data;
+}
+
+async function httpGet(url, params = {}, service = "default", headers = {}) {
+  const key = cacheKey(`http:${service}`, safeCachePayload(url, { params, headerNames: Object.keys(headers).sort() }));
+  const ttl = ttlForService(service);
+  const { value } = await getOrSetCache(key, ttl, () => uncachedHttpGet(url, params, service, headers));
+  return value;
+}
+
+async function uncachedHttpPost(url, body = {}, headers = {}, service = "default") {
+  const response = await axios.post(url, body, {
+    headers,
+    timeout: TIMEOUTS[service] || TIMEOUTS.default,
+    validateStatus: (status) => status < 500,
+  });
+
+  if (response.status >= 400) {
+    const providerMessage = response.data?.error?.message || response.data?.error_message || response.statusText;
+    throw new Error(`${service} returned HTTP ${response.status}${providerMessage ? `: ${providerMessage}` : ""}`);
+  }
+
+  return response.data;
+}
+
+async function httpPost(url, body = {}, headers = {}, service = "default") {
+  const key = cacheKey(`http-post:${service}`, safeCachePayload(url, { body, headers }));
+  const ttl = ttlForService(service);
+  const { value } = await getOrSetCache(key, ttl, () => uncachedHttpPost(url, body, headers, service));
+  return value;
 }
 
 async function withRetry(fn, service = "default") {
@@ -176,29 +247,72 @@ async function withRetry(fn, service = "default") {
       const message = String(error.message || "");
       if (/401|403|INVALID_REQUEST|REQUEST_DENIED/i.test(message)) break;
       if (attempt < RETRIES.maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, RETRIES.baseDelay * attempt));
+        const jitter = Math.floor(Math.random() * 250);
+        await new Promise((resolve) => setTimeout(resolve, RETRIES.baseDelay * attempt + jitter));
       }
     }
   }
   throw lastError;
 }
 
+function googlePriceLevel(value) {
+  if (typeof value === "number") return Math.max(0, Math.min(4, value));
+  const text = String(value || "").toUpperCase();
+  const map = {
+    PRICE_LEVEL_FREE: 0,
+    PRICE_LEVEL_INEXPENSIVE: 1,
+    PRICE_LEVEL_MODERATE: 2,
+    PRICE_LEVEL_EXPENSIVE: 3,
+    PRICE_LEVEL_VERY_EXPENSIVE: 4,
+  };
+  return Object.prototype.hasOwnProperty.call(map, text) ? map[text] : null;
+}
+
+function googlePriceHint(level) {
+  if (level === 0) return "free/low-cost";
+  if (level === null || level === undefined) return "varies";
+  return "$".repeat(Math.max(1, Math.min(level, 4)));
+}
+
 function compactPlace(place = {}, locationName = "") {
+  const displayName = place.displayName?.text || place.name || "Unknown place";
+  const reviewCount = Number(place.userRatingCount ?? place.user_ratings_total ?? 0);
+  const priceLevel = googlePriceLevel(place.priceLevel ?? place.price_level);
+  const address = place.formattedAddress || place.formatted_address || place.vicinity || "";
+  const mapsUrl = place.googleMapsUri || place.url || "";
+  const openNow = typeof place.currentOpeningHours?.openNow === "boolean"
+    ? place.currentOpeningHours.openNow
+    : typeof place.opening_hours?.open_now === "boolean"
+      ? place.opening_hours.open_now
+      : null;
+  const placeId = place.id || place.place_id || place.name || null;
+
   return {
-    name: place.name || "Unknown place",
+    name: displayName,
     rating: place.rating || null,
-    review_count: place.user_ratings_total || 0,
-    price_level: typeof place.price_level === "number" ? place.price_level : null,
-    price_hint: typeof place.price_level === "number" ? "$".repeat(Math.max(1, place.price_level)) : "varies",
-    address: place.vicinity || place.formatted_address || "",
+    review_count: reviewCount,
+    price_level: priceLevel,
+    price_hint: googlePriceHint(priceLevel),
+    address,
     types: (place.types || []).filter((type) => !["establishment", "point_of_interest"].includes(type)),
-    open_now: typeof place.opening_hours?.open_now === "boolean" ? place.opening_hours.open_now : null,
-    place_id: place.place_id || null,
-    source: "google_places",
+    open_now: openNow,
+    place_id: placeId,
+    source: "google_places_new",
     verified_from_google: true,
     verified_from_yelp: false,
+    url: mapsUrl,
+    website: place.websiteUri || "",
+    phone: place.nationalPhoneNumber || "",
+    business_status: place.businessStatus || "",
+    latitude: place.location?.latitude ?? place.geometry?.location?.lat ?? null,
+    longitude: place.location?.longitude ?? place.geometry?.location?.lng ?? null,
     location_context: locationName,
   };
+}
+
+
+function isYelpPlace(place = {}) {
+  return Boolean(place.url && Array.isArray(place.categories) && place.location);
 }
 
 function compactYelpPlace(place = {}, locationName = "") {
@@ -224,11 +338,23 @@ function compactYelpPlace(place = {}, locationName = "") {
   };
 }
 
+function placeName(place = {}) {
+  return place.displayName?.text || place.name || "";
+}
+
+function placeAddress(place = {}) {
+  return place.formattedAddress || place.formatted_address || place.vicinity || place.location?.address1 || "";
+}
+
+function placeReviewCount(place = {}) {
+  return Number(place.userRatingCount ?? place.user_ratings_total ?? place.review_count ?? 0);
+}
+
 function dedupePlaces(places = []) {
   const seen = new Set();
   const out = [];
   for (const place of places) {
-    const key = place.place_id || place.id || normalize(`${place.name} ${place.vicinity || place.formatted_address || place.location?.address1 || ""}`);
+    const key = place.id || place.place_id || place.name || normalize(`${placeName(place)} ${placeAddress(place)}`);
     if (!key || seen.has(key)) continue;
     seen.add(key);
     out.push(place);
@@ -240,51 +366,102 @@ function rankPlaces(places = []) {
   return [...places].sort((a, b) => {
     const score = (place) => {
       const rating = Number(place.rating || 0);
-      const reviews = Math.min(Number(place.user_ratings_total || place.review_count || 0), 1000) / 250;
-      const openBonus = place.opening_hours?.open_now ? 0.4 : 0;
+      const reviews = Math.min(placeReviewCount(place), 1000) / 250;
+      const openBonus = place.currentOpeningHours?.openNow || place.opening_hours?.open_now ? 0.4 : 0;
       return rating + reviews + openBonus;
     };
     return score(b) - score(a);
   });
 }
 
-async function nearbySearch({ lat, lon, radius = 5000, type, keyword }) {
+const GOOGLE_PLACES_NEW_FIELD_MASK = [
+  "places.id",
+  "places.name",
+  "places.displayName",
+  "places.formattedAddress",
+  "places.rating",
+  "places.userRatingCount",
+  "places.googleMapsUri",
+  "places.location",
+  "places.types",
+  "places.currentOpeningHours",
+  "places.regularOpeningHours",
+  "places.priceLevel",
+  "places.businessStatus",
+  "places.nationalPhoneNumber",
+  "places.websiteUri",
+].join(",");
+
+function readablePlaceType(type = "") {
+  const map = {
+    restaurant: "restaurants",
+    cafe: "cafes",
+    bar: "bars",
+    night_club: "nightlife",
+    lodging: "hotels",
+    museum: "museums",
+    library: "libraries",
+    shopping_mall: "shopping centres",
+    store: "shops",
+    park: "parks",
+    tourist_attraction: "tourist attractions",
+    art_gallery: "art galleries",
+    zoo: "zoo",
+    gym: "sports centre",
+    point_of_interest: "places",
+  };
+  return map[type] || String(type || "places").replace(/_/g, " ");
+}
+
+function textQueryForNearby({ type, keyword, locationName = "" }) {
+  const parts = [];
+  if (keyword) parts.push(keyword);
+  if (type) parts.push(readablePlaceType(type));
+  if (!parts.length) parts.push("places");
+  return `${[...new Set(parts.map((item) => String(item).trim()).filter(Boolean))].join(" ")} in ${locationName}`;
+}
+
+async function placesTextSearchNew({ query, lat, lon, radius = 8000, maxResultCount = 10 }) {
   const key = googlePlacesKey();
   if (!key) throw new Error("Google Places API key is not configured");
 
-  const data = await httpGet(
-    "https://maps.googleapis.com/maps/api/place/nearbysearch/json",
+  const body = {
+    textQuery: query,
+    maxResultCount: Math.max(1, Math.min(Number(maxResultCount) || 10, 20)),
+  };
+
+  const latitude = Number(lat);
+  const longitude = Number(lon);
+  if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+    body.locationBias = {
+      circle: {
+        center: { latitude, longitude },
+        radius: Math.max(500, Math.min(Number(radius) || 8000, 50000)),
+      },
+    };
+  }
+
+  const data = await httpPost(
+    "https://places.googleapis.com/v1/places:searchText",
+    body,
     {
-      location: `${lat},${lon}`,
-      radius,
-      type,
-      keyword,
-      key,
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": key,
+      "X-Goog-FieldMask": GOOGLE_PLACES_NEW_FIELD_MASK,
     },
     "google_places"
   );
 
-  if (["OK", "ZERO_RESULTS"].includes(data.status)) return data.results || [];
-  throw new Error(`Google Places ${data.status}${data.error_message ? `: ${data.error_message}` : ""}`);
+  return Array.isArray(data.places) ? data.places : [];
+}
+
+async function nearbySearch({ lat, lon, radius = 5000, type, keyword, locationName = "" }) {
+  const query = textQueryForNearby({ type, keyword, locationName });
+  return placesTextSearchNew({ query, lat, lon, radius, maxResultCount: 10 });
 }
 
 async function textSearch({ query, lat, lon, radius = 8000 }) {
-  const key = googlePlacesKey();
-  if (!key) throw new Error("Google Places API key is not configured");
-
-  const data = await httpGet(
-    "https://maps.googleapis.com/maps/api/place/textsearch/json",
-    {
-      query,
-      location: `${lat},${lon}`,
-      radius,
-      key,
-    },
-    "google_places"
-  );
-
-  if (["OK", "ZERO_RESULTS"].includes(data.status)) return data.results || [];
-  throw new Error(`Google Places ${data.status}${data.error_message ? `: ${data.error_message}` : ""}`);
+  return placesTextSearchNew({ query, lat, lon, radius, maxResultCount: 10 });
 }
 
 async function yelpSearch({ term, lat, lon, categories = "", radius = 10000, limit = 8 }) {
@@ -305,7 +482,8 @@ async function yelpSearch({ term, lat, lon, categories = "", radius = 10000, lim
   const data = await httpGet(
     "https://api.yelp.com/v3/businesses/search",
     params,
-    "google_places"
+    "yelp",
+    yelpHeaders(key),
   ).catch((error) => {
     throw new Error(`Yelp ${error.message}`);
   });
@@ -328,13 +506,41 @@ function mapsSearchAction(label, query, category = "search") {
   };
 }
 
+function conciseSearchLabel(term = "") {
+  const normalized = String(term || "").replace(/\s+/g, " ").trim();
+  const labels = [
+    [/^public tennis courts?$/i, "Public tennis courts"],
+    [/^indoor tennis courts?$/i, "Indoor tennis courts"],
+    [/^tennis courts?$/i, "Tennis courts"],
+    [/^tennis clubs?$/i, "Tennis club"],
+    [/^sports centres? tennis$/i, "Sports centre tennis"],
+    [/^community tennis court$/i, "Community tennis court"],
+    [/^museums?$/i, "Museums"],
+    [/^libraries$/i, "Libraries"],
+    [/^shopping centres?$/i, "Shopping centres"],
+    [/^parks$/i, "Parks"],
+    [/^cafes?$/i, "Cafes"],
+    [/^local restaurants$/i, "Local restaurants"],
+  ];
+  for (const [pattern, label] of labels) if (pattern.test(normalized)) return label;
+  return titleCase(normalized).replace(/\bIn\b/g, "in").slice(0, 54);
+}
+
 async function runPlaceSearchPlan(plan = [], lat, lon, locationName, maxCalls = 7) {
   const all = [];
   const errors = [];
   const used = [];
 
-  for (const step of plan.slice(0, maxCalls)) {
-    try {
+  const configuredLimit = Math.max(1, Number(process.env.PLACE_SEARCH_MAX_CALLS || 5));
+  const steps = plan.slice(0, Math.min(maxCalls, configuredLimit));
+  const concurrency = Math.max(1, Math.min(3, Number(process.env.PLACE_SEARCH_CONCURRENCY || 3)));
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < steps.length) {
+      const step = steps[cursor];
+      cursor += 1;
+      try {
       const results = await withRetry(async () => {
         if (step.mode === "yelp") {
           return yelpSearch({ term: step.term || step.query, lat, lon, categories: step.categories || "", radius: step.radius || 12000, limit: step.limit || 8 });
@@ -342,7 +548,7 @@ async function runPlaceSearchPlan(plan = [], lat, lon, locationName, maxCalls = 
         if (step.mode === "text") {
           return textSearch({ query: step.query, lat, lon, radius: step.radius || 9000 });
         }
-        return nearbySearch({ lat, lon, radius: step.radius || 7000, type: step.type, keyword: step.keyword });
+        return nearbySearch({ lat, lon, radius: step.radius || 7000, type: step.type, keyword: step.keyword, locationName });
       }, "google_places");
 
       const label = step.mode === "yelp"
@@ -352,10 +558,13 @@ async function runPlaceSearchPlan(plan = [], lat, lon, locationName, maxCalls = 
         : `${step.type}${step.keyword ? `:${step.keyword}` : ""}`;
       used.push(label);
       all.push(...results);
-    } catch (error) {
-      errors.push(error.message);
+      } catch (error) {
+        errors.push(error.message);
+      }
     }
   }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, steps.length) }, () => worker()));
 
   return {
     raw: rankPlaces(dedupePlaces(all)),
@@ -365,40 +574,224 @@ async function runPlaceSearchPlan(plan = [], lat, lon, locationName, maxCalls = 
   };
 }
 
-function activityPlan(interestType = "attractions", locationName = "") {
+const ACTIVITY_SEARCH_CONFIG = {
+  tennis: {
+    display: "tennis",
+    terms: ["tennis courts", "public tennis courts", "indoor tennis courts", "tennis club", "sports centre tennis", "community tennis court", "tennis near", "outdoor tennis courts", "municipal tennis courts"],
+    nearby: [{ type: "park", keyword: "tennis court" }, { type: "gym", keyword: "tennis" }, { type: "point_of_interest", keyword: "tennis" }],
+    yelp: { term: "tennis courts", categories: "tennis,sports_clubs,active" },
+  },
+  badminton: {
+    display: "badminton",
+    terms: ["badminton courts", "badminton club", "indoor badminton", "sports hall badminton", "sports centre badminton"],
+    nearby: [{ type: "gym", keyword: "badminton" }, { type: "point_of_interest", keyword: "badminton" }],
+    yelp: { term: "badminton", categories: "active,sports_clubs" },
+  },
+  football: {
+    display: "football/soccer",
+    terms: ["football pitch", "soccer field", "public football field", "futsal court", "sports centre football"],
+    nearby: [{ type: "park", keyword: "football pitch" }, { type: "point_of_interest", keyword: "football" }],
+    yelp: { term: "football soccer field", categories: "active,sports_clubs" },
+  },
+  basketball: {
+    display: "basketball",
+    terms: ["basketball courts", "public basketball court", "indoor basketball", "sports centre basketball"],
+    nearby: [{ type: "park", keyword: "basketball court" }, { type: "gym", keyword: "basketball" }],
+    yelp: { term: "basketball court", categories: "active,sports_clubs" },
+  },
+  volleyball: {
+    display: "volleyball",
+    terms: ["volleyball courts", "beach volleyball", "indoor volleyball", "sports centre volleyball"],
+    nearby: [{ type: "park", keyword: "volleyball" }, { type: "gym", keyword: "volleyball" }],
+    yelp: { term: "volleyball court", categories: "active,sports_clubs" },
+  },
+  swimming: {
+    display: "swimming",
+    terms: ["swimming pool", "public swimming pool", "aquatic centre", "indoor swimming pool"],
+    nearby: [{ type: "gym", keyword: "swimming pool" }, { type: "point_of_interest", keyword: "swimming pool" }],
+    yelp: { term: "swimming pool", categories: "active" },
+  },
+  gym: {
+    display: "gym or fitness",
+    terms: ["gym", "fitness centre", "fitness center", "sports centre", "public gym"],
+    nearby: [{ type: "gym", keyword: "fitness" }],
+    yelp: { term: "gym fitness", categories: "gyms,active" },
+  },
+  padel: {
+    display: "padel",
+    terms: ["padel courts", "padel club", "indoor padel", "sports centre padel"],
+    nearby: [{ type: "point_of_interest", keyword: "padel" }, { type: "gym", keyword: "padel" }],
+    yelp: { term: "padel courts", categories: "active,sports_clubs" },
+  },
+  pickleball: {
+    display: "pickleball",
+    terms: ["pickleball courts", "public pickleball courts", "pickleball club"],
+    nearby: [{ type: "park", keyword: "pickleball" }, { type: "gym", keyword: "pickleball" }],
+    yelp: { term: "pickleball courts", categories: "active,sports_clubs" },
+  },
+  squash: {
+    display: "squash",
+    terms: ["squash courts", "squash club", "sports centre squash"],
+    nearby: [{ type: "gym", keyword: "squash" }, { type: "point_of_interest", keyword: "squash" }],
+    yelp: { term: "squash courts", categories: "active,sports_clubs" },
+  },
+  golf: {
+    display: "golf",
+    terms: ["golf course", "driving range", "golf club"],
+    nearby: [{ type: "point_of_interest", keyword: "golf course" }],
+    yelp: { term: "golf course", categories: "golf,active" },
+  },
+  climbing: {
+    display: "climbing",
+    terms: ["climbing gym", "bouldering gym", "indoor climbing"],
+    nearby: [{ type: "gym", keyword: "climbing" }, { type: "point_of_interest", keyword: "bouldering" }],
+    yelp: { term: "climbing gym", categories: "climbing,active" },
+  },
+  bowling: {
+    display: "bowling",
+    terms: ["bowling alley", "bowling centre", "bowling center"],
+    nearby: [{ type: "bowling_alley" }],
+    yelp: { term: "bowling alley", categories: "bowling,active" },
+  },
+  skating: {
+    display: "skating",
+    terms: ["ice skating rink", "skate park", "skating rink"],
+    nearby: [{ type: "park", keyword: "skate" }, { type: "point_of_interest", keyword: "ice skating" }],
+    yelp: { term: "skating rink", categories: "active" },
+  },
+  running: {
+    display: "running",
+    terms: ["running track", "athletics track", "jogging park", "park running route"],
+    nearby: [{ type: "park", keyword: "running track" }, { type: "point_of_interest", keyword: "athletics track" }],
+    yelp: { term: "running track", categories: "active" },
+  },
+  sports: {
+    display: "sports",
+    terms: ["sports centre", "sports center", "sports hall", "public sports facilities", "municipal sports facilities"],
+    nearby: [{ type: "gym", keyword: "sports" }, { type: "point_of_interest", keyword: "sports centre" }, { type: "park", keyword: "sports" }],
+    yelp: { term: "sports facilities", categories: "active,sports_clubs,gyms" },
+  },
+};
+
+function activityKeyFromText(text = "") {
+  const value = normalize(text);
+  const ordered = ["tennis", "badminton", "football", "basketball", "volleyball", "swimming", "gym", "padel", "pickleball", "squash", "golf", "climbing", "bowling", "skating", "running"];
+  for (const key of ordered) {
+    if (key === "football" && /\b(football|soccer|futsal|pitch|soccer field)\b/.test(value)) return key;
+    if (key === "swimming" && /\b(swimming|swim|pool|aquatic)\b/.test(value)) return key;
+    if (key === "gym" && /\b(gym|fitness|workout)\b/.test(value)) return key;
+    if (key === "climbing" && /\b(climbing|bouldering)\b/.test(value)) return key;
+    if (key === "skating" && /\b(skating|skate|ice skating|rink)\b/.test(value)) return key;
+    if (key === "running" && /\b(running|jogging|track)\b/.test(value)) return key;
+    if (new RegExp(`\\b${key}\\b`).test(value)) return key;
+  }
+  if (/\b(court|courts)\b/.test(value)) return "tennis";
+  if (/\b(sport|sports|play|venue|facility|facilities)\b/.test(value)) return "sports";
+  return "";
+}
+
+function localizedActivityTerms(activityKey, locationName = "") {
+  const loc = normalize(locationName);
+  const terms = [];
+  const add = (values) => terms.push(...values);
+
+  if (/finland|suomi|riihimaki|helsinki|hyvinkaa|tampere|turku|lahti|espoo|vantaa|oulu|jyvaskyla/.test(loc)) {
+    if (activityKey === "tennis") add(["tenniskenttä", "tennishalli", "tennisseura", "ulkotenniskenttä", "urheilupuisto tennis", "Riihimäen tenniskenttä", "Riihimäen Tennisseura", "tennis Riihimäki", "liikuntapalvelut tennis"]);
+    if (activityKey === "badminton") add(["sulkapallokenttä", "sulkapallohalli", "liikuntahalli sulkapallo"]);
+    if (activityKey === "football") add(["jalkapallokenttä", "futsal", "urheilukenttä"]);
+    if (activityKey === "sports") add(["liikuntahalli", "urheilukeskus", "urheilupuisto", "liikuntapalvelut"]);
+  }
+  if (/sweden|stockholm|gothenburg|goteborg|malmo/.test(loc)) {
+    if (activityKey === "tennis") add(["tennisbana", "tennishall", "tennisklubb"]);
+    if (activityKey === "sports") add(["idrottshall", "sportcenter", "idrottsplats"]);
+  }
+  if (/norway|oslo|bergen|trondheim|denmark|copenhagen|kobenhavn/.test(loc)) {
+    if (activityKey === "tennis") add(["tennisbane", "tennishall", "tennisklubb"]);
+    if (activityKey === "sports") add(["idrettshall", "sportssenter", "idraetshal"]);
+  }
+  if (/germany|austria|switzerland|berlin|munich|munchen|vienna|zurich|zürich|hamburg/.test(loc)) {
+    if (activityKey === "tennis") add(["Tennisplatz", "Tennishalle", "Tennisverein"]);
+    if (activityKey === "sports") add(["Sportzentrum", "Sporthalle", "Sportanlage"]);
+  }
+  if (/france|paris|lyon|marseille|belgium|brussels|bruxelles/.test(loc)) {
+    if (activityKey === "tennis") add(["court de tennis", "club de tennis"]);
+    if (activityKey === "sports") add(["centre sportif", "gymnase"]);
+  }
+  if (/spain|mexico|madrid|barcelona|chile|argentina|colombia|peru/.test(loc)) {
+    if (activityKey === "tennis") add(["pista de tenis", "club de tenis", "canchas de tenis"]);
+    if (activityKey === "sports") add(["centro deportivo", "polideportivo"]);
+  }
+  if (/italy|rome|milan|naples/.test(loc)) {
+    if (activityKey === "tennis") add(["campo da tennis", "circolo tennis"]);
+    if (activityKey === "sports") add(["centro sportivo", "palazzetto dello sport"]);
+  }
+  if (/portugal|brazil|lisbon|porto|sao paulo|rio de janeiro/.test(loc)) {
+    if (activityKey === "tennis") add(["quadra de tênis", "clube de tênis"]);
+    if (activityKey === "sports") add(["centro esportivo", "pavilhão desportivo"]);
+  }
+  if (/japan|tokyo|osaka|kyoto/.test(loc)) {
+    if (activityKey === "tennis") add(["テニスコート", "テニスクラブ"]);
+    if (activityKey === "sports") add(["スポーツセンター", "体育館"]);
+  }
+  if (/south korea|korea|seoul|busan/.test(loc)) {
+    if (activityKey === "tennis") add(["테니스장", "테니스 클럽"]);
+    if (activityKey === "sports") add(["스포츠 센터", "체육관"]);
+  }
+  if (/turkey|istanbul|ankara|antalya/.test(loc)) {
+    if (activityKey === "tennis") add(["tenis kortu", "tenis kulübü"]);
+    if (activityKey === "sports") add(["spor salonu", "spor merkezi"]);
+  }
+
+  return [...new Set(terms)];
+}
+
+function activitySearchTerms(interestType = "attractions", locationName = "") {
+  const activityKey = activityKeyFromText(interestType) || "";
+  const config = ACTIVITY_SEARCH_CONFIG[activityKey] || null;
+  if (!config) return [];
+  const generic = config.terms || [];
+  const localized = localizedActivityTerms(activityKey, locationName);
+  return [...new Set([...generic, ...localized])];
+}
+
+function activitySpecificSuggestions(interestType = "", locationName = "") {
+  const terms = activitySearchTerms(interestType, locationName);
+  if (terms.length) return terms.slice(0, 6);
+
+  const text = normalize(interestType);
+  if (/top attractions|local experiences|general travel|things to do|attractions/.test(text)) {
+    return ["museums", "libraries", "shopping centres", "parks", "cafes"];
+  }
+
+  return ["things to do", "activity venues", "official tourism pages", "parks", "visitor centres"];
+}
+
+function activityPlan(interestType = "attractions", locationName = "", plannerQueries = []) {
   const text = normalize(interestType);
   const plan = [];
-
   const add = (step) => plan.push(step);
+  const activityKey = activityKeyFromText(text);
+  const config = ACTIVITY_SEARCH_CONFIG[activityKey];
 
-  if (/tennis|court|courts|sports|sport|play tennis/.test(text)) {
-    add({ mode: "text", query: `tennis court near ${locationName}` });
-    add({ mode: "text", query: `public tennis courts in ${locationName}` });
-    add({ mode: "text", query: `free tennis courts in ${locationName}` });
-    add({ mode: "text", query: `municipal tennis courts in ${locationName}` });
-    add({ mode: "text", query: `tennis courts in ${locationName}` });
-    add({ mode: "text", query: `tennis club in ${locationName}` });
-    add({ mode: "text", query: `outdoor tennis courts in ${locationName}` });
-    add({ mode: "text", query: `indoor tennis courts in ${locationName}` });
-    add({ mode: "text", query: `sports center tennis in ${locationName}` });
-    add({ mode: "text", query: `sports centre tennis in ${locationName}` });
-    add({ mode: "nearby", type: "park", keyword: "tennis court" });
-    add({ mode: "nearby", type: "gym", keyword: "tennis" });
-    add({ mode: "nearby", type: "point_of_interest", keyword: "tennis" });
-    add({ mode: "yelp", term: `tennis courts ${locationName}`, categories: "tennis,sports_clubs,active" });
-    add({ mode: "yelp", term: `sports centers ${locationName}`, categories: "active" });
+  if (config) {
+    const terms = [...new Set([...plannerQueries.filter(Boolean), ...activitySearchTerms(text, locationName)])];
+    for (const term of terms) {
+      add({ mode: "text", query: `${term} in ${locationName}`.replace(/tennis near in/i, "tennis near"), radius: /public|municipal|community|park|kenttä|bana|pista|quadra|court|tennis|halli|seura/i.test(term) ? 30000 : 16000 });
+    }
+    for (const nearby of config.nearby || []) add({ mode: "nearby", ...nearby, radius: 25000 });
+    if (config.yelp) add({ mode: "yelp", term: `${config.yelp.term} ${locationName}`, categories: config.yelp.categories || "active" });
     return plan;
   }
 
   if (/baby|family|child|kid|indoor|rain|stroller/.test(text)) {
     add({ mode: "text", query: `indoor playground in ${locationName}` });
+    add({ mode: "text", query: `family activities in ${locationName}` });
     add({ mode: "nearby", type: "museum" });
     add({ mode: "nearby", type: "library" });
     add({ mode: "nearby", type: "shopping_mall" });
     add({ mode: "nearby", type: "cafe", keyword: "family" });
     add({ mode: "nearby", type: "restaurant", keyword: "family friendly" });
     add({ mode: "nearby", type: "park" });
-    add({ mode: "text", query: `family activities in ${locationName}` });
     add({ mode: "yelp", term: `family friendly places ${locationName}`, categories: "kids_activities,museums,playgrounds,cafes" });
     return plan;
   }
@@ -445,13 +838,37 @@ function activityPlan(interestType = "attractions", locationName = "") {
 function restaurantPlan(cuisine = "local traditional", locationName = "") {
   const text = normalize(cuisine);
   const plan = [];
+  const pushText = (query) => plan.push({ mode: "text", query });
+  const pushNearby = (type, keyword = "") => plan.push({ mode: "nearby", type, keyword });
+
+  if (/nightlife|bar|pub|night club|nightclub|club/.test(text)) {
+    pushText(`best bars in ${locationName}`);
+    pushText(`pubs in ${locationName}`);
+    pushText(`night clubs in ${locationName}`);
+    pushText(`nightlife in ${locationName}`);
+    pushNearby("bar");
+    pushNearby("night_club");
+    plan.push({ mode: "yelp", term: `bars nightlife ${locationName}`, categories: "bars,nightlife" });
+    return plan;
+  }
+
+  if (/cafe|cafes|coffee/.test(text)) {
+    pushText(`cafes in ${locationName}`);
+    pushText(`coffee shops in ${locationName}`);
+    pushText(`local cafes in ${locationName}`);
+    pushNearby("cafe");
+    plan.push({ mode: "yelp", term: `cafes coffee ${locationName}`, categories: "cafes,coffee" });
+    return plan;
+  }
+
   const keyword = text.includes("local") || text.includes("traditional") ? "traditional local" : cuisine;
-  plan.push({ mode: "text", query: `${keyword} restaurants in ${locationName}` });
-  plan.push({ mode: "nearby", type: "restaurant", keyword });
-  plan.push({ mode: "nearby", type: "restaurant" });
-  plan.push({ mode: "nearby", type: "cafe" });
-  if (/street|cheap|budget|local/.test(text)) plan.push({ mode: "text", query: `cheap local food in ${locationName}` });
-  if (/family|baby|child|kid/.test(text)) plan.push({ mode: "text", query: `family friendly restaurants in ${locationName}` });
+  pushText(`${keyword} restaurants in ${locationName}`);
+  pushNearby("restaurant", keyword);
+  pushNearby("restaurant");
+  pushNearby("cafe");
+  if (/vegetarian|vegan/.test(text)) pushText(`vegetarian vegan restaurants in ${locationName}`);
+  if (/street|cheap|budget|local/.test(text)) pushText(`cheap local food in ${locationName}`);
+  if (/family|baby|child|kid/.test(text)) pushText(`family friendly restaurants in ${locationName}`);
   plan.push({ mode: "yelp", term: `${keyword} restaurants ${locationName}`, categories: "restaurants,cafes" });
   return plan;
 }
@@ -459,21 +876,45 @@ function restaurantPlan(cuisine = "local traditional", locationName = "") {
 function accommodationPlan(budget = "budget", stayType = "hotel", locationName = "") {
   const text = normalize(`${budget} ${stayType}`);
   const plan = [];
+  const pushText = (query) => plan.push({ mode: "text", query });
+  const pushLodging = (keyword = "") => plan.push({ mode: "nearby", type: "lodging", keyword });
 
-  if (/cheap|budget|hostel|guesthouse|guest house|homestay|backpacker|\$/.test(text)) {
-    plan.push({ mode: "text", query: `hostels in ${locationName}` });
-    plan.push({ mode: "text", query: `guesthouses in ${locationName}` });
-    plan.push({ mode: "text", query: `budget hotels in ${locationName}` });
-    plan.push({ mode: "nearby", type: "lodging", keyword: "hostel guesthouse budget" });
-  } else if (/luxury|premium|resort|5 star|five star/.test(text)) {
-    plan.push({ mode: "text", query: `luxury hotels in ${locationName}` });
-    plan.push({ mode: "nearby", type: "lodging", keyword: "luxury hotel" });
+  if (/hostel|backpacker/.test(text)) {
+    pushText(`hostels in ${locationName}`);
+    pushText(`backpacker hostels in ${locationName}`);
+    pushText(`budget hostels in ${locationName}`);
+    pushLodging("hostel budget");
+  } else if (/motel/.test(text)) {
+    pushText(`motels in ${locationName}`);
+    pushText(`roadside motels in ${locationName}`);
+    pushLodging("motel");
+  } else if (/lodge|guesthouse|guest house|homestay/.test(text)) {
+    pushText(`guesthouses in ${locationName}`);
+    pushText(`lodges in ${locationName}`);
+    pushText(`homestays in ${locationName}`);
+    pushLodging("guesthouse lodge homestay");
+  } else if (/apartment|serviced apartment|flat/.test(text)) {
+    pushText(`serviced apartments in ${locationName}`);
+    pushText(`apartment hotels in ${locationName}`);
+    pushLodging("serviced apartment");
+  } else if (/luxury|premium|resort|5 star|five star|expensive/.test(text)) {
+    pushText(`luxury hotels in ${locationName}`);
+    pushText(`5 star hotels in ${locationName}`);
+    pushText(`resorts in ${locationName}`);
+    pushLodging("luxury hotel resort");
+  } else if (/cheap|budget|affordable|low cost|low-cost|\$/.test(text)) {
+    pushText(`hostels in ${locationName}`);
+    pushText(`guesthouses in ${locationName}`);
+    pushText(`budget hotels in ${locationName}`);
+    pushText(`cheap hotels in ${locationName}`);
+    pushLodging("hostel guesthouse budget");
   } else {
-    plan.push({ mode: "text", query: `${stayType || "hotel"} in ${locationName}` });
-    plan.push({ mode: "nearby", type: "lodging" });
+    pushText(`${stayType || "hotel"} in ${locationName}`);
+    pushText(`well rated hotels in ${locationName}`);
+    pushLodging();
   }
 
-  plan.push({ mode: "nearby", type: "lodging" });
+  pushLodging();
   return plan;
 }
 
@@ -482,7 +923,7 @@ function highEndHotelName(name = "") {
 }
 
 function budgetAccommodationScore(place = {}) {
-  const name = String(place.name || "");
+  const name = String(placeName(place) || "");
   const types = Array.isArray(place.types) ? place.types.join(" ").toLowerCase() : "";
   let score = 0;
   if (/hostel|guesthouse|guest house|homestay|backpacker|budget|inn|lodge|bnb/i.test(name)) score += 8;
@@ -501,7 +942,7 @@ function filterAndRankAccommodation(places = [], budget = "budget") {
 
   if (/cheap|budget|hostel|guesthouse|guest house|homestay|\$/.test(text)) {
     ranked = ranked
-      .filter((place) => !highEndHotelName(place.name))
+      .filter((place) => !highEndHotelName(placeName(place)))
       .sort((a, b) => budgetAccommodationScore(b) - budgetAccommodationScore(a));
   } else {
     ranked = rankPlaces(ranked);
@@ -521,7 +962,7 @@ function dataNote(status, note, extra = {}) {
 
 function noPlacesResult(locationName, category, suggestions = []) {
   const searchActions = suggestions.slice(0, 5).map((term) =>
-    mapsSearchAction(`${titleCase(term)} search`, `${term} in ${locationName}`, "search")
+    mapsSearchAction(conciseSearchLabel(term), /\bin\s+/i.test(term) ? term : `${term} in ${locationName}`, "search")
   );
 
   return {
@@ -567,7 +1008,23 @@ function weatherAlerts(current, forecast) {
   return alerts.length ? alerts : ["No severe weather alerts detected from the returned forecast data."];
 }
 
-async function weatherTool({ latitude, longitude, location_name }) {
+function forecastLocalDate(item = {}, timezoneSeconds = 0) {
+  if (!item?.dt) return "";
+  return new Date((Number(item.dt) + Number(timezoneSeconds || 0)) * 1000).toISOString().slice(0, 10);
+}
+
+function formatForecastItem(item = {}, timezoneSeconds = 0) {
+  const shifted = new Date((Number(item.dt) + Number(timezoneSeconds || 0)) * 1000);
+  return {
+    time: shifted.toLocaleString("en-GB", { timeZone: "UTC", hour: "2-digit", minute: "2-digit", weekday: "short", day: "2-digit", month: "short" }),
+    temperature: Math.round(item.main.temp),
+    description: item.weather?.[0]?.description || "forecast unavailable",
+    rain_probability: Math.round((item.pop || 0) * 100),
+    wind_speed: Math.round((item.wind?.speed || 0) * 3.6),
+  };
+}
+
+async function weatherTool({ latitude, longitude, location_name, target_date = "", date_label = "" }) {
   const lat = toNumber(latitude, "latitude");
   const lon = toNumber(longitude, "longitude");
   const key = openWeatherKey();
@@ -582,6 +1039,20 @@ async function weatherTool({ latitude, longitude, location_name }) {
 
   const condition = current.weather[0].main;
   const temp = current.main.temp;
+  const timezoneSeconds = forecast?.city?.timezone || current?.timezone || 0;
+  const allForecast = forecast.list || [];
+  let scopedForecast = allForecast;
+  let matchedTargetDate = false;
+
+  if (target_date) {
+    const exact = allForecast.filter((item) => forecastLocalDate(item, timezoneSeconds) === target_date);
+    if (exact.length) {
+      scopedForecast = exact;
+      matchedTargetDate = true;
+    } else {
+      scopedForecast = [];
+    }
+  }
 
   return {
     location: location_name,
@@ -593,19 +1064,25 @@ async function weatherTool({ latitude, longitude, location_name }) {
       wind_speed: Math.round((current.wind?.speed || 0) * 3.6),
       visibility_km: current.visibility ? Math.round(current.visibility / 1000) : null,
     },
-    hourly_forecast: (forecast.list || []).slice(0, 8).map((item) => ({
-      time: new Date(item.dt * 1000).toLocaleString("en-GB", { hour: "2-digit", minute: "2-digit", weekday: "short", day: "2-digit", month: "short" }),
-      temperature: Math.round(item.main.temp),
-      description: item.weather?.[0]?.description || "forecast unavailable",
-      rain_probability: Math.round((item.pop || 0) * 100),
-      wind_speed: Math.round((item.wind?.speed || 0) * 3.6),
-    })),
+    forecast_scope: {
+      target_date: target_date || "",
+      target_label: date_label || "",
+      matched_target_date: target_date ? matchedTargetDate : true,
+      timezone_offset_seconds: timezoneSeconds,
+    },
+    hourly_forecast: scopedForecast.slice(0, target_date ? 10 : 8).map((item) => formatForecastItem(item, timezoneSeconds)),
     travel_recommendations: {
       best_approach: getWeatherAdvice(temp, condition),
       clothing: getClothingAdvice(temp, condition),
       alerts: weatherAlerts(current, forecast),
     },
-    data_quality: dataNote("verified", "Current weather and forecast data were returned by OpenWeather for the resolved coordinates. Wind values are converted from m/s to km/h.", { source: "openweather", updated_at: new Date().toISOString() }),
+    data_quality: dataNote(
+      target_date && !matchedTargetDate ? "limited" : "verified",
+      target_date && !matchedTargetDate
+        ? "OpenWeather returned current conditions, but the 5-day forecast did not include the requested target date. Ask the user to check again closer to the activity."
+        : "Current weather and forecast data were returned by OpenWeather for the resolved coordinates. Wind values are converted from m/s to km/h.",
+      { source: "openweather", updated_at: new Date().toISOString() }
+    ),
   };
 }
 
@@ -620,7 +1097,7 @@ async function restaurantTool({ lat, lon, location_name, cuisine_preference = "l
       ...noPlacesResult(location_name, "restaurant", ["local restaurants", "cafes", "food markets", "hotel-recommended dining", "recently reviewed places near your stay"]),
       cuisine_focus: cuisine_preference,
       dining_tips: "For dining decisions, prioritize recent reviews, hygiene comments, opening hours and distance from your accommodation.",
-      search_metadata: { used_queries, errors: errors.slice(0, 3), source: "google_places_api" },
+      search_metadata: { used_queries, errors: errors.slice(0, 3), source: "google_places_new" },
     };
   }
 
@@ -633,10 +1110,14 @@ async function restaurantTool({ lat, lon, location_name, cuisine_preference = "l
   return {
     location: location_name,
     cuisine_focus: cuisine_preference,
-    restaurants: restaurants.map((place) => place.id && !place.place_id ? compactYelpPlace(place, location_name) : compactPlace(place, location_name)),
+    restaurants: restaurants.map((place) => isYelpPlace(place) ? compactYelpPlace(place, location_name) : compactPlace(place, location_name)),
+    search_actions: restaurantPlan(cuisine_preference, location_name)
+      .filter((step) => step.mode === "text")
+      .slice(0, 5)
+      .map((step) => mapsSearchAction(conciseSearchLabel(step.query.replace(new RegExp(`\\s+in\\s+${location_name.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}$`, "i"), "")), step.query, "restaurant")),
     dining_tips: "Use this as a verified discovery shortlist from Google Places. Confirm opening hours, current menu and reservation needs before going.",
-    data_quality: dataNote("verified", "Restaurant results were returned by Google Places. Ratings and opening status can change, so verify before visiting.", { source: yelpKey() ? "google_places_api_and_yelp_api" : "google_places_api" }),
-    search_metadata: { total_found: restaurants.length, used_queries, source: yelpKey() ? "google_places_api_and_yelp_api" : "google_places_api" },
+    data_quality: dataNote("verified", "Restaurant results were returned by Google Places. Ratings and opening status can change, so verify before visiting.", { source: yelpKey() ? "google_places_new_and_yelp_api" : "google_places_new" }),
+    search_metadata: { total_found: restaurants.length, used_queries, source: yelpKey() ? "google_places_new_and_yelp_api" : "google_places_new" },
   };
 }
 
@@ -657,7 +1138,7 @@ async function accommodationTool({ lat, lon, location_name, budget_category = "b
         { fallback_suggestions: ["hostels", "guesthouses", "homestays", "simple hotels", "apartments with recent reviews"] }
       ),
       booking_insights: "Confirm final nightly prices, taxes, cancellation policy and recent reviews on booking platforms for your exact dates.",
-      search_metadata: { used_queries, errors: errors.slice(0, 3), source: "google_places_api" },
+      search_metadata: { used_queries, errors: errors.slice(0, 3), source: "google_places_new" },
     };
   }
 
@@ -667,28 +1148,33 @@ async function accommodationTool({ lat, lon, location_name, budget_category = "b
     accommodation_type: stay_type,
     budget_range: budget_category,
     properties: ranked.map((place) => compactPlace(place, location_name)),
+    search_actions: accommodationPlan(budget_category, stay_type, location_name)
+      .filter((step) => step.mode === "text")
+      .slice(0, 5)
+      .map((step) => mapsSearchAction(conciseSearchLabel(step.query.replace(new RegExp(`\\s+in\\s+${location_name.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}$`, "i"), "")), step.query, "stay")),
     booking_insights: "Google Places does not provide guaranteed live booking prices. Use these verified property names as a discovery shortlist, then confirm exact nightly rates and taxes on booking platforms or property websites.",
-    data_quality: dataNote("verified", "Accommodation names and ratings were returned by Google Places; live room prices and availability were not returned.", { source: "google_places_api", live_prices_available: false }),
-    search_metadata: { total_found: ranked.length, used_queries, source: "google_places_api" },
+    data_quality: dataNote("verified", "Accommodation names and ratings were returned by Google Places; live room prices and availability were not returned.", { source: "google_places_new", live_prices_available: false }),
+    search_metadata: { total_found: ranked.length, used_queries, source: "google_places_new" },
   };
 }
 
-async function attractionsTool({ lat, lon, location_name, interest_type = "attractions" }) {
+async function attractionsTool({ lat, lon, location_name, interest_type = "attractions", planner_queries = [], planner_map_searches = [] }) {
   const latitude = toNumber(lat, "lat");
   const longitude = toNumber(lon, "lon");
-  const plan = activityPlan(interest_type, location_name);
+  const plan = activityPlan(interest_type, location_name, planner_queries);
   const { raw, used_queries, errors } = await runPlaceSearchPlan(plan, latitude, longitude, location_name, 9);
 
   if (!raw.length) {
+    const suggestions = planner_map_searches.length ? planner_map_searches : activitySpecificSuggestions(interest_type, location_name);
     return {
-      ...noPlacesResult(location_name, "activity or attraction", ["museums", "libraries", "shopping centres", "parks", "cafes", "official tourism pages"]),
+      ...noPlacesResult(location_name, activityKeyFromText(interest_type) || "activity or attraction", suggestions),
       experience_category: interest_type,
-      search_metadata: { used_queries, errors: errors.slice(0, 3), source: "google_places_api" },
+      search_metadata: { used_queries, errors: errors.slice(0, 3), source: "google_places_new" },
     };
   }
 
   const recommendations = rankPlaces(raw).slice(0, 10).map((place) => ({
-    ...(place.id && !place.place_id ? compactYelpPlace(place, location_name) : compactPlace(place, location_name)),
+    ...(isYelpPlace(place) ? compactYelpPlace(place, location_name) : compactPlace(place, location_name)),
     category: (place.types || []).filter((type) => !["establishment", "point_of_interest"].includes(type)).join(", ") || interest_type,
     why_visit: place.rating >= 4 ? "Highly rated by Google users" : "Relevant local option returned by Google Places",
   }));
@@ -697,14 +1183,106 @@ async function attractionsTool({ lat, lon, location_name, interest_type = "attra
     location: location_name,
     experience_category: interest_type,
     recommendations,
-    planning_tips: /tennis|court|sports/.test(normalize(interest_type))
+    search_actions: (planner_map_searches.length ? planner_map_searches : activitySpecificSuggestions(interest_type, location_name)).slice(0, 5).map((term) => mapsSearchAction(conciseSearchLabel(term), /\bin\s+/i.test(term) ? term : `${term} in ${location_name}`, "search")),
+    planning_tips: /tennis|court|sports|badminton|football|soccer|basketball|volleyball|swimming|gym|fitness|padel|pickleball|squash|golf|climbing|bowling|skating/.test(normalize(interest_type))
       ? "Use this as a verified discovery shortlist from Google Places. Google Places usually cannot confirm whether a court is free, so check the municipality, club website or venue phone number before going."
       : "Use this as a verified discovery shortlist. Check opening hours, stroller access, booking rules and recent reviews before visiting.",
-    data_quality: dataNote("verified", /tennis|court|sports/.test(normalize(interest_type))
+    data_quality: dataNote("verified", /tennis|court|sports|badminton|football|soccer|basketball|volleyball|swimming|gym|fitness|padel|pickleball|squash|golf|climbing|bowling|skating/.test(normalize(interest_type))
       ? "Venue results were returned by Google Places. Free/public access cannot be guaranteed from Places data alone."
-      : "Activity and venue results were returned by Google Places. Suitability details such as baby facilities or accessibility should still be checked directly.", { source: yelpKey() ? "google_places_api_and_yelp_api" : "google_places_api" }),
-    search_metadata: { total_found: recommendations.length, used_queries, source: yelpKey() ? "google_places_api_and_yelp_api" : "google_places_api" },
+      : "Activity and venue results were returned by Google Places. Suitability details such as baby facilities or accessibility should still be checked directly.", { source: yelpKey() ? "google_places_new_and_yelp_api" : "google_places_new" }),
+    search_metadata: { total_found: recommendations.length, used_queries, source: yelpKey() ? "google_places_new_and_yelp_api" : "google_places_new" },
   };
+}
+
+
+function mapsDirectionsUrl(origin = "", destination = "", mode = "transit") {
+  const travelmode = ["driving", "walking", "bicycling", "transit"].includes(mode) ? mode : "transit";
+  return `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(destination)}&travelmode=${encodeURIComponent(travelmode)}`;
+}
+
+function compactRouteLeg(route = {}) {
+  const leg = route.legs?.[0] || {};
+  return {
+    summary: route.summary || "Suggested route",
+    distance: leg.distance?.text || "distance unavailable",
+    duration: leg.duration?.text || "duration unavailable",
+    start_address: leg.start_address || "",
+    end_address: leg.end_address || "",
+    steps: (leg.steps || []).slice(0, 6).map((step) => ({
+      instruction: String(step.html_instructions || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
+      distance: step.distance?.text || "",
+      duration: step.duration?.text || "",
+      travel_mode: step.travel_mode || "",
+      transit_line: step.transit_details?.line?.short_name || step.transit_details?.line?.name || "",
+    })).filter((step) => step.instruction),
+  };
+}
+
+async function routeTool({ origin, destination, mode = "transit" }) {
+  const from = String(origin || "").trim();
+  const to = String(destination || "").trim();
+  if (!from || !to) {
+    return {
+      origin: from,
+      destination: to,
+      routes: [],
+      search_actions: [mapsSearchAction("Open route in Google Maps", `${from || "origin"} to ${to || "destination"}`, "route")],
+      data_quality: dataNote("limited", "Route request needs both an origin and a destination."),
+      practical_tips: ["Share both starting point and destination for a useful route."],
+    };
+  }
+
+  const travelMode = ["driving", "walking", "bicycling", "transit"].includes(normalize(mode)) ? normalize(mode) : "transit";
+  const mapUrl = mapsDirectionsUrl(from, to, travelMode);
+  const key = googlePlacesKey();
+
+  if (!key) {
+    return {
+      origin: from,
+      destination: to,
+      mode: travelMode,
+      routes: [],
+      search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${from} → ${to}`, url: mapUrl, is_search: true }],
+      data_quality: dataNote("limited", "Google Maps API key is not configured, so ATLAS can only provide a map link."),
+      practical_tips: ["Open the route in Maps and choose public transport, walking or driving depending on your situation."],
+    };
+  }
+
+  try {
+    const data = await withRetry(
+      () => httpGet(
+        "https://maps.googleapis.com/maps/api/directions/json",
+        { origin: from, destination: to, mode: travelMode, alternatives: true, key },
+        "google_places"
+      ),
+      "google_places"
+    );
+
+    if (!["OK", "ZERO_RESULTS"].includes(data.status)) {
+      throw new Error(`Google Directions ${data.status}${data.error_message ? `: ${data.error_message}` : ""}`);
+    }
+
+    const routes = (data.routes || []).slice(0, 3).map(compactRouteLeg);
+    return {
+      origin: from,
+      destination: to,
+      mode: travelMode,
+      routes,
+      search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${from} → ${to}`, url: mapUrl, is_search: true }],
+      data_quality: dataNote(routes.length ? "verified" : "limited", routes.length ? "Route data was returned by Google Directions. Exact live traffic and disruptions should still be checked in Maps." : "Google Directions returned no route for this request; use the Maps link and adjust origin, destination or mode.", { source: "google_directions_api" }),
+      practical_tips: ["Check live traffic, transit disruptions and last departure times before leaving.", "For tourist trips, save the route offline or screenshot key steps."],
+    };
+  } catch (error) {
+    return {
+      origin: from,
+      destination: to,
+      mode: travelMode,
+      routes: [],
+      search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${from} → ${to}`, url: mapUrl, is_search: true }],
+      data_quality: dataNote("limited", `Google Directions could not be checked: ${error.message}`),
+      practical_tips: ["Use the Maps route link as a fallback and confirm traffic, transit schedules and walking safety before leaving."],
+    };
+  }
 }
 
 function sensitiveDestinationAliases(location = "", country = "") {
@@ -793,7 +1371,53 @@ function isRelevantNewsArticle(article = {}, location = "", country = "") {
   return safetyTerms.some((term) => haystack.includes(term));
 }
 
-function safetyRiskLevel(location = "", country = "", articleCount = 0) {
+const SAFETY_SEVERITY_RULES = [
+  { pattern: /\b(war|airstrike|missile|rocket|bombing|terror|terrorism|armed conflict|invasion|military operation)\b/i, points: 35 },
+  { pattern: /\b(attack|shooting|explosion|violence|deadly|death|killed|wounded|kidnapping|hostage)\b/i, points: 28 },
+  { pattern: /\b(riot|riots|unrest|clashes|curfew|state of emergency|evacuation|airport closure|border closure)\b/i, points: 24 },
+  { pattern: /\b(protest|demonstration|strike|march|checkpoint|roadblock|border tension)\b/i, points: 16 },
+  { pattern: /\b(flood|landslide|earthquake|storm|wildfire|heatwave|monsoon warning|travel disruption)\b/i, points: 14 },
+  { pattern: /\b(tourist warning|travel advisory|security alert|avoid travel|reconsider travel)\b/i, points: 22 },
+  { pattern: /\b(tourism|tourist|visitor|airport|visa|pilgrim|festival|event)\b/i, points: 4 },
+];
+
+function safetySignalFromArticles(location = "", country = "", articles = []) {
+  const destination = normalize(`${location} ${country}`);
+  const sensitiveBase = /gaza|west bank|palest|syria|yemen|afghanistan|iran|iraq|israel|lebanon/.test(destination) ? 35 : 10;
+  let score = sensitiveBase;
+  const reasons = [];
+
+  for (const article of articles.slice(0, 6)) {
+    const haystack = `${article.title || article.headline || ""} ${article.description || article.summary || ""}`;
+    for (const rule of SAFETY_SEVERITY_RULES) {
+      if (rule.pattern.test(haystack)) {
+        score += rule.points;
+        const reason = rule.pattern.source.replace(/\\b|[()]/g, "").split("|").slice(0, 3).join("/");
+        reasons.push(reason);
+        break;
+      }
+    }
+  }
+
+  if (!articles.length && sensitiveBase >= 35) score = Math.max(score, 45);
+  score = Math.max(0, Math.min(100, Math.round(score)));
+  const level = score >= 75 ? "high" : score >= 50 ? "elevated" : score >= 25 ? "moderate" : "low";
+  const label = score >= 75 ? "High attention" : score >= 50 ? "Elevated caution" : score >= 25 ? "Moderate caution" : "Low current-news signal";
+
+  return {
+    score,
+    level,
+    label,
+    confidence: articles.length >= 3 ? "medium" : articles.length ? "low-medium" : "low",
+    interpretation: articles.length
+      ? "This is a news-signal score, not a guarantee of safety. Official travel advisories and local conditions should decide final travel choices."
+      : "No targeted safety headlines were found in the configured feed. This does not prove the destination is safe; it only means the news signal is limited.",
+    main_signals: [...new Set(reasons)].slice(0, 5),
+  };
+}
+
+function safetyRiskLevel(location = "", country = "", articleCount = 0, signal = null) {
+  if (signal?.label) return `${signal.label} (${signal.score}/100 news signal)`;
   const text = normalize(`${location} ${country}`);
   if (/gaza|west bank|palest|syria|yemen|afghanistan/.test(text)) return "high attention / check official advisories";
   if (/iran|iraq|israel|lebanon/.test(text)) return "elevated / check official advisories";
@@ -839,8 +1463,8 @@ async function safetyTool({ location, country, specific_concerns = "general" }) 
   const errors = [];
   const usedQueries = [];
 
-  for (const q of newsQueries(location, country, specific_concerns)) {
-    try {
+  const queryResults = await Promise.allSettled(
+    newsQueries(location, country, specific_concerns).slice(0, 2).map(async (q) => {
       const data = await withRetry(
         () => httpGet(
           "https://newsapi.org/v2/everything",
@@ -849,13 +1473,17 @@ async function safetyTool({ location, country, specific_concerns = "general" }) 
         ),
         "news"
       );
-      usedQueries.push(q);
-      const relevant = (data.articles || []).filter((a) => a.title && a.description && isRelevantNewsArticle(a, location, country));
-      collected.push(...relevant);
-      if (collected.length >= 5) break;
-    } catch (error) {
-      errors.push(error.message);
+      return { q, articles: data.articles || [] };
+    }),
+  );
+
+  for (const result of queryResults) {
+    if (result.status === "rejected") {
+      errors.push(result.reason?.message || "News query failed");
+      continue;
     }
+    usedQueries.push(result.value.q);
+    collected.push(...result.value.articles.filter((a) => a.title && a.description && isRelevantNewsArticle(a, location, country)));
   }
 
   const seen = new Set();
@@ -866,14 +1494,21 @@ async function safetyTool({ location, country, specific_concerns = "general" }) 
     return true;
   }).slice(0, 6);
 
+  const safetySignal = safetySignalFromArticles(location, country, articles);
+
   return {
     location,
     country,
     current_situation: articles.map((a) => ({ headline: a.title, source: a.source?.name, published: a.publishedAt, summary: a.description, url: a.url })),
     official_advisory_links: officialAdvisoryLinks(location, country),
     safety_assessment: {
-      overall_risk_level: safetyRiskLevel(location, country, articles.length),
-      confidence_level: articles.length >= 3 ? "medium" : "low",
+      overall_risk_level: safetyRiskLevel(location, country, articles.length, safetySignal),
+      confidence_level: safetySignal.confidence,
+      signal_score: safetySignal.score,
+      signal_level: safetySignal.level,
+      signal_label: safetySignal.label,
+      interpretation: safetySignal.interpretation,
+      main_signals: safetySignal.main_signals,
     },
     practical_guidance: [
       "Check official travel advisories before booking or travelling.",
@@ -937,6 +1572,7 @@ const handlers = {
   comprehensive_safety_intelligence: safetyTool,
   cultural_and_travel_insights: culturalTool,
   local_experiences_and_attractions: attractionsTool,
+  route_and_transport_planner: routeTool,
 };
 
 export const toolService = {
@@ -949,11 +1585,11 @@ export const toolService = {
     if (!handler) throw new Error(`Unknown tool: ${toolName}`);
 
     try {
-      console.log(`🔧 Executing tool: ${toolName} with args:`, JSON.stringify(args, null, 2));
+      logger.debug(`Executing tool: ${toolName}`);
       const started = Date.now();
       const result = await handler(args);
       const executionTime = Date.now() - started;
-      console.log(`✅ Tool ${toolName} completed successfully in ${executionTime}ms`);
+      logger.debug(`Tool ${toolName} completed`, { executionTime });
       return {
         ...result,
         execution_metadata: {
@@ -963,7 +1599,7 @@ export const toolService = {
         },
       };
     } catch (error) {
-      console.error(`❌ Tool ${toolName} execution failed:`, error.message);
+      logger.warn(`Tool ${toolName} execution failed`, { reason: error.message });
       return {
         error: error.message,
         tool_name: toolName,
@@ -973,4 +1609,6 @@ export const toolService = {
       };
     }
   },
+
+  _test: { yelpHeaders },
 };
