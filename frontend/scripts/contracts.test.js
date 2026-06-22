@@ -6,6 +6,7 @@ const apiSource = fs.readFileSync(new URL("../src/services/api.js", import.meta.
 const hookSource = fs.readFileSync(new URL("../src/hooks/useChat.js", import.meta.url), "utf8");
 const legalSource = fs.readFileSync(new URL("../src/legal-page.js", import.meta.url), "utf8");
 const viteSource = fs.readFileSync(new URL("../vite.config.js", import.meta.url), "utf8");
+const deletionStatusSource = fs.readFileSync(new URL("../src/deletion-status.js", import.meta.url), "utf8");
 
 test("document retry is exposed by documentAPI and consumed by useChat", () => {
   const conversationBlock = apiSource.slice(apiSource.indexOf("export const conversationAPI"), apiSource.indexOf("export const documentAPI"));
@@ -25,4 +26,6 @@ test("legal pages use the configured API base and are Vite build entries", () =>
   assert.match(legalSource, /`\$\{apiBaseUrl\}\/legal`/);
   assert.match(viteSource, /privacy: resolve/);
   assert.match(viteSource, /terms: resolve/);
+  assert.match(viteSource, /accountDeletionStatus: resolve/);
+  assert.match(deletionStatusSource, /account-deletion-status/);
 });

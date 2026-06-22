@@ -19,6 +19,7 @@ export default defineConfig(({ mode }) => {
           app: resolve(import.meta.dirname, "index.html"),
           privacy: resolve(import.meta.dirname, "privacy.html"),
           terms: resolve(import.meta.dirname, "terms.html"),
+          accountDeletionStatus: resolve(import.meta.dirname, "account-deletion-status.html"),
         },
       },
     },

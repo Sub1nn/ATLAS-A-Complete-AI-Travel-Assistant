@@ -61,8 +61,9 @@ const HistorySidebar = ({
   const deleteAccount = async () => {
     if (!deletePassword) return setPrivacyStatus("Enter your password to confirm deletion.");
     try {
-      await authAPI.deleteAccount(deletePassword);
-      window.location.replace("/");
+      const deletion = await authAPI.deleteAccount(deletePassword);
+      if (deletion.trackingToken) sessionStorage.setItem("atlas_deletion_token", deletion.trackingToken);
+      window.location.replace(`/account-deletion-status.html${deletion.trackingToken ? `#token=${encodeURIComponent(deletion.trackingToken)}` : ""}`);
     } catch (error) {
       setPrivacyStatus(error.message || "Account deletion failed.");
     }
