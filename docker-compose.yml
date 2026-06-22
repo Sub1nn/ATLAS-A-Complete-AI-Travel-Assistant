@@ -1,14 +1,37 @@
 services:
   mongo:
     image: mongo:7
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
     container_name: atlas-mongo
     restart: unless-stopped
     volumes:
       - atlas-mongo-data:/data/db
     ports:
-      - "27017:27017"
+      - "127.0.0.1:27017:27017"
     networks:
       - atlas-network
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"try { rs.status().ok } catch (e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongo:27017'}]}).ok }\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: atlas-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - atlas-redis-data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    networks:
+      - atlas-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   backend:
     build:
@@ -17,24 +40,74 @@ services:
     container_name: atlas-backend
     restart: unless-stopped
     env_file:
-      - ./backend/.env
+      - path: ./backend/.env
+        required: false
     environment:
       NODE_ENV: production
       PORT: 4000
-      MONGODB_URI: mongodb://mongo:27017/atlas_travel
-      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      MONGODB_URI: mongodb://mongo:27017/atlas_travel?replicaSet=rs0
+      MONGODB_AUTO_INDEX: "false"
+      MONGODB_TRANSACTIONS: "true"
+      REDIS_URL: redis://redis:6379
+      REDIS_REQUIRED: "true"
+      TRUST_PROXY: "1"
     ports:
-      - "4000:4000"
+      - "127.0.0.1:4000:4000"
     depends_on:
-      - mongo
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - atlas-network
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 25s
+
+  document-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: atlas-document-worker
+    restart: unless-stopped
+    command: ["npm", "run", "worker:documents"]
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      NODE_ENV: production
+      MONGODB_URI: mongodb://mongo:27017/atlas_travel?replicaSet=rs0
+      MONGODB_AUTO_INDEX: "false"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    mem_limit: 512m
+    networks:
+      - atlas-network
+
+  retention-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: atlas-retention-worker
+    restart: unless-stopped
+    command: ["npm", "run", "worker:retention"]
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      NODE_ENV: production
+      MONGODB_URI: mongodb://mongo:27017/atlas_travel?replicaSet=rs0
+      MONGODB_AUTO_INDEX: "false"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    mem_limit: 256m
+    networks:
+      - atlas-network
 
   frontend:
     build:
@@ -44,13 +117,14 @@ services:
         VITE_API_BASE_URL: /api
         VITE_APP_NAME: ATLAS Travel Assistant
         VITE_APP_VERSION: 1.0.0
+        VITE_PUBLIC_URL: ${VITE_PUBLIC_URL:-http://localhost:5173/}
     container_name: atlas-frontend
     restart: unless-stopped
     depends_on:
       backend:
         condition: service_healthy
     ports:
-      - "5173:80"
+      - "5173:8080"
     networks:
       - atlas-network
 
@@ -60,3 +134,4 @@ networks:
 
 volumes:
   atlas-mongo-data:
+  atlas-redis-data:

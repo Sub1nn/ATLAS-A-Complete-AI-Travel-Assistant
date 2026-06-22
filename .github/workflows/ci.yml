@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        project: [backend, frontend]
+    defaults:
+      run:
+        working-directory: ${{ matrix.project }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ matrix.project }}/package-lock.json
+      - run: npm ci
+      - if: matrix.project == 'backend'
+        run: npm test
+      - if: matrix.project == 'frontend'
+        run: npm run lint
+      - if: matrix.project == 'frontend'
+        run: npm test
+      - if: matrix.project == 'frontend'
+        run: npm run build
+        env:
+          VITE_PUBLIC_URL: https://example.invalid/
+          VITE_SOURCE_MAPS: "false"
+
+  containers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config -q
+      - run: docker compose build backend document-worker retention-worker frontend
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start MongoDB replica set
+        run: |
+          docker run --detach --rm --name atlas-ci-mongo --publish 27017:27017 mongo:7 mongod --replSet rs0 --bind_ip_all
+          for attempt in {1..30}; do
+            if docker exec atlas-ci-mongo mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok'; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - name: Initialize MongoDB replica set
+        run: |
+          node --input-type=module -e '
+            import mongoose from "mongoose";
+            await mongoose.connect("mongodb://127.0.0.1:27017/admin?directConnection=true");
+            await mongoose.connection.db.admin().command({ replSetInitiate: { _id: "rs0", members: [{ _id: 0, host: "127.0.0.1:27017" }] } }).catch((error) => {
+              if (!/already initialized/i.test(error.message)) throw error;
+            });
+            await mongoose.disconnect();
+          '
+          node --input-type=module -e '
+            import mongoose from "mongoose";
+            for (let attempt = 0; attempt < 30; attempt += 1) {
+              try {
+                await mongoose.connect("mongodb://127.0.0.1:27017/admin?replicaSet=rs0", { serverSelectionTimeoutMS: 1000 });
+                await mongoose.disconnect();
+                process.exit(0);
+              } catch { await new Promise((resolve) => setTimeout(resolve, 1000)); }
+            }
+            process.exit(1);
+          '
+      - run: npm run test:integration
+        env:
+          MONGODB_URI: mongodb://127.0.0.1:27017/atlas_integration?replicaSet=rs0
+          MONGODB_TRANSACTIONS: "true"
+          JWT_SECRET: integration-test-secret-that-is-longer-than-thirty-two-characters
+      - run: npm run test:load:authenticated
+        env:
+          MONGODB_URI: mongodb://127.0.0.1:27017/atlas_authenticated_load?replicaSet=rs0
+          MONGODB_TRANSACTIONS: "true"
+          JWT_SECRET: authenticated-load-test-secret-longer-than-thirty-two-characters
