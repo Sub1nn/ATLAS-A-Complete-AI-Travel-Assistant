@@ -4,6 +4,8 @@ import {
   CloudSun,
   Landmark,
   Map,
+  Navigation,
+  Dumbbell,
   Shield,
   Utensils,
 } from "lucide-react";
@@ -16,13 +18,13 @@ const suggestions = [
   },
   {
     title: "Destination analysis",
-    description: "Comprehensive destination analysis for Tokyo",
+    description: "I am thinking to travel to Tehran this weekend as a tourist",
     icon: Map,
   },
   {
-    title: "Business culture",
-    description: "Cultural briefing for business travel to Dubai",
-    icon: Landmark,
+    title: "Sports nearby",
+    description: "Where can I play badminton near Helsinki city centre?",
+    icon: Dumbbell,
   },
   {
     title: "Accommodation",
@@ -35,9 +37,9 @@ const suggestions = [
     icon: Utensils,
   },
   {
-    title: "Weather planning",
-    description: "Weather intelligence for Southeast Asia travel",
-    icon: CloudSun,
+    title: "Route planning",
+    description: "Route from Helsinki railway station to Helsinki airport by train",
+    icon: Navigation,
   },
 ];
 

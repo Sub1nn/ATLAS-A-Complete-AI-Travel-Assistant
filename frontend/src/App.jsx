@@ -1,6 +1,7 @@
 import React from "react";
 import AuthPage from "./components/auth/AuthPage";
 import TravelAssistant from "./components/TravelAssistant";
+import PolicyConsentPage from "./components/auth/PolicyConsentPage";
 import { useAuth } from "./hooks/useAuth";
 
 function App() {
@@ -11,6 +12,7 @@ function App() {
     verifyEmail,
     forgotPassword,
     resetPassword,
+    acceptPolicies,
     resendVerification,
     logout,
     isCheckingAuth,
@@ -31,8 +33,8 @@ function App() {
     );
   }
 
-  const params = new URLSearchParams(window.location.search);
-  const token = params.get("token");
+  const fragmentParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const token = fragmentParams.get("token");
   const authMode = window.location.pathname.includes("reset-password")
     ? "reset"
     : window.location.pathname.includes("verify-email")
@@ -55,6 +57,10 @@ function App() {
         onClearInitialNotice={clearAuthNotice}
       />
     );
+  }
+
+  if (!user.privacyAccepted) {
+    return <PolicyConsentPage onAccept={acceptPolicies} onLogout={logout} />;
   }
 
   return <TravelAssistant user={user} onLogout={logout} onResendVerification={resendVerification} />;

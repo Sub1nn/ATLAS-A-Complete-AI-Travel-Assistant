@@ -65,7 +65,7 @@ const renderInlineBold = (text) => {
 };
 
 const isHeading = (line) =>
-  /^\s*(#{1,3}\s+.+|\*\*[^*]+\*\*|[A-Z][A-Za-z\s]{2,40})\s*$/.test(line);
+  /^\s*(#{1,3}\s+.+|\*\*[^*]+\*\*)\s*$/.test(line);
 
 const headingText = (line) =>
   line
@@ -106,26 +106,33 @@ export const formatMessage = (content) => {
   const lines = cleanContent.split("\n");
   const blocks = [];
   let currentList = [];
+  let currentListType = null;
   let pendingNote = false;
 
   const flushList = (keyBase) => {
     if (currentList.length === 0) return;
 
+    const ListTag = currentListType === "ordered" ? "ol" : "ul";
     blocks.push(
-      <ul key={`list-${keyBase}`} className="my-4 space-y-2.5">
+      <ListTag key={`list-${keyBase}`} className="my-4 space-y-2.5">
         {currentList.map((item, index) => (
           <li
             key={index}
             className="flex gap-3 text-[15px] leading-7 text-slate-300"
           >
-            <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-sky-300" />
+            {currentListType === "ordered" ? (
+              <span className="mt-0.5 w-6 shrink-0 text-right font-semibold text-sky-300">{index + 1}.</span>
+            ) : (
+              <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-sky-300" />
+            )}
             <span>{renderInlineBold(item)}</span>
           </li>
         ))}
-      </ul>,
+      </ListTag>,
     );
 
     currentList = [];
+    currentListType = null;
   };
 
   lines.forEach((rawLine, index) => {
@@ -137,11 +144,15 @@ export const formatMessage = (content) => {
     }
 
     if (/^[•\-*]\s+/.test(line)) {
+      if (currentListType && currentListType !== "unordered") flushList(index);
+      currentListType = "unordered";
       currentList.push(line.replace(/^[•\-*]\s+/, "").trim());
       return;
     }
 
     if (/^\d+\.\s+/.test(line)) {
+      if (currentListType && currentListType !== "ordered") flushList(index);
+      currentListType = "ordered";
       currentList.push(line.replace(/^\d+\.\s+/, "").trim());
       return;
     }

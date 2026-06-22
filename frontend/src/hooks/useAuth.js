@@ -1,55 +1,43 @@
 import { useCallback, useEffect, useState } from "react";
 import { authAPI } from "../services/api";
 
-const readStoredSession = () => {
-  const token = localStorage.getItem("atlas_token");
-
-  if (!token) {
-    localStorage.removeItem("atlas_user");
-    return { token: null, user: null };
-  }
-
-  try {
-    const user = JSON.parse(localStorage.getItem("atlas_user") || "null");
-    return { token, user };
-  } catch {
-    localStorage.removeItem("atlas_user");
-    return { token, user: null };
-  }
-};
-
 export const useAuth = () => {
-  const stored = readStoredSession();
-  const [user, setUser] = useState(stored.user);
-  const [isCheckingAuth, setIsCheckingAuth] = useState(Boolean(stored.token));
+  const [user, setUser] = useState(null);
+  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
   const [authError, setAuthError] = useState("");
   const [authNotice, setAuthNotice] = useState("");
 
   const clearSession = useCallback(() => {
-    authAPI.logout();
+    authAPI.clearLocalSession();
     setUser(null);
   }, []);
 
+
   useEffect(() => {
-    const token = localStorage.getItem("atlas_token");
+    const handleSessionExpired = () => {
+      clearSession();
+      setAuthNotice("");
+      setAuthError("Your session expired. Please sign in again.");
+      if (!window.location.pathname.includes("reset-password") && !window.location.pathname.includes("verify-email")) {
+        window.history.replaceState({}, "", "/");
+      }
+    };
 
-    if (!token) {
-      setIsCheckingAuth(false);
-      setUser(null);
-      return;
-    }
+    window.addEventListener("atlas:session-expired", handleSessionExpired);
+    return () => window.removeEventListener("atlas:session-expired", handleSessionExpired);
+  }, [clearSession]);
 
+  useEffect(() => {
     let mounted = true;
 
     authAPI
-      .me()
+      .restoreSession()
       .then((data) => {
         if (mounted) setUser(data.user);
       })
       .catch(() => {
         if (mounted) {
           clearSession();
-          setAuthError("Your session expired. Please sign in again.");
         }
       })
       .finally(() => {
@@ -98,8 +86,15 @@ export const useAuth = () => {
   const forgotPassword = async (email) => authAPI.forgotPassword(email);
   const resetPassword = async (payload) => authAPI.resetPassword(payload);
 
-  const logout = () => {
-    clearSession();
+  const acceptPolicies = async () => {
+    const data = await authAPI.acceptPolicies();
+    setUser(data.user);
+    return data.user;
+  };
+
+  const logout = async () => {
+    await authAPI.logout().catch(() => {});
+    setUser(null);
     setAuthError("");
     setAuthNotice("");
   };
@@ -112,6 +107,7 @@ export const useAuth = () => {
     resendVerification,
     forgotPassword,
     resetPassword,
+    acceptPolicies,
     logout,
     isCheckingAuth,
     authError,

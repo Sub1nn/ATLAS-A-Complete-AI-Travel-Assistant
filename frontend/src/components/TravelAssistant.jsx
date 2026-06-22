@@ -11,12 +11,14 @@ import {
   ShieldCheck,
   Sparkles,
   Utensils,
+  X,
 } from "lucide-react";
 import MessageList from "./chat/MessageList";
 import InputArea from "./chat/InputArea";
 import TripSuggestions from "./features/TripSuggestions";
 import HistorySidebar from "./sidebar/HistorySidebar";
 import { useChat } from "../hooks/useChat";
+import { chatAPI } from "../services/api";
 
 const features = [
   {
@@ -60,29 +62,75 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
     isTyping,
     sendMessage,
     conversations,
+    nextConversationCursor,
+    loadMoreConversations,
     activeConversationId,
     startNewChat,
     loadConversation,
+    nextMessageCursor,
+    loadOlderMessages,
     deleteConversation,
     clearHistory,
     documents,
     uploadDocument,
     selectedDocumentIds,
+    toggleDocument,
     detachDocument,
     deleteDocument,
+    retryDocument,
+    chatError,
+    clearChatError,
   } = useChat();
 
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [serviceStatus, setServiceStatus] = useState("checking");
+  const [verificationNotice, setVerificationNotice] = useState("");
   const messagesContainerRef = useRef(null);
   const messagesEndRef = useRef(null);
   const landingContainerRef = useRef(null);
+
+  useEffect(() => {
+    let mounted = true;
+    let inFlight = false;
+    let healthController = null;
+    const checkHealth = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      healthController = new AbortController();
+      try {
+        const health = await chatAPI.healthCheck({ signal: healthController.signal });
+        if (mounted) setServiceStatus(health.database === "connected" ? "online" : "degraded");
+      } catch {
+        if (mounted && !healthController.signal.aborted) setServiceStatus("offline");
+      } finally {
+        inFlight = false;
+      }
+    };
+    checkHealth();
+    const timer = window.setInterval(checkHealth, 60000);
+    return () => {
+      mounted = false;
+      healthController?.abort();
+      window.clearInterval(timer);
+    };
+  }, []);
 
   const hasStartedChat =
     messages.length > 1 || (messages.length === 1 && messages[0].id !== "welcome");
   const visibleMessages = hasStartedChat
     ? messages.filter((message) => message.id !== "welcome")
     : [];
+
+  const handleResendVerification = async () => {
+    setVerificationNotice("");
+    try {
+      const result = await onResendVerification();
+      setVerificationNotice(result?.message || "Verification email sent.");
+    } catch (error) {
+      setVerificationNotice(error.message || "Could not send the verification email.");
+    }
+  };
 
   useEffect(() => {
     if (!hasStartedChat) return;
@@ -154,6 +202,8 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
         <HistorySidebar
           user={user}
           conversations={conversations}
+          hasMoreConversations={Boolean(nextConversationCursor)}
+          onLoadMoreConversations={loadMoreConversations}
           activeConversationId={activeConversationId}
           onNewChat={startNewChat}
           onLoadConversation={loadConversation}
@@ -203,9 +253,9 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
               </button>
 
               <div className="hidden items-center gap-3 md:flex">
-                <div className="flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1.5 text-sm font-medium text-emerald-300">
-                  <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                  Online
+                <div className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm font-medium ${serviceStatus === "online" ? "border-emerald-400/20 bg-emerald-400/10 text-emerald-300" : serviceStatus === "checking" ? "border-slate-700 bg-slate-900 text-slate-400" : "border-amber-400/20 bg-amber-400/10 text-amber-200"}`}>
+                  <span className={`h-2 w-2 rounded-full ${serviceStatus === "online" ? "bg-emerald-400" : serviceStatus === "checking" ? "bg-slate-500" : "bg-amber-400"}`} />
+                  {serviceStatus === "online" ? "Online" : serviceStatus === "checking" ? "Checking" : "Degraded"}
                 </div>
 
                 <button
@@ -228,11 +278,21 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
                 <span>Please verify your email to keep your ATLAS account production-ready.</span>
                 <button
                   type="button"
-                  onClick={onResendVerification}
+                  onClick={handleResendVerification}
                   className="w-fit rounded-full border border-amber-300/30 px-3 py-1 text-xs font-semibold text-amber-100 transition hover:bg-amber-300/10"
                 >
                   Resend verification link
                 </button>
+              </div>
+              {verificationNotice && <p className="mx-auto mt-2 max-w-7xl text-xs text-amber-200">{verificationNotice}</p>}
+            </div>
+          )}
+
+          {chatError && (
+            <div className="border-b border-rose-400/20 bg-rose-500/10 px-5 py-3 text-sm text-rose-100 sm:px-6 lg:px-8">
+              <div className="mx-auto flex max-w-7xl items-center justify-between gap-3">
+                <span>{chatError}</span>
+                <button type="button" onClick={clearChatError} className="rounded-lg p-1 text-rose-200 hover:bg-rose-400/10" aria-label="Dismiss error"><X className="h-4 w-4" /></button>
               </div>
             </div>
           )}
@@ -285,6 +345,8 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
                 messagesContainerRef={messagesContainerRef}
                 messagesEndRef={messagesEndRef}
                 onScroll={handleScroll}
+                hasOlderMessages={Boolean(nextMessageCursor)}
+                onLoadOlderMessages={loadOlderMessages}
               />
             )}
 
@@ -309,8 +371,10 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
             documents={documents}
             selectedDocumentIds={selectedDocumentIds}
             onUploadDocument={uploadDocument}
+            onToggleDocument={toggleDocument}
             onDetachDocument={detachDocument}
             onDeleteDocument={deleteDocument}
+            onRetryDocument={retryDocument}
           />
         </div>
       </div>

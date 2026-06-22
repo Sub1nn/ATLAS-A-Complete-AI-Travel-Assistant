@@ -1,9 +1,12 @@
 import React, { useState } from "react";
-import { LogOut, MessageSquarePlus, Trash2 } from "lucide-react";
+import { Download, LogOut, MessageSquarePlus, Shield, Trash2, UserX } from "lucide-react";
+import { authAPI } from "../../services/api";
 
 const HistorySidebar = ({
   user,
   conversations,
+  hasMoreConversations,
+  onLoadMoreConversations,
   activeConversationId,
   onNewChat,
   onLoadConversation,
@@ -14,6 +17,10 @@ const HistorySidebar = ({
   onClose,
 }) => {
   const [confirmClear, setConfirmClear] = useState(false);
+  const [showPrivacy, setShowPrivacy] = useState(false);
+  const [retentionDays, setRetentionDays] = useState(Number(user?.dataRetentionDays || 365));
+  const [deletePassword, setDeletePassword] = useState("");
+  const [privacyStatus, setPrivacyStatus] = useState("");
 
   const handleClearHistory = async () => {
     if (!confirmClear) {
@@ -24,6 +31,41 @@ const HistorySidebar = ({
 
     setConfirmClear(false);
     await onClearHistory?.();
+  };
+
+  const exportAccountData = async () => {
+    setPrivacyStatus("Preparing export...");
+    try {
+      const response = await authAPI.exportData();
+      const url = URL.createObjectURL(response.data);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `atlas-data-export-${new Date().toISOString().slice(0, 10)}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setPrivacyStatus("Export downloaded.");
+    } catch (error) {
+      setPrivacyStatus(error.message || "Export failed.");
+    }
+  };
+
+  const saveRetention = async () => {
+    try {
+      await authAPI.updateRetention(retentionDays);
+      setPrivacyStatus("Retention preference saved.");
+    } catch (error) {
+      setPrivacyStatus(error.message || "Could not save retention preference.");
+    }
+  };
+
+  const deleteAccount = async () => {
+    if (!deletePassword) return setPrivacyStatus("Enter your password to confirm deletion.");
+    try {
+      await authAPI.deleteAccount(deletePassword);
+      window.location.replace("/");
+    } catch (error) {
+      setPrivacyStatus(error.message || "Account deletion failed.");
+    }
   };
 
   return (
@@ -112,7 +154,7 @@ const HistorySidebar = ({
               <button
                 type="button"
                 onClick={() => onDeleteConversation(item.id)}
-                className="mt-2 hidden items-center text-xs text-slate-500 hover:text-rose-300 group-hover:inline-flex"
+                className="mt-2 inline-flex items-center text-xs text-slate-500 hover:text-rose-300 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100 sm:focus:opacity-100"
                 title="Delete this chat"
               >
                 <Trash2 className="mr-1 h-3 w-3" />
@@ -120,12 +162,36 @@ const HistorySidebar = ({
               </button>
             </div>
           ))}
+          {hasMoreConversations && (
+            <button type="button" onClick={onLoadMoreConversations} className="w-full rounded-xl border border-slate-800 px-3 py-2 text-xs text-sky-300 hover:bg-slate-900">
+              Load older chats
+            </button>
+          )}
         </div>
       </div>
 
       <div className="border-t border-slate-800 p-4">
         <p className="text-sm font-medium text-slate-200">{user?.name}</p>
         <p className="text-xs text-slate-500">{user?.email}</p>
+
+        <button type="button" onClick={() => setShowPrivacy((value) => !value)} className="mt-3 flex items-center gap-2 text-sm text-slate-400 transition hover:text-slate-100">
+          <Shield className="h-4 w-4" /> Privacy & data
+        </button>
+
+        {showPrivacy && (
+          <div className="mt-3 space-y-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-xs">
+            <button type="button" onClick={exportAccountData} className="flex items-center gap-2 text-sky-300 hover:text-sky-200"><Download className="h-3.5 w-3.5" /> Export my data</button>
+            <label className="block text-slate-400">Retention period
+              <select value={retentionDays} onChange={(event) => setRetentionDays(Number(event.target.value))} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-slate-200">
+                <option value={30}>30 days</option><option value={90}>90 days</option><option value={180}>180 days</option><option value={365}>1 year</option><option value={730}>2 years</option>
+              </select>
+            </label>
+            <button type="button" onClick={saveRetention} className="text-sky-300 hover:text-sky-200">Save retention preference</button>
+            <input type="password" value={deletePassword} onChange={(event) => setDeletePassword(event.target.value)} placeholder="Password to delete account" className="w-full rounded-lg border border-rose-900/60 bg-slate-950 p-2 text-slate-200" />
+            <button type="button" onClick={deleteAccount} className="flex items-center gap-2 text-rose-300 hover:text-rose-200"><UserX className="h-3.5 w-3.5" /> Permanently delete account</button>
+            {privacyStatus && <p className="leading-5 text-slate-500">{privacyStatus}</p>}
+          </div>
+        )}
 
         <button
           type="button"

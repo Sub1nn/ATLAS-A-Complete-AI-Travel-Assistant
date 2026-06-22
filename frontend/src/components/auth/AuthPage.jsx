@@ -33,7 +33,7 @@ const AuthPage = ({
   onClearInitialNotice,
 }) => {
   const [mode, setMode] = useState(initialMode || "login");
-  const [form, setForm] = useState({ name: "", email: "", password: "" });
+  const [form, setForm] = useState({ name: "", email: "", password: "", privacyAccepted: false });
   const [error, setError] = useState(initialError);
   const [notice, setNotice] = useState(initialNotice);
   const [loading, setLoading] = useState(false);
@@ -113,6 +113,7 @@ const AuthPage = ({
           name: form.name.trim(),
           email: form.email.trim(),
           password: form.password,
+          privacyAccepted: form.privacyAccepted,
         });
         if (data?.message) setNotice(data.message);
       } else if (mode === "forgot") {
@@ -263,6 +264,21 @@ const AuthPage = ({
                     minLength={10}
                     required
                   />
+                </label>
+              )}
+
+              {mode === "signup" && (
+                <label className="flex items-start gap-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-sm leading-6 text-slate-400">
+                  <input
+                    type="checkbox"
+                    checked={form.privacyAccepted}
+                    onChange={(event) => setForm({ ...form, privacyAccepted: event.target.checked })}
+                    className="mt-1 h-4 w-4 accent-sky-500"
+                    required
+                  />
+                  <span>
+                    I accept the <a href="/privacy.html" target="_blank" rel="noreferrer" className="text-sky-300 underline">privacy policy</a> and <a href="/terms.html" target="_blank" rel="noreferrer" className="text-sky-300 underline">terms</a>.
+                  </span>
                 </label>
               )}
 
