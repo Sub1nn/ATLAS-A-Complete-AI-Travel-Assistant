@@ -1,4 +1,5 @@
 import { logger } from "../utils/logger.js";
+import { usageService } from "./usageService.js";
 
 const DEFAULT_INDEX_NAME = "atlas-documents";
 const DEFAULT_NAMESPACE_PREFIX = "atlas-user";
@@ -146,12 +147,25 @@ function embeddingParameters(inputType) {
   return params;
 }
 
-async function embedTexts(texts = [], inputType = "passage") {
+async function reservePineconeCall(userId) {
+  if (!userId) return;
+  const budget = await usageService.reserveExternalCall(userId);
+  if (!budget.allowed) {
+    const error = new Error("Daily external-provider call budget reached before Pinecone request");
+    error.code = "PROVIDER_BUDGET_EXCEEDED";
+    error.status = 429;
+    throw error;
+  }
+}
+
+async function embedTexts(texts = [], inputType = "passage", { userId, shouldContinue } = {}) {
   if (!texts.length) return [];
   const pc = await getClient();
   const vectors = [];
 
   for (let start = 0; start < texts.length; start += EMBED_BATCH_SIZE) {
+    await shouldContinue?.();
+    await reservePineconeCall(userId);
     const batch = texts.slice(start, start + EMBED_BATCH_SIZE).map((text) => String(text || "").slice(0, 8000));
     const result = await pc.inference.embed({
       model: embeddingModel(),
@@ -202,7 +216,7 @@ function normalizeIntegratedHits(hits = []) {
     .filter((match) => match.documentId && match.score >= minScore());
 }
 
-async function upsertWithInferenceIndex(document, namespace) {
+async function upsertWithInferenceIndex(document, namespace, options = {}) {
   const chunks = (document.chunks || []).filter((chunk) => String(chunk.text || "").trim());
   if (!chunks.length) return { stored: false, provider: "pinecone", reason: "No chunks to index" };
 
@@ -211,13 +225,15 @@ async function upsertWithInferenceIndex(document, namespace) {
 
   for (let start = 0; start < chunks.length; start += UPSERT_BATCH_SIZE) {
     const batch = chunks.slice(start, start + UPSERT_BATCH_SIZE);
-    const embeddings = await embedTexts(batch.map((chunk) => chunk.text), "passage");
+    const embeddings = await embedTexts(batch.map((chunk) => chunk.text), "passage", { userId: document.userId, ...options });
     const records = batch.map((chunk, idx) => ({
       id: vectorId({ userId: document.userId, documentId: document._id, chunkIndex: chunk.index }),
       values: embeddings[idx],
       metadata: chunkMetadata({ document, chunk }),
     }));
 
+    await options.shouldContinue?.();
+    await reservePineconeCall(document.userId);
     await index.upsert({ records, namespace });
     stored += records.length;
   }
@@ -225,7 +241,7 @@ async function upsertWithInferenceIndex(document, namespace) {
   return { stored: true, provider: "pinecone", mode: "inference", count: stored };
 }
 
-async function upsertWithIntegratedIndex(document, namespace) {
+async function upsertWithIntegratedIndex(document, namespace, options = {}) {
   const chunks = (document.chunks || []).filter((chunk) => String(chunk.text || "").trim());
   if (!chunks.length) return { stored: false, provider: "pinecone", reason: "No chunks to index" };
 
@@ -240,6 +256,8 @@ async function upsertWithIntegratedIndex(document, namespace) {
       ...chunkMetadata({ document, chunk }),
     }));
 
+    await options.shouldContinue?.();
+    await reservePineconeCall(document.userId);
     await index.upsertRecords({ records, namespace });
     stored += records.length;
   }
@@ -255,7 +273,7 @@ export const vectorStore = {
   embeddingModel,
   indexName,
 
-  async upsertDocumentChunks(document) {
+  async upsertDocumentChunks(document, options = {}) {
     if (!configured()) {
       return { stored: false, provider: "none", status: "skipped", reason: configurationIssue() };
     }
@@ -264,8 +282,8 @@ export const vectorStore = {
 
     try {
       const result = indexMode() === "integrated"
-        ? await upsertWithIntegratedIndex(document, namespace)
-        : await upsertWithInferenceIndex(document, namespace);
+        ? await upsertWithIntegratedIndex(document, namespace, options)
+        : await upsertWithInferenceIndex(document, namespace, options);
 
       return { ...result, namespace, indexName: indexName(), embeddingModel: embeddingModel() };
     } catch (error) {
@@ -295,6 +313,7 @@ export const vectorStore = {
       const index = await getIndex();
 
       if (indexMode() === "integrated") {
+        await reservePineconeCall(userId);
         const response = await index.searchRecords({
           namespace,
           query: {
@@ -307,8 +326,9 @@ export const vectorStore = {
         return normalizeIntegratedHits(response?.result?.hits || []);
       }
 
-      const [queryVector] = await embedTexts([query], "query");
+      const [queryVector] = await embedTexts([query], "query", { userId });
       if (!queryVector?.length) return [];
+      await reservePineconeCall(userId);
       const response = await index.query({
         namespace,
         vector: queryVector,
@@ -341,6 +361,19 @@ export const vectorStore = {
       return { deleted: true, provider: "pinecone", namespace, count: ids.length };
     } catch (error) {
       logger.warn("Pinecone document delete failed", { reason: error.message });
+      return { deleted: false, provider: "pinecone", namespace, reason: error.message };
+    }
+  },
+
+  async deleteUserNamespace(userId) {
+    if (!configured()) return { deleted: false, provider: "none", reason: configurationIssue() };
+    const namespace = namespaceFor(userId);
+    try {
+      const index = await getIndex();
+      await index.deleteAll({ namespace });
+      return { deleted: true, provider: "pinecone", namespace };
+    } catch (error) {
+      logger.warn("Pinecone user namespace delete failed", { reason: error.message });
       return { deleted: false, provider: "pinecone", namespace, reason: error.message };
     }
   },

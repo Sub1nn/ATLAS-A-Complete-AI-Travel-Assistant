@@ -19,7 +19,13 @@
     "app-flow:test": "node --test scripts/context-service.test.js scripts/production-hardening.test.js scripts/app-security.test.js",
     "pinecone:setup": "node scripts/pinecone-setup.js",
     "places:test": "node scripts/places-new-test.js",
-    "db:indexes": "node scripts/sync-indexes.js"
+    "db:indexes": "node scripts/sync-indexes.js",
+    "privacy:retention": "node scripts/enforce-retention.js",
+    "worker:documents": "node scripts/document-worker.js",
+    "worker:retention": "node scripts/retention-scheduler.js",
+    "test:integration": "node scripts/integration-test.js",
+    "test:load": "node scripts/load-test.js",
+    "test:load:authenticated": "node scripts/authenticated-load-test.js"
   },
   "keywords": [
     "travel",

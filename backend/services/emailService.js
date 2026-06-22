@@ -50,11 +50,11 @@ async function sendWithConsole({ to, subject, text }) {
 
 export const emailService = {
   verificationLink(token) {
-    return `${appBaseUrl()}/verify-email?token=${encodeURIComponent(token)}`;
+    return `${appBaseUrl()}/verify-email#token=${encodeURIComponent(token)}`;
   },
 
   resetLink(token) {
-    return `${appBaseUrl()}/reset-password?token=${encodeURIComponent(token)}`;
+    return `${appBaseUrl()}/reset-password#token=${encodeURIComponent(token)}`;
   },
 
   async sendMail(payload) {

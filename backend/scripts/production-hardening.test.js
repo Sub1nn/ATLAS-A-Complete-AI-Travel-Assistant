@@ -1,14 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { verifyResponse } from "../services/responseVerifier.js";
 import { cacheKey, getOrSetCache } from "../services/cacheService.js";
 import { hasAllowedSignature } from "../controllers/documentController.js";
 import { chatRateLimiter } from "../config/rateLimiter.js";
 import mongoose from "mongoose";
 import { Conversation, normalizeConversationMemory } from "../models/Conversation.js";
+import { isDocumentFocusedRequest } from "../controllers/chatController.js";
 import { User } from "../models/User.js";
 import { documentService } from "../services/documentService.js";
 import { contextService } from "../services/contextService.js";
+import { toolService } from "../services/toolService.js";
+import { Session } from "../models/Session.js";
+import { ChatRequest } from "../models/ChatRequest.js";
+import { DailyUsage } from "../models/DailyUsage.js";
+import { Document } from "../models/Document.js";
+import { AccountDeletion } from "../models/AccountDeletion.js";
+import { StorageUsage } from "../models/StorageUsage.js";
+import { sessionService } from "../services/sessionService.js";
+import { emailService } from "../services/emailService.js";
+import { usageService } from "../services/usageService.js";
+import { authSignupSchema, chatRequestSchema, validate } from "../utils/validation.js";
 
 process.env.NODE_ENV = "test";
 
@@ -22,7 +35,26 @@ test("response verifier adds caution for unsupported prices and availability", (
   assert.equal(verification.modified, true);
   assert.match(answer, /Verification note/);
   assert.match(answer, /prices/i);
+  assert.doesNotMatch(answer, /€120/);
+  assert.doesNotMatch(answer, /is available/i);
   assert.doesNotMatch(answer, /completely safe/i);
+});
+
+test("attached documents do not hijack ordinary short travel questions", () => {
+  const documentIds = [new mongoose.Types.ObjectId().toString()];
+  assert.equal(isDocumentFocusedRequest("What is the weather in Helsinki?", documentIds), false);
+  assert.equal(isDocumentFocusedRequest("Find hotels in Tokyo", documentIds), false);
+  assert.equal(isDocumentFocusedRequest("Summarize the attached PDF", documentIds), true);
+  assert.equal(isDocumentFocusedRequest("What does this document say?", documentIds), true);
+});
+
+test("news safety classification has no numerical risk score or country baseline", () => {
+  const coverage = toolService._test.newsCoverageFromArticles([
+    { title: "Airport closure after major storm", description: "Travel disruption continues", publishedAt: "2026-06-22T08:00:00Z" },
+  ]);
+  assert.equal(coverage.news_attention_level, "high");
+  assert.equal("score" in coverage, false);
+  assert.match(coverage.interpretation, /not a destination risk score/i);
 });
 
 test("cache service stores and retrieves with development memory fallback", async () => {
@@ -50,6 +82,86 @@ test("document signature validation accepts PDF and rejects mismatched DOCX", ()
 
 test("chat rate limiter is configured as middleware", () => {
   assert.equal(typeof chatRateLimiter, "function");
+});
+
+test("chat requests require a UUID idempotency key", () => {
+  const valid = validate(chatRequestSchema, { clientRequestId: crypto.randomUUID(), message: "hello", documentIds: [] });
+  const invalid = validate(chatRequestSchema, { message: "hello", documentIds: [] });
+  assert.equal(valid.error, null);
+  assert.match(invalid.error, /request ID/i);
+});
+
+test("signup requires explicit privacy acceptance", () => {
+  const base = { name: "Test User", email: "test@example.com", password: "Password1234" };
+  assert.match(validate(authSignupSchema, base).error, /privacy policy/i);
+  assert.equal(validate(authSignupSchema, { ...base, privacyAccepted: true }).error, null);
+});
+
+test("refresh sessions use HttpOnly cookies and email actions use URL fragments", () => {
+  const options = sessionService._test.cookieOptions();
+  assert.equal(options.httpOnly, true);
+  assert.equal(options.path, "/api/auth");
+  assert.equal(sessionService._test.parseCookies("one=1; atlas_refresh=secret").atlas_refresh, "secret");
+  assert.equal(sessionService._test.safeEqual("matching", "matching"), true);
+  assert.equal(sessionService._test.safeEqual("matching", "different"), false);
+  assert.match(emailService.verificationLink("a".repeat(32)), /verify-email#token=/);
+  assert.match(emailService.resetLink("b".repeat(32)), /reset-password#token=/);
+});
+
+test("Routes API v2 responses are converted to compact route guidance", () => {
+  const route = toolService._test.compactRouteLeg({
+    description: "Fast route",
+    distanceMeters: 12500,
+    duration: "3900s",
+    legs: [{ steps: [{ distanceMeters: 800, staticDuration: "600s", travelMode: "WALK", navigationInstruction: { instructions: "Walk north" } }] }],
+  }, "Helsinki", "Porvoo");
+  assert.equal(route.summary, "Fast route");
+  assert.equal(route.distance, "13 km");
+  assert.equal(route.duration, "1 hr 5 min");
+  assert.equal(route.steps[0].instruction, "Walk north");
+});
+
+test("tool execution stops immediately for an aborted request", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    toolService.executeTool("route_and_transport_planner", { origin: "A", destination: "B" }, { signal: controller.signal }),
+    (error) => error.code === "ERR_CANCELED",
+  );
+});
+
+test("privacy, idempotency, usage and processing fields are indexed", () => {
+  assert.ok(User.schema.path("legalAcceptance.privacyVersion"));
+  assert.ok(Session.schema.path("refreshTokenHash"));
+  assert.ok(ChatRequest.schema.path("clientRequestId"));
+  assert.ok(DailyUsage.schema.path("chatRequests"));
+  assert.ok(Document.schema.path("processingStatus"));
+  assert.ok(Document.schema.path("leaseOwner"));
+  assert.ok(User.schema.path("deletionPending"));
+  assert.ok(AccountDeletion.schema.path("leaseOwner"));
+  assert.ok(StorageUsage.schema.path("documentCount"));
+  assert.equal(usageService._test.dayKey(new Date("2026-06-22T12:00:00Z")), "2026-06-22");
+});
+
+test("provider circuits ignore permanent client errors and local budget rejection", () => {
+  assert.equal(toolService._test.shouldRecordProviderFailure({ status: 400 }), false);
+  assert.equal(toolService._test.shouldRecordProviderFailure({ status: 404 }), false);
+  assert.equal(toolService._test.shouldRecordProviderFailure({ status: 429 }), true);
+  assert.equal(toolService._test.shouldRecordProviderFailure({ status: 503 }), true);
+  assert.equal(toolService._test.shouldRecordProviderFailure({ code: "PROVIDER_BUDGET_EXCEEDED", status: 429 }), false);
+  assert.equal(toolService._test.shouldRecordProviderFailure(new Error("network failure")), true);
+});
+
+test("provider circuit opens after repeated failures and resets after success", () => {
+  const previous = process.env.PROVIDER_CIRCUIT_FAILURE_THRESHOLD;
+  process.env.PROVIDER_CIRCUIT_FAILURE_THRESHOLD = "2";
+  toolService._test.recordProviderFailure("test-provider");
+  toolService._test.recordProviderFailure("test-provider");
+  assert.throws(() => toolService._test.assertCircuitClosed("test-provider"), /circuit/i);
+  toolService._test.recordProviderSuccess("test-provider");
+  assert.doesNotThrow(() => toolService._test.assertCircuitClosed("test-provider"));
+  if (previous === undefined) delete process.env.PROVIDER_CIRCUIT_FAILURE_THRESHOLD;
+  else process.env.PROVIDER_CIRCUIT_FAILURE_THRESHOLD = previous;
 });
 
 test("security and conversation memory fields are persisted by the schemas", () => {

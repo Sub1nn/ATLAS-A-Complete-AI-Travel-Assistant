@@ -12,6 +12,7 @@ import { rateLimiter } from "./config/rateLimiter.js";
 import { databaseReady } from "./db/mongoose.js";
 import { cacheStatus } from "./services/cacheService.js";
 import { logger } from "./utils/logger.js";
+import { metricsService } from "./services/metricsService.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -24,8 +25,10 @@ app.use((req, res, next) => {
   const incoming = String(req.headers["x-request-id"] || "");
   req.requestId = /^[a-zA-Z0-9_-]{8,80}$/.test(incoming) ? incoming : crypto.randomUUID();
   res.setHeader("X-Request-Id", req.requestId);
+  res.setHeader("X-Trace-Id", req.requestId);
   next();
 });
+app.use(metricsService.requestMiddleware);
 
 // Security middleware - Helmet
 app.use(
@@ -76,7 +79,7 @@ morgan.token("url", (req) => logger.redact(req.originalUrl || req.url));
 morgan.token("request-id", (req) => req.requestId || "-");
 if (process.env.NODE_ENV === "production") {
   app.use(morgan(':remote-addr - :remote-user [:date[clf]] ":method :url HTTP/:http-version" :status :res[content-length] ":referrer" ":user-agent" request_id=:request-id'));
-} else {
+} else if (process.env.NODE_ENV !== "test") {
   app.use(morgan("dev"));
 }
 
@@ -102,6 +105,19 @@ app.use("/api/conversations", conversationRoutes);
 app.use("/api/documents", documentRoutes);
 app.use("/api", chatRoutes);
 
+app.get("/api/legal", (req, res) => {
+  res.json({
+    operatorName: process.env.LEGAL_OPERATOR_NAME || "Not configured",
+    privacyContact: process.env.PRIVACY_CONTACT_EMAIL || "Not configured",
+    jurisdiction: process.env.LEGAL_JURISDICTION || "Not configured",
+    lawfulBasis: process.env.PRIVACY_LAWFUL_BASIS || "Not configured",
+    transferSafeguards: process.env.PRIVACY_TRANSFER_SAFEGUARDS || "Not configured",
+    supervisoryAuthority: process.env.PRIVACY_SUPERVISORY_AUTHORITY || "Not configured",
+    privacyVersion: process.env.PRIVACY_POLICY_VERSION || "",
+    termsVersion: process.env.TERMS_VERSION || "",
+  });
+});
+
 // Health check endpoint
 function healthPayload() {
   const cache = cacheStatus();
@@ -124,6 +140,11 @@ app.get("/health/live", (req, res) => {
 app.get(["/health", "/health/ready"], (req, res) => {
   const payload = healthPayload();
   res.status(payload.status === "healthy" ? 200 : 503).json(payload);
+});
+
+app.get("/internal/metrics", async (req, res) => {
+  if (!metricsService.authorize(req)) return res.status(404).json({ message: "Not found" });
+  return res.json(await metricsService.snapshot());
 });
 
 // 404 handler

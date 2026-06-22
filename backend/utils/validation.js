@@ -17,6 +17,7 @@ export const cleanText = (value = "", max = 3000) =>
     .slice(0, max);
 
 export const chatRequestSchema = z.object({
+  clientRequestId: z.string({ required_error: "Client request ID is required" }).uuid("Invalid client request ID"),
   message: z
     .string({ required_error: "Message is required" })
     .transform((value) => cleanText(value, 3000))
@@ -45,6 +46,7 @@ export const authSignupSchema = z.object({
     .max(128, "Password is too long")
     .regex(/[A-Za-z]/, "Password must include a letter")
     .regex(/[0-9]/, "Password must include a number"),
+  privacyAccepted: z.literal(true, { errorMap: () => ({ message: "Accept the privacy policy and terms to create an account" }) }),
 });
 
 export const authLoginSchema = z.object({
@@ -144,4 +146,16 @@ export const resetPasswordSchema = z.object({
     .max(128, "Password is too long")
     .regex(/[A-Za-z]/, "Password must include a letter")
     .regex(/[0-9]/, "Password must include a number"),
+});
+
+export const accountDeleteSchema = z.object({
+  password: z.string({ required_error: "Password is required" }).min(1, "Password is required"),
+});
+
+export const retentionSettingsSchema = z.object({
+  dataRetentionDays: z.coerce.number().int().min(30).max(730),
+});
+
+export const policyAcceptanceSchema = z.object({
+  privacyAccepted: z.literal(true, { errorMap: () => ({ message: "Policy acceptance is required" }) }),
 });

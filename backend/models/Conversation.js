@@ -104,11 +104,14 @@ const ConversationSchema = new mongoose.Schema(
     messageCount: { type: Number, default: 0 },
     memory: { type: ConversationMemorySchema, default: () => ({}) },
     documentIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Document" }],
+    processingOwner: { type: String, select: false },
+    processingLeaseUntil: { type: Date, select: false },
   },
   { timestamps: true },
 );
 
 ConversationSchema.index({ userId: 1, updatedAt: -1 });
 ConversationSchema.index({ userId: 1, createdAt: -1 });
+ConversationSchema.index({ processingLeaseUntil: 1 });
 
 export const Conversation = mongoose.models.Conversation || mongoose.model("Conversation", ConversationSchema);

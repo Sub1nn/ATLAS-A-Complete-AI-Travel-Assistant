@@ -173,7 +173,7 @@ function localFallbackSearch(docs = [], query = "") {
 }
 
 async function searchUserDocuments(userId, query = "", documentIds = []) {
-  const filter = { userId };
+  const filter = { userId, $or: [{ processingStatus: "ready" }, { processingStatus: { $exists: false } }] };
   if (documentIds?.length) filter._id = { $in: documentIds };
 
   const docs = await Document.find(filter).limit(20).lean();
@@ -220,7 +220,7 @@ async function searchUserDocuments(userId, query = "", documentIds = []) {
 
 async function validateUserDocumentIds(userId, documentIds = []) {
   if (!documentIds.length) return [];
-  const docs = await Document.find({ userId, _id: { $in: documentIds } }).select("_id").lean();
+  const docs = await Document.find({ userId, _id: { $in: documentIds }, $or: [{ processingStatus: "ready" }, { processingStatus: { $exists: false } }] }).select("_id").lean();
   return docs.map((doc) => doc._id.toString());
 }
 

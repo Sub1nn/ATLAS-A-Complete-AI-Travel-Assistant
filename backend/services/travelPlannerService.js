@@ -63,7 +63,7 @@ function sanitizePlan(plan = {}) {
   };
 }
 
-export async function createTravelPlan({ message = "", memory = {}, previousMessages = [] } = {}) {
+export async function createTravelPlan({ message = "", memory = {}, previousMessages = [], signal } = {}) {
   if (!plannerEnabled()) return null;
 
   const history = previousMessages.slice(-6).map((m) => ({ role: m.role, content: String(m.content || "").slice(0, 420) }));
@@ -113,6 +113,7 @@ export async function createTravelPlan({ message = "", memory = {}, previousMess
       {
         headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
         timeout: 7000,
+        signal,
         validateStatus: (status) => status < 500,
       }
     );
@@ -121,6 +122,7 @@ export async function createTravelPlan({ message = "", memory = {}, previousMess
     if (!content || response.status >= 400) return null;
     return sanitizePlan(JSON.parse(content));
   } catch (error) {
+    if (signal?.aborted || error?.code === "ERR_CANCELED") throw error;
     logger.debug("LLM travel planner fallback", { reason: error.message });
     return null;
   }
@@ -179,4 +181,4 @@ export function applyTravelPlan(resolved = {}, plan = null) {
   return next;
 }
 
-export const travelPlannerService = { createTravelPlan, applyTravelPlan };
+export const travelPlannerService = { createTravelPlan, applyTravelPlan, isEnabled: plannerEnabled };

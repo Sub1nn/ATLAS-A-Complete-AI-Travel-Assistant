@@ -1,4 +1,5 @@
 import axios from "axios";
+import { AsyncLocalStorage } from "async_hooks";
 import { cacheKey, getOrSetCache } from "./cacheService.js";
 import { logger } from "../utils/logger.js";
 import { getLocationData } from "../utils/locationUtils.js";
@@ -109,7 +110,7 @@ const tools = [
     type: "function",
     function: {
       name: "route_and_transport_planner",
-      description: "Plan a route or transport options between two places using Google Directions when available, with Google Maps fallback links.",
+      description: "Plan a route or transport options between two places using Google Routes API v2 when available, with Google Maps fallback links.",
       parameters: {
         type: "object",
         properties: {
@@ -126,8 +127,10 @@ const tools = [
 const TIMEOUTS = {
   weather: 10000,
   google_places: 9000,
+  directions: 9000,
   yelp: 9000,
   news: 12000,
+  advisory: 10000,
   default: 10000,
 };
 
@@ -135,6 +138,47 @@ const RETRIES = {
   maxRetries: 2,
   baseDelay: 700,
 };
+
+const providerCircuits = new Map();
+const toolExecutionContext = new AsyncLocalStorage();
+
+async function reserveProviderCall(service) {
+  const reserve = toolExecutionContext.getStore()?.reserveProviderCall;
+  if (!reserve) return;
+  const result = await reserve(service);
+  if (result?.allowed === false) {
+    const error = new Error(`Daily external-provider call budget reached before ${service}`);
+    error.code = "PROVIDER_BUDGET_EXCEEDED";
+    error.status = 429;
+    throw error;
+  }
+}
+
+function shouldRecordProviderFailure(error) {
+  if (error?.code === "ERR_CANCELED" || error?.code === "PROVIDER_BUDGET_EXCEEDED") return false;
+  const status = Number(error?.status || error?.response?.status || 0);
+  if (status) return status === 429 || status >= 500;
+  return true;
+}
+
+function assertCircuitClosed(service) {
+  const state = providerCircuits.get(service);
+  if (state?.openUntil > Date.now()) throw new Error(`${service} circuit is temporarily open`);
+  if (state?.openUntil) providerCircuits.delete(service);
+}
+
+function recordProviderSuccess(service) {
+  providerCircuits.delete(service);
+}
+
+function recordProviderFailure(service) {
+  const threshold = Math.max(2, Number(process.env.PROVIDER_CIRCUIT_FAILURE_THRESHOLD || 4));
+  const cooldown = Math.max(5000, Number(process.env.PROVIDER_CIRCUIT_COOLDOWN_MS || 60000));
+  const state = providerCircuits.get(service) || { failures: 0, openUntil: 0 };
+  state.failures += 1;
+  if (state.failures >= threshold) state.openUntil = Date.now() + cooldown;
+  providerCircuits.set(service, state);
+}
 
 function googlePlacesKey() {
   return process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || "";
@@ -179,9 +223,11 @@ function toNumber(value, name) {
 function ttlForService(service = "default") {
   if (service === "google_geocode") return Number(process.env.CACHE_GEOCODE_TTL_SECONDS || 7 * 24 * 60 * 60);
   if (service === "weather") return Number(process.env.CACHE_WEATHER_TTL_SECONDS || 15 * 60);
-  if (service === "google_places") return Number(process.env.CACHE_PLACES_TTL_SECONDS || 12 * 60 * 60);
-  if (service === "yelp") return Number(process.env.CACHE_PLACES_TTL_SECONDS || 12 * 60 * 60);
+  if (service === "google_places") return Number(process.env.CACHE_PLACES_TTL_SECONDS || 5 * 60);
+  if (service === "directions") return Number(process.env.CACHE_DIRECTIONS_TTL_SECONDS || 60);
+  if (service === "yelp") return Number(process.env.CACHE_YELP_TTL_SECONDS || 30 * 60);
   if (service === "news") return Number(process.env.CACHE_NEWS_TTL_SECONDS || 45 * 60);
+  if (service === "advisory") return Number(process.env.CACHE_ADVISORY_TTL_SECONDS || 30 * 60);
   return Number(process.env.CACHE_DEFAULT_TTL_SECONDS || 5 * 60);
 }
 
@@ -194,18 +240,27 @@ function safeCachePayload(url, params = {}) {
 }
 
 async function uncachedHttpGet(url, params = {}, service = "default", headers = {}) {
-  const response = await axios.get(url, {
-    params,
-    headers,
-    timeout: TIMEOUTS[service] || TIMEOUTS.default,
-    validateStatus: (status) => status < 500,
-  });
-
-  if (response.status >= 400) {
-    throw new Error(`${service} returned HTTP ${response.status}`);
+  assertCircuitClosed(service);
+  try {
+    await reserveProviderCall(service);
+    const response = await axios.get(url, {
+      params,
+      headers,
+      timeout: TIMEOUTS[service] || TIMEOUTS.default,
+      signal: toolExecutionContext.getStore()?.signal,
+      validateStatus: (status) => status < 500,
+    });
+    if (response.status >= 400) {
+      const error = new Error(`${service} returned HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    recordProviderSuccess(service);
+    return response.data;
+  } catch (error) {
+    if (shouldRecordProviderFailure(error)) recordProviderFailure(service);
+    throw error;
   }
-
-  return response.data;
 }
 
 async function httpGet(url, params = {}, service = "default", headers = {}) {
@@ -216,18 +271,27 @@ async function httpGet(url, params = {}, service = "default", headers = {}) {
 }
 
 async function uncachedHttpPost(url, body = {}, headers = {}, service = "default") {
-  const response = await axios.post(url, body, {
-    headers,
-    timeout: TIMEOUTS[service] || TIMEOUTS.default,
-    validateStatus: (status) => status < 500,
-  });
-
-  if (response.status >= 400) {
-    const providerMessage = response.data?.error?.message || response.data?.error_message || response.statusText;
-    throw new Error(`${service} returned HTTP ${response.status}${providerMessage ? `: ${providerMessage}` : ""}`);
+  assertCircuitClosed(service);
+  try {
+    await reserveProviderCall(service);
+    const response = await axios.post(url, body, {
+      headers,
+      timeout: TIMEOUTS[service] || TIMEOUTS.default,
+      signal: toolExecutionContext.getStore()?.signal,
+      validateStatus: (status) => status < 500,
+    });
+    if (response.status >= 400) {
+      const providerMessage = response.data?.error?.message || response.data?.error_message || response.statusText;
+      const error = new Error(`${service} returned HTTP ${response.status}${providerMessage ? `: ${providerMessage}` : ""}`);
+      error.status = response.status;
+      throw error;
+    }
+    recordProviderSuccess(service);
+    return response.data;
+  } catch (error) {
+    if (shouldRecordProviderFailure(error)) recordProviderFailure(service);
+    throw error;
   }
-
-  return response.data;
 }
 
 async function httpPost(url, body = {}, headers = {}, service = "default") {
@@ -244,11 +308,26 @@ async function withRetry(fn, service = "default") {
       return await fn();
     } catch (error) {
       lastError = error;
+      const signal = toolExecutionContext.getStore()?.signal;
+      if (signal?.aborted || error?.code === "ERR_CANCELED") throw error;
       const message = String(error.message || "");
-      if (/401|403|INVALID_REQUEST|REQUEST_DENIED/i.test(message)) break;
+      const status = Number(error?.status || error?.response?.status || 0);
+      if ((status >= 400 && status < 500 && status !== 429) || /401|403|INVALID_REQUEST|REQUEST_DENIED/i.test(message)) break;
       if (attempt < RETRIES.maxRetries) {
         const jitter = Math.floor(Math.random() * 250);
-        await new Promise((resolve) => setTimeout(resolve, RETRIES.baseDelay * attempt + jitter));
+        await new Promise((resolve, reject) => {
+          const onAbort = () => {
+            clearTimeout(timer);
+            const cancelled = new Error("Tool request cancelled");
+            cancelled.code = "ERR_CANCELED";
+            reject(cancelled);
+          };
+          const timer = setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+          }, RETRIES.baseDelay * attempt + jitter);
+          signal?.addEventListener("abort", onAbort, { once: true });
+        });
       }
     }
   }
@@ -1200,20 +1279,33 @@ function mapsDirectionsUrl(origin = "", destination = "", mode = "transit") {
   return `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(destination)}&travelmode=${encodeURIComponent(travelmode)}`;
 }
 
-function compactRouteLeg(route = {}) {
+function durationText(value = "") {
+  const seconds = Number.parseFloat(String(value).replace(/s$/, ""));
+  if (!Number.isFinite(seconds)) return "duration unavailable";
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  return minutes >= 60 ? `${Math.floor(minutes / 60)} hr ${minutes % 60} min` : `${minutes} min`;
+}
+
+function distanceText(meters) {
+  const value = Number(meters);
+  if (!Number.isFinite(value)) return "distance unavailable";
+  return value < 1000 ? `${Math.round(value)} m` : `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)} km`;
+}
+
+function compactRouteLeg(route = {}, origin = "", destination = "") {
   const leg = route.legs?.[0] || {};
   return {
-    summary: route.summary || "Suggested route",
-    distance: leg.distance?.text || "distance unavailable",
-    duration: leg.duration?.text || "duration unavailable",
-    start_address: leg.start_address || "",
-    end_address: leg.end_address || "",
+    summary: route.description || "Suggested route",
+    distance: distanceText(route.distanceMeters),
+    duration: durationText(route.duration),
+    start_address: origin,
+    end_address: destination,
     steps: (leg.steps || []).slice(0, 6).map((step) => ({
-      instruction: String(step.html_instructions || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
-      distance: step.distance?.text || "",
-      duration: step.duration?.text || "",
-      travel_mode: step.travel_mode || "",
-      transit_line: step.transit_details?.line?.short_name || step.transit_details?.line?.name || "",
+      instruction: String(step.navigationInstruction?.instructions || "").replace(/\s+/g, " ").trim(),
+      distance: distanceText(step.distanceMeters),
+      duration: durationText(step.staticDuration),
+      travel_mode: step.travelMode || "",
+      transit_line: "",
     })).filter((step) => step.instruction),
   };
 }
@@ -1249,27 +1341,41 @@ async function routeTool({ origin, destination, mode = "transit" }) {
   }
 
   try {
+    const routeMode = { driving: "DRIVE", walking: "WALK", bicycling: "BICYCLE", transit: "TRANSIT" }[travelMode];
+    const fieldMask = [
+      "routes.description",
+      "routes.distanceMeters",
+      "routes.duration",
+      "routes.legs.steps.distanceMeters",
+      "routes.legs.steps.staticDuration",
+      "routes.legs.steps.navigationInstruction.instructions",
+      "routes.legs.steps.travelMode",
+    ].join(",");
     const data = await withRetry(
-      () => httpGet(
-        "https://maps.googleapis.com/maps/api/directions/json",
-        { origin: from, destination: to, mode: travelMode, alternatives: true, key },
-        "google_places"
+      () => httpPost(
+        "https://routes.googleapis.com/directions/v2:computeRoutes",
+        {
+          origin: { address: from },
+          destination: { address: to },
+          travelMode: routeMode,
+          computeAlternativeRoutes: routeMode !== "TRANSIT",
+          languageCode: "en-US",
+          units: "METRIC",
+        },
+        { "Content-Type": "application/json", "X-Goog-Api-Key": key, "X-Goog-FieldMask": fieldMask },
+        "directions",
       ),
-      "google_places"
+      "directions"
     );
 
-    if (!["OK", "ZERO_RESULTS"].includes(data.status)) {
-      throw new Error(`Google Directions ${data.status}${data.error_message ? `: ${data.error_message}` : ""}`);
-    }
-
-    const routes = (data.routes || []).slice(0, 3).map(compactRouteLeg);
+    const routes = (data.routes || []).slice(0, 3).map((route) => compactRouteLeg(route, from, to));
     return {
       origin: from,
       destination: to,
       mode: travelMode,
       routes,
       search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${from} → ${to}`, url: mapUrl, is_search: true }],
-      data_quality: dataNote(routes.length ? "verified" : "limited", routes.length ? "Route data was returned by Google Directions. Exact live traffic and disruptions should still be checked in Maps." : "Google Directions returned no route for this request; use the Maps link and adjust origin, destination or mode.", { source: "google_directions_api" }),
+      data_quality: dataNote(routes.length ? "verified" : "limited", routes.length ? "Route data was returned by Google Routes API. Exact live traffic and disruptions should still be checked in Maps." : "Google Routes API returned no route for this request; use the Maps link and adjust origin, destination or mode.", { source: "google_routes_api_v2" }),
       practical_tips: ["Check live traffic, transit disruptions and last departure times before leaving.", "For tourist trips, save the route offline or screenshot key steps."],
     };
   } catch (error) {
@@ -1279,7 +1385,7 @@ async function routeTool({ origin, destination, mode = "transit" }) {
       mode: travelMode,
       routes: [],
       search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${from} → ${to}`, url: mapUrl, is_search: true }],
-      data_quality: dataNote("limited", `Google Directions could not be checked: ${error.message}`),
+      data_quality: dataNote("limited", `Google Routes API could not be checked: ${error.message}`),
       practical_tips: ["Use the Maps route link as a fallback and confirm traffic, transit schedules and walking safety before leaving."],
     };
   }
@@ -1371,57 +1477,49 @@ function isRelevantNewsArticle(article = {}, location = "", country = "") {
   return safetyTerms.some((term) => haystack.includes(term));
 }
 
-const SAFETY_SEVERITY_RULES = [
-  { pattern: /\b(war|airstrike|missile|rocket|bombing|terror|terrorism|armed conflict|invasion|military operation)\b/i, points: 35 },
-  { pattern: /\b(attack|shooting|explosion|violence|deadly|death|killed|wounded|kidnapping|hostage)\b/i, points: 28 },
-  { pattern: /\b(riot|riots|unrest|clashes|curfew|state of emergency|evacuation|airport closure|border closure)\b/i, points: 24 },
-  { pattern: /\b(protest|demonstration|strike|march|checkpoint|roadblock|border tension)\b/i, points: 16 },
-  { pattern: /\b(flood|landslide|earthquake|storm|wildfire|heatwave|monsoon warning|travel disruption)\b/i, points: 14 },
-  { pattern: /\b(tourist warning|travel advisory|security alert|avoid travel|reconsider travel)\b/i, points: 22 },
-  { pattern: /\b(tourism|tourist|visitor|airport|visa|pilgrim|festival|event)\b/i, points: 4 },
+const NEWS_ATTENTION_RULES = [
+  { level: "high", label: "armed conflict or major security disruption in recent coverage", pattern: /\b(war|airstrike|missile|rocket|bombing|terror|terrorism|armed conflict|invasion|military operation|evacuation|airport closure|border closure)\b/i },
+  { level: "high", label: "serious violence in recent coverage", pattern: /\b(attack|shooting|explosion|deadly|killed|wounded|kidnapping|hostage)\b/i },
+  { level: "elevated", label: "civil disruption in recent coverage", pattern: /\b(riot|riots|unrest|clashes|curfew|state of emergency|protest|demonstration|strike|checkpoint|roadblock)\b/i },
+  { level: "elevated", label: "weather or natural-hazard disruption in recent coverage", pattern: /\b(flood|landslide|earthquake|storm|wildfire|heatwave|monsoon warning|travel disruption)\b/i },
+  { level: "elevated", label: "official-warning language reported in recent coverage", pattern: /\b(tourist warning|travel advisory|security alert|avoid travel|reconsider travel)\b/i },
 ];
 
-function safetySignalFromArticles(location = "", country = "", articles = []) {
-  const destination = normalize(`${location} ${country}`);
-  const sensitiveBase = /gaza|west bank|palest|syria|yemen|afghanistan|iran|iraq|israel|lebanon/.test(destination) ? 35 : 10;
-  let score = sensitiveBase;
-  const reasons = [];
+function newsCoverageFromArticles(articles = []) {
+  const levelRank = { unavailable: 0, limited: 1, elevated: 2, high: 3 };
+  let attentionLevel = articles.length ? "limited" : "unavailable";
+  const signals = [];
 
   for (const article of articles.slice(0, 6)) {
     const haystack = `${article.title || article.headline || ""} ${article.description || article.summary || ""}`;
-    for (const rule of SAFETY_SEVERITY_RULES) {
-      if (rule.pattern.test(haystack)) {
-        score += rule.points;
-        const reason = rule.pattern.source.replace(/\\b|[()]/g, "").split("|").slice(0, 3).join("/");
-        reasons.push(reason);
-        break;
-      }
-    }
+    const match = NEWS_ATTENTION_RULES.find((rule) => rule.pattern.test(haystack));
+    if (!match) continue;
+    signals.push(match.label);
+    if (levelRank[match.level] > levelRank[attentionLevel]) attentionLevel = match.level;
   }
 
-  if (!articles.length && sensitiveBase >= 35) score = Math.max(score, 45);
-  score = Math.max(0, Math.min(100, Math.round(score)));
-  const level = score >= 75 ? "high" : score >= 50 ? "elevated" : score >= 25 ? "moderate" : "low";
-  const label = score >= 75 ? "High attention" : score >= 50 ? "Elevated caution" : score >= 25 ? "Moderate caution" : "Low current-news signal";
+  const dates = articles
+    .map((article) => Date.parse(article.publishedAt || article.published || ""))
+    .filter(Number.isFinite)
+    .sort((a, b) => b - a);
+  const latestPublishedAt = dates.length ? new Date(dates[0]).toISOString() : null;
+  const coverageConfidence = articles.length >= 4 ? "medium" : articles.length ? "low-medium" : "low";
+  const labels = {
+    high: "High-attention recent news coverage",
+    elevated: "Elevated-attention recent news coverage",
+    limited: "Limited relevant recent news coverage",
+    unavailable: "No relevant recent news coverage retrieved",
+  };
 
   return {
-    score,
-    level,
-    label,
-    confidence: articles.length >= 3 ? "medium" : articles.length ? "low-medium" : "low",
-    interpretation: articles.length
-      ? "This is a news-signal score, not a guarantee of safety. Official travel advisories and local conditions should decide final travel choices."
-      : "No targeted safety headlines were found in the configured feed. This does not prove the destination is safe; it only means the news signal is limited.",
-    main_signals: [...new Set(reasons)].slice(0, 5),
+    news_attention_level: attentionLevel,
+    news_attention_label: labels[attentionLevel],
+    coverage_confidence: coverageConfidence,
+    evidence_count: articles.length,
+    latest_published_at: latestPublishedAt,
+    main_signals: [...new Set(signals)].slice(0, 5),
+    interpretation: "This classification describes retrieved news coverage only. It is not a destination risk score or a substitute for an official government travel advisory.",
   };
-}
-
-function safetyRiskLevel(location = "", country = "", articleCount = 0, signal = null) {
-  if (signal?.label) return `${signal.label} (${signal.score}/100 news signal)`;
-  const text = normalize(`${location} ${country}`);
-  if (/gaza|west bank|palest|syria|yemen|afghanistan/.test(text)) return "high attention / check official advisories";
-  if (/iran|iraq|israel|lebanon/.test(text)) return "elevated / check official advisories";
-  return articleCount ? "review current advisories" : "standard precautions, unverified current news";
 }
 
 function officialAdvisoryLinks(location = "", country = "") {
@@ -1443,27 +1541,57 @@ function officialAdvisoryLinks(location = "", country = "") {
   ];
 }
 
-async function safetyTool({ location, country, specific_concerns = "general" }) {
-  if (!process.env.NEWS_API_KEY) {
-    return {
-      location,
-      country,
-      official_advisory_links: officialAdvisoryLinks(location, country),
-      data_quality: dataNote("limited", "News API is not configured, so current news-based safety monitoring is unavailable."),
-      safety_assessment: { overall_risk_level: "unverified", confidence_level: "low" },
-      practical_guidance: [
-        "Check your government's official travel advisory before making final decisions.",
-        "Use normal urban precautions around valuables, transport and unfamiliar areas.",
-        "Keep emergency contacts and your accommodation address offline.",
-      ],
-    };
-  }
+function advisoryAlertText(value) {
+  const raw = typeof value === "string" ? value : value?.text || value?.title || value?.content || "";
+  return String(raw).replace(/_/g, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 500);
+}
 
+async function fetchGovUkTravelAdvisory(location = "", country = "") {
+  const query = `${country || location} travel advice`.trim();
+  try {
+    const search = await withRetry(
+      () => httpGet(
+        "https://www.gov.uk/api/search.json",
+        { q: query, filter_format: "travel_advice", count: 5 },
+        "advisory",
+      ),
+      "advisory",
+    );
+    const results = Array.isArray(search?.results) ? search.results : [];
+    const target = normalize(country || location);
+    const match = results.find((item) => normalize(item.title || "").startsWith(target)) || results[0];
+    if (!match?.link || !String(match.link).startsWith("/foreign-travel-advice/")) return null;
+
+    const content = await withRetry(
+      () => httpGet(`https://www.gov.uk/api/content${match.link}`, {}, "advisory"),
+      "advisory",
+    );
+    const alerts = Array.isArray(content?.details?.alert_status)
+      ? content.details.alert_status.map(advisoryAlertText).filter(Boolean).slice(0, 4)
+      : [];
+    return {
+      source: "UK Foreign, Commonwealth & Development Office",
+      title: content?.title || match.title,
+      url: `https://www.gov.uk${match.link}`,
+      updated_at: content?.public_updated_at || content?.updated_at || match.public_timestamp || null,
+      reviewed_at: content?.details?.reviewed_at || null,
+      alert_status: alerts,
+      retrieved_at: new Date().toISOString(),
+    };
+  } catch (error) {
+    logger.debug("Government travel advisory retrieval unavailable", { reason: error.message });
+    return null;
+  }
+}
+
+async function safetyTool({ location, country, specific_concerns = "general" }) {
+  const checkedAt = new Date().toISOString();
+  const officialAdvisory = await fetchGovUkTravelAdvisory(location, country);
   const collected = [];
   const errors = [];
   const usedQueries = [];
 
-  const queryResults = await Promise.allSettled(
+  const queryResults = process.env.NEWS_API_KEY ? await Promise.allSettled(
     newsQueries(location, country, specific_concerns).slice(0, 2).map(async (q) => {
       const data = await withRetry(
         () => httpGet(
@@ -1475,7 +1603,9 @@ async function safetyTool({ location, country, specific_concerns = "general" }) 
       );
       return { q, articles: data.articles || [] };
     }),
-  );
+  ) : [];
+
+  if (!process.env.NEWS_API_KEY) errors.push("News API is not configured");
 
   for (const result of queryResults) {
     if (result.status === "rejected") {
@@ -1494,28 +1624,33 @@ async function safetyTool({ location, country, specific_concerns = "general" }) 
     return true;
   }).slice(0, 6);
 
-  const safetySignal = safetySignalFromArticles(location, country, articles);
+  const coverage = newsCoverageFromArticles(articles);
+  const combinedConfidence = officialAdvisory && articles.length >= 3 ? "medium-high" : officialAdvisory ? "medium" : coverage.coverage_confidence;
 
   return {
     location,
     country,
     current_situation: articles.map((a) => ({ headline: a.title, source: a.source?.name, published: a.publishedAt, summary: a.description, url: a.url })),
+    official_advisory: officialAdvisory,
     official_advisory_links: officialAdvisoryLinks(location, country),
     safety_assessment: {
-      overall_risk_level: safetyRiskLevel(location, country, articles.length, safetySignal),
-      confidence_level: safetySignal.confidence,
-      signal_score: safetySignal.score,
-      signal_level: safetySignal.level,
-      signal_label: safetySignal.label,
-      interpretation: safetySignal.interpretation,
-      main_signals: safetySignal.main_signals,
+      ...coverage,
+      coverage_confidence: combinedConfidence,
+      official_advisory_status: officialAdvisory ? "retrieved" : "unavailable",
+      checked_at: checkedAt,
     },
     practical_guidance: [
       "Check official travel advisories before booking or travelling.",
       "Avoid demonstrations, checkpoints, conflict areas and large crowds.",
       "Use licensed transport and keep emergency contacts, accommodation details and offline maps available.",
     ],
-    data_quality: dataNote(articles.length ? "verified" : "limited", articles.length ? "Relevant recent news articles were returned by News API after destination filtering. Official advisories remain the primary source for safety decisions." : "News API was checked and irrelevant matches were filtered out, but no targeted recent matches were returned for this exact destination. Do not interpret this as proof that travel is safe.", { source: "newsapi", used_queries: usedQueries, errors: errors.slice(0, 2), irrelevant_matches_filtered: true }),
+    data_quality: dataNote(
+      officialAdvisory || articles.length ? "verified" : "limited",
+      officialAdvisory
+        ? "A current UK government travel-advice page was retrieved. Recent news is supplied only as supporting context, never as a risk score."
+        : "An official advisory could not be retrieved. Any recent news is incomplete context and must not be treated as a safety determination.",
+      { sources: [officialAdvisory ? "govuk_fcdo" : null, articles.length ? "newsapi" : null].filter(Boolean), used_queries: usedQueries, errors: errors.slice(0, 2), irrelevant_matches_filtered: true, checked_at: checkedAt },
+    ),
   };
 }
 
@@ -1580,14 +1715,22 @@ export const toolService = {
     return tools;
   },
 
-  async executeTool(toolName, args = {}) {
+  async executeTool(toolName, args = {}, options = {}) {
     const handler = handlers[toolName];
     if (!handler) throw new Error(`Unknown tool: ${toolName}`);
+    if (options.signal?.aborted) {
+      const cancelled = new Error("Tool request cancelled");
+      cancelled.code = "ERR_CANCELED";
+      throw cancelled;
+    }
 
     try {
       logger.debug(`Executing tool: ${toolName}`);
       const started = Date.now();
-      const result = await handler(args);
+      const result = await toolExecutionContext.run(
+        { signal: options.signal, reserveProviderCall: options.reserveProviderCall },
+        () => handler(args),
+      );
       const executionTime = Date.now() - started;
       logger.debug(`Tool ${toolName} completed`, { executionTime });
       return {
@@ -1599,6 +1742,7 @@ export const toolService = {
         },
       };
     } catch (error) {
+      if (options.signal?.aborted || error?.code === "ERR_CANCELED") throw error;
       logger.warn(`Tool ${toolName} execution failed`, { reason: error.message });
       return {
         error: error.message,
@@ -1610,5 +1754,5 @@ export const toolService = {
     }
   },
 
-  _test: { yelpHeaders },
+  _test: { yelpHeaders, newsCoverageFromArticles, fetchGovUkTravelAdvisory, compactRouteLeg, shouldRecordProviderFailure, assertCircuitClosed, recordProviderFailure, recordProviderSuccess },
 };

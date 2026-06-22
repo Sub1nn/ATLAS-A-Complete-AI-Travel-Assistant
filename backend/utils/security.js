@@ -43,6 +43,16 @@ export function assertProductionEnvironment() {
     "CORS_ORIGIN",
     "RESEND_API_KEY",
     "EMAIL_FROM",
+    "PRIVACY_POLICY_VERSION",
+    "TERMS_VERSION",
+    "METRICS_TOKEN",
+    "ERROR_REPORTING_WEBHOOK_URL",
+    "LEGAL_OPERATOR_NAME",
+    "PRIVACY_CONTACT_EMAIL",
+    "LEGAL_JURISDICTION",
+    "PRIVACY_LAWFUL_BASIS",
+    "PRIVACY_TRANSFER_SAFEGUARDS",
+    "PRIVACY_SUPERVISORY_AUTHORITY",
   ];
   const unsafe = required.filter((key) => isPlaceholderSecret(process.env[key]));
 
@@ -56,6 +66,21 @@ export function assertProductionEnvironment() {
 
   if (String(process.env.CORS_ORIGIN || "").includes("*")) {
     throw new Error("CORS_ORIGIN must be an explicit allowlist in production, not a wildcard.");
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(process.env.PRIVACY_CONTACT_EMAIL || ""))) {
+    throw new Error("PRIVACY_CONTACT_EMAIL must be a valid contact email in production.");
+  }
+
+  if (process.env.MONGODB_TRANSACTIONS !== "true") {
+    throw new Error("MONGODB_TRANSACTIONS=true is required in production. Use a MongoDB replica set or managed cluster.");
+  }
+
+  try {
+    const reportingUrl = new URL(process.env.ERROR_REPORTING_WEBHOOK_URL);
+    if (reportingUrl.protocol !== "https:") throw new Error("HTTPS required");
+  } catch {
+    throw new Error("ERROR_REPORTING_WEBHOOK_URL must be a valid HTTPS endpoint in production.");
   }
 
   const publicUrls = [

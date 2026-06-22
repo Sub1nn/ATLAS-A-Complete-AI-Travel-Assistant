@@ -14,6 +14,15 @@ const PreferencesSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const LegalAcceptanceSchema = new mongoose.Schema(
+  {
+    privacyVersion: { type: String, required: true },
+    termsVersion: { type: String, required: true },
+    acceptedAt: { type: Date, required: true },
+  },
+  { _id: false },
+);
+
 const UserSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true, maxlength: 80 },
@@ -26,10 +35,15 @@ const UserSchema = new mongoose.Schema(
     passwordResetTokenHash: { type: String, select: false, index: true },
     passwordResetExpires: { type: Date, select: false },
     preferences: { type: PreferencesSchema, default: () => ({}) },
+    legalAcceptance: { type: LegalAcceptanceSchema, default: undefined },
+    dataRetentionDays: { type: Number, min: 30, max: 730, default: 365 },
     failedLoginAttempts: { type: Number, default: 0, select: false },
-    lockedUntil: { type: Date, select: false },
     tokenVersion: { type: Number, default: 0 },
     lastLoginAt: Date,
+    deletionPending: { type: Boolean, default: false, index: true },
+    deletionRequestedAt: Date,
+    activeChatOperations: { type: Number, default: 0, min: 0, select: false },
+    activeUploadOperations: { type: Number, default: 0, min: 0, select: false },
   },
   { timestamps: true },
 );

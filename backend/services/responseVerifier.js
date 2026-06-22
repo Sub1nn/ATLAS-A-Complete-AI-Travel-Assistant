@@ -1,5 +1,5 @@
 const UNSUPPORTED_PRICE_PATTERNS = [
-  /(?:€|\$|£)\s?\d+[\d,.]*(?:\s?(?:per|\/|a)\s?(?:night|person|day|meal|ticket))?/i,
+  /(?:€|\$|£)\s?\d+[\d,.]*(?:\s*[–-]\s*(?:€|\$|£)?\s?\d+[\d,.]*)?(?:\s?(?:per|\/|a)\s?(?:night|person|day|meal|ticket))?/i,
   /\b\d+[\d,.]*\s?(?:EUR|USD|GBP)\b/i,
 ];
 
@@ -17,6 +17,11 @@ const AVAILABILITY_PATTERNS = [
   /\btables? available\b/i,
   /\bopen from\s+\d/i,
   /\bopen until\s+\d/i,
+];
+
+const UNSUPPORTED_PRICE_REDACTIONS = [
+  /(?:€|\$|£)\s?\d+[\d,.]*(?:\s*[–-]\s*(?:€|\$|£)?\s?\d+[\d,.]*)?(?:\s?(?:per|\/|a)\s?(?:night|person|day|meal|ticket))?/gi,
+  /\b\d+[\d,.]*\s?(?:EUR|USD|GBP)\b/gi,
 ];
 
 function flattenValues(value, output = []) {
@@ -65,6 +70,22 @@ function containsUnsupportedAvailability(answer = "", evidence = "") {
   return AVAILABILITY_PATTERNS.some((pattern) => pattern.test(answer) && !pattern.test(evidence));
 }
 
+function redactUnsupportedPrices(answer = "") {
+  return UNSUPPORTED_PRICE_REDACTIONS.reduce(
+    (output, pattern) => output.replace(pattern, "an unverified price estimate"),
+    answer,
+  );
+}
+
+function redactUnsupportedAvailability(answer = "") {
+  return answer
+    .replace(/\b(?:is|are) available\b/gi, "requires live availability confirmation")
+    .replace(/\bhas rooms available\b/gi, "requires live room-availability confirmation")
+    .replace(/\btables? available\b/gi, "table availability requires live confirmation")
+    .replace(/\bopen from\s+\d[^\n,.]*/gi, "opening time requires direct confirmation")
+    .replace(/\bopen until\s+\d[^\n,.]*/gi, "closing time requires direct confirmation");
+}
+
 function findVenueLikeLines(answer = "", evidence = "") {
   const lines = answer.split(/\n+/).map((line) => line.trim()).filter(Boolean);
   return lines.filter((line) => {
@@ -84,11 +105,13 @@ export function verifyResponse({ answer = "", toolResults = [], documentMatches 
   let revised = softenGuarantees(answer);
 
   if (containsUnsupportedPrice(revised, evidence)) {
-    notes.push("Specific prices were not fully verified from the available sources. Treat any cost figures as rough planning estimates and confirm them directly before booking.");
+    revised = redactUnsupportedPrices(revised);
+    notes.push("Unsupported exact prices were removed. Confirm current costs directly before booking.");
   }
 
   if (containsUnsupportedAvailability(revised, evidence)) {
-    notes.push("Live availability and opening hours were not fully verified. Confirm them on the official website or booking platform before making decisions.");
+    revised = redactUnsupportedAvailability(revised);
+    notes.push("Unsupported live availability or opening-hour claims were removed. Confirm them on the official website or booking platform.");
   }
 
   const venueLikeLines = findVenueLikeLines(revised, evidence);

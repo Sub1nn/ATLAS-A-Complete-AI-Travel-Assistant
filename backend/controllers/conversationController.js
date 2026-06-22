@@ -2,13 +2,40 @@ import { Conversation } from "../models/Conversation.js";
 import { Message } from "../models/Message.js";
 import { titleSchema, validate } from "../utils/validation.js";
 
+function pageLimit(value, fallback, max) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? Math.max(1, Math.min(parsed, max)) : fallback;
+}
+
+function parseCursor(value) {
+  if (!value) return null;
+  const [dateValue, id] = String(value).split("|");
+  const date = new Date(dateValue);
+  if (!dateValue || Number.isNaN(date.getTime()) || !/^[a-fA-F0-9]{24}$/.test(id || "")) return null;
+  return { date, id };
+}
+
+function cursorFilter(field, cursor) {
+  if (!cursor) return {};
+  return { $or: [{ [field]: { $lt: cursor.date } }, { [field]: cursor.date, _id: { $lt: cursor.id } }] };
+}
+
+function makeCursor(item, field) {
+  return item ? `${new Date(item[field]).toISOString()}|${item._id}` : null;
+}
+
 export const conversationController = {
   async list(req, res) {
-    const conversations = await Conversation.find({ userId: req.user._id })
+    const limit = pageLimit(req.query.limit, 25, 50);
+    const cursor = parseCursor(req.query.cursor);
+    if (req.query.cursor && !cursor) return res.status(400).json({ message: "Invalid conversation cursor" });
+    const rows = await Conversation.find({ userId: req.user._id, ...cursorFilter("updatedAt", cursor) })
       .select("title updatedAt createdAt memory lastMessagePreview messageCount documentIds")
-      .sort({ updatedAt: -1 })
-      .limit(50)
+      .sort({ updatedAt: -1, _id: -1 })
+      .limit(limit + 1)
       .lean();
+    const hasMore = rows.length > limit;
+    const conversations = rows.slice(0, limit);
 
     res.json({
       conversations: conversations.map((c) => ({
@@ -20,6 +47,7 @@ export const conversationController = {
         messageCount: c.messageCount || 0,
         documentCount: c.documentIds?.length || 0,
       })),
+      nextCursor: hasMore ? makeCursor(conversations.at(-1), "updatedAt") : null,
     });
   },
 
@@ -40,14 +68,19 @@ export const conversationController = {
     const conversation = await Conversation.findOne({ _id: req.params.id, userId: req.user._id }).lean();
     if (!conversation) return res.status(404).json({ message: "Conversation not found" });
 
-    const storedMessages = await Message.find({ conversationId: conversation._id, userId: req.user._id })
-      .sort({ createdAt: -1 })
-      .limit(300)
-      .lean()
-      .then((items) => items.reverse());
+    const limit = pageLimit(req.query.limit, 100, 200);
+    const cursor = parseCursor(req.query.cursor);
+    if (req.query.cursor && !cursor) return res.status(400).json({ message: "Invalid message cursor" });
+    const messageRows = await Message.find({ conversationId: conversation._id, userId: req.user._id, ...cursorFilter("createdAt", cursor) })
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(limit + 1)
+      .lean();
+    const hasMoreMessages = messageRows.length > limit;
+    const pageRows = messageRows.slice(0, limit);
+    const storedMessages = [...pageRows].reverse();
 
     const legacyMessages = conversation.messages || [];
-    const messages = storedMessages.length ? storedMessages : legacyMessages;
+    const messages = storedMessages.length ? storedMessages : !cursor ? legacyMessages : [];
 
     res.json({
       conversation: {
@@ -64,6 +97,7 @@ export const conversationController = {
           timestamp: m.createdAt,
           metadata: m.metadata || {},
         })),
+        nextMessageCursor: hasMoreMessages ? makeCursor(pageRows.at(-1), "createdAt") : null,
       },
     });
   },

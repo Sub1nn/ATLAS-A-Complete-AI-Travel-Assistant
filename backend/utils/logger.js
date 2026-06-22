@@ -1,3 +1,5 @@
+import { reportOperationalError } from "../services/errorReporter.js";
+
 const isProduction = process.env.NODE_ENV === "production";
 
 function redact(value = "") {
@@ -42,6 +44,7 @@ export const logger = {
   },
   error(message, meta) {
     write("error", message, meta);
+    reportOperationalError(redact(message), safeMeta(meta));
   },
   redact,
 };

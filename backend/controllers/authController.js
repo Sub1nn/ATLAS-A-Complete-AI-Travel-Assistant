@@ -1,28 +1,18 @@
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
-import { getJwtSecret, createRandomToken, hashToken } from "../utils/security.js";
+import { createRandomToken, hashToken } from "../utils/security.js";
 import { User } from "../models/User.js";
 import {
   authLoginSchema,
   authSignupSchema,
   emailOnlySchema,
+  policyAcceptanceSchema,
   preferencesSchema,
   resetPasswordSchema,
   tokenSchema,
   validate,
 } from "../utils/validation.js";
 import { emailService } from "../services/emailService.js";
-
-const signToken = (user) => {
-  const secret = getJwtSecret();
-  return jwt.sign({
-    userId: user._id.toString(),
-    email: user.email,
-    tokenVersion: Number(user.tokenVersion || 0),
-  }, secret, {
-    expiresIn: process.env.JWT_EXPIRES_IN || "7d",
-  });
-};
+import { sessionService } from "../services/sessionService.js";
 
 const safeUser = (user) => ({
   id: user._id.toString(),
@@ -30,10 +20,13 @@ const safeUser = (user) => ({
   email: user.email,
   emailVerified: Boolean(user.emailVerified),
   preferences: user.preferences || {},
+  dataRetentionDays: Number(user.dataRetentionDays || process.env.DEFAULT_DATA_RETENTION_DAYS || 365),
+  privacyVersion: user.legalAcceptance?.privacyVersion || "",
+  privacyAccepted: user.legalAcceptance?.privacyVersion === (process.env.PRIVACY_POLICY_VERSION || "2026-06-22")
+    && user.legalAcceptance?.termsVersion === (process.env.TERMS_VERSION || "2026-06-22"),
 });
 
-const MAX_FAILED_LOGINS = Number(process.env.AUTH_MAX_FAILED_LOGINS || 5);
-const LOCK_MINUTES = Number(process.env.AUTH_LOCK_MINUTES || 15);
+const MAX_FAILED_LOGIN_DELAY_MS = Number(process.env.AUTH_MAX_FAILED_LOGIN_DELAY_MS || 2000);
 let dummyPasswordHashPromise;
 
 function dummyPasswordHash() {
@@ -47,21 +40,15 @@ function emailDeliveryMessage(delivery, successMessage, failedMessage) {
   return `${failedMessage} In local development, configure RESEND_API_KEY or use the console email fallback.`;
 }
 
-function isLocked(user) {
-  return user.lockedUntil && user.lockedUntil > new Date();
-}
-
 async function recordFailedLogin(user) {
   user.failedLoginAttempts = Number(user.failedLoginAttempts || 0) + 1;
-  if (user.failedLoginAttempts >= MAX_FAILED_LOGINS) {
-    user.lockedUntil = new Date(Date.now() + LOCK_MINUTES * 60 * 1000);
-  }
   await user.save();
+  const delay = Math.min(MAX_FAILED_LOGIN_DELAY_MS, user.failedLoginAttempts * 250);
+  if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
 }
 
 async function clearFailedLoginState(user) {
   user.failedLoginAttempts = 0;
-  user.lockedUntil = undefined;
   user.lastLoginAt = new Date();
   await user.save();
 }
@@ -85,12 +72,24 @@ export const authController = {
     if (existing) return res.status(409).json({ message: "An account with this email already exists" });
 
     const passwordHash = await bcrypt.hash(password, 12);
-    const user = await User.create({ name, email, passwordHash });
+    const user = await User.create({
+      name,
+      email,
+      passwordHash,
+      legalAcceptance: {
+        privacyVersion: process.env.PRIVACY_POLICY_VERSION || "2026-06-22",
+        termsVersion: process.env.TERMS_VERSION || "2026-06-22",
+        acceptedAt: new Date(),
+      },
+      dataRetentionDays: Number(process.env.DEFAULT_DATA_RETENTION_DAYS || 365),
+    });
     const verification = await issueVerification(user);
+    const token = await sessionService.createSession(user, res);
 
     res.status(201).json({
       user: safeUser(user),
-      token: signToken(user),
+      token,
+      csrfToken: res.locals.csrfToken,
       emailVerificationRequired: true,
       emailDelivery: verification.delivery.sent ? "sent" : "failed",
       message: emailDeliveryMessage(
@@ -106,14 +105,10 @@ export const authController = {
     if (parsed.error) return res.status(400).json({ message: parsed.error });
     const { email, password } = parsed.data;
 
-    const user = await User.findOne({ email }).select("+passwordHash +failedLoginAttempts +lockedUntil");
+    const user = await User.findOne({ email }).select("+passwordHash +failedLoginAttempts");
     if (!user) {
       await bcrypt.compare(password, await dummyPasswordHash());
       return res.status(401).json({ message: "Invalid email or password" });
-    }
-
-    if (isLocked(user)) {
-      return res.status(423).json({ message: "This account is temporarily locked after repeated failed login attempts. Please try again later or reset your password." });
     }
 
     const ok = await bcrypt.compare(password, user.passwordHash);
@@ -122,11 +117,17 @@ export const authController = {
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
+    if (user.deletionPending) {
+      return res.status(423).json({ message: "Account deletion is in progress", code: "ACCOUNT_DELETION_PENDING" });
+    }
+
     await clearFailedLoginState(user);
+    const token = await sessionService.createSession(user, res);
 
     res.json({
       user: safeUser(user),
-      token: signToken(user),
+      token,
+      csrfToken: res.locals.csrfToken,
       emailVerificationRequired: !user.emailVerified,
     });
   },
@@ -157,12 +158,14 @@ export const authController = {
       await user.save();
     }
 
+    const token = await sessionService.createSession(user, res);
     res.json({
       message: wasAlreadyVerified
         ? "Email is already verified. You can sign in to ATLAS."
         : "Email verified successfully. You can sign in to ATLAS.",
       user: safeUser(user),
-      token: signToken(user),
+      token,
+      csrfToken: res.locals.csrfToken,
     });
   },
 
@@ -213,9 +216,9 @@ export const authController = {
     user.passwordResetTokenHash = undefined;
     user.passwordResetExpires = undefined;
     user.failedLoginAttempts = 0;
-    user.lockedUntil = undefined;
     user.tokenVersion = Number(user.tokenVersion || 0) + 1;
     await user.save();
+    await sessionService.revokeAllForUser(user._id);
 
     res.json({ message: "Password reset successfully" });
   },
@@ -226,5 +229,45 @@ export const authController = {
     req.user.preferences = parsed.data;
     await req.user.save();
     res.json({ user: safeUser(req.user) });
+  },
+
+  async acceptPolicies(req, res) {
+    const parsed = validate(policyAcceptanceSchema, req.body || {});
+    if (parsed.error) return res.status(400).json({ message: parsed.error });
+    req.user.legalAcceptance = {
+      privacyVersion: process.env.PRIVACY_POLICY_VERSION || "2026-06-22",
+      termsVersion: process.env.TERMS_VERSION || "2026-06-22",
+      acceptedAt: new Date(),
+    };
+    await req.user.save();
+    res.json({ user: safeUser(req.user) });
+  },
+
+  async refresh(req, res) {
+    const refreshed = await sessionService.rotate(req, res);
+    if (refreshed?.retry) {
+      res.setHeader("Retry-After", "1");
+      return res.status(409).json({ message: "Refresh rotation is already in progress", code: "REFRESH_IN_PROGRESS" });
+    }
+    if (!refreshed) return res.status(401).json({ message: "Refresh session is invalid or expired" });
+    res.json({ token: refreshed.token, csrfToken: refreshed.csrfToken, user: safeUser(refreshed.user) });
+  },
+
+  async csrf(req, res) {
+    const csrfToken = sessionService.issueCsrf(res);
+    res.json({ csrfToken });
+  },
+
+  async logout(req, res) {
+    await sessionService.revokeCurrent(req, res);
+    res.json({ ok: true });
+  },
+
+  async logoutAll(req, res) {
+    req.user.tokenVersion = Number(req.user.tokenVersion || 0) + 1;
+    await req.user.save();
+    await sessionService.revokeAllForUser(req.user._id);
+    sessionService.clearCookie(res);
+    res.json({ ok: true });
   },
 };

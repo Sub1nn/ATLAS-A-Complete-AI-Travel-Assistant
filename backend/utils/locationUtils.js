@@ -6,6 +6,23 @@ const GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json";
 const OPEN_WEATHER_GEOCODE_URL = "https://api.openweathermap.org/geo/1.0/direct";
 
 const locationCache = new Map();
+const LOCATION_CACHE_MAX_ITEMS = Math.max(50, Number(process.env.LOCATION_CACHE_MAX_ITEMS || 1000));
+
+function readMemoryLocation(key) {
+  if (!locationCache.has(key)) return null;
+  const value = locationCache.get(key);
+  locationCache.delete(key);
+  locationCache.set(key, value);
+  return value;
+}
+
+function storeMemoryLocation(key, value) {
+  if (locationCache.has(key)) locationCache.delete(key);
+  locationCache.set(key, value);
+  while (locationCache.size > LOCATION_CACHE_MAX_ITEMS) {
+    locationCache.delete(locationCache.keys().next().value);
+  }
+}
 
 const AMBIGUOUS_COUNTRY_OR_REGION_VALUES = new Set([
   "palestine",
@@ -173,15 +190,18 @@ function mapOpenWeatherResult(result) {
   };
 }
 
-async function geocodeWithGoogle(query) {
+async function geocodeWithGoogle(query, signal, reserveProviderCall) {
   const key = getGoogleKey();
   if (!key) return null;
 
   const cacheKey = buildCacheKey("geocode:google", { query });
   const { value } = await getOrSetCache(cacheKey, Number(process.env.CACHE_GEOCODE_TTL_SECONDS || 7 * 24 * 60 * 60), async () => {
+    const budget = await reserveProviderCall?.("google_geocode");
+    if (budget?.allowed === false) throw Object.assign(new Error("Daily external-provider call budget reached"), { code: "PROVIDER_BUDGET_EXCEEDED", status: 429 });
     const res = await axios.get(GOOGLE_GEOCODE_URL, {
       params: { address: query, key },
       timeout: 10000,
+      signal,
     });
 
     if (res.data.status !== "OK" || !res.data.results?.length) return null;
@@ -199,15 +219,18 @@ async function geocodeWithGoogle(query) {
   return value;
 }
 
-async function geocodeWithOpenWeather(query) {
+async function geocodeWithOpenWeather(query, signal, reserveProviderCall) {
   const key = getOpenWeatherKey();
   if (!key) return null;
 
   const cacheKey = buildCacheKey("geocode:openweather", { query });
   const { value } = await getOrSetCache(cacheKey, Number(process.env.CACHE_GEOCODE_TTL_SECONDS || 7 * 24 * 60 * 60), async () => {
+    const budget = await reserveProviderCall?.("openweather_geocode");
+    if (budget?.allowed === false) throw Object.assign(new Error("Daily external-provider call budget reached"), { code: "PROVIDER_BUDGET_EXCEEDED", status: 429 });
     const res = await axios.get(OPEN_WEATHER_GEOCODE_URL, {
       params: { q: query, limit: 5, appid: key },
       timeout: 10000,
+      signal,
     });
 
     if (!Array.isArray(res.data) || !res.data.length) return null;
@@ -217,7 +240,7 @@ async function geocodeWithOpenWeather(query) {
   return value;
 }
 
-export async function getLocationData(location) {
+export async function getLocationData(location, { signal, reserveProviderCall } = {}) {
   const cleaned = sanitizeLocationQuery(location);
   if (!cleaned) throw new Error(`Location is required. Received: "${normalizeLocationText(location)}"`);
 
@@ -226,31 +249,34 @@ export async function getLocationData(location) {
   }
 
   const key = cacheKey(cleaned);
-  if (locationCache.has(key)) return locationCache.get(key);
+  const cachedLocation = readMemoryLocation(key);
+  if (cachedLocation) return cachedLocation;
 
   const variants = buildLocationVariants(cleaned);
   const errors = [];
 
   for (const query of variants) {
     try {
-      const result = await geocodeWithGoogle(query);
+      const result = await geocodeWithGoogle(query, signal, reserveProviderCall);
       if (Number.isFinite(Number(result?.lat)) && Number.isFinite(Number(result?.lon))) {
-        locationCache.set(key, result);
+        storeMemoryLocation(key, result);
         return result;
       }
     } catch (error) {
+      if (signal?.aborted || ["ERR_CANCELED", "PROVIDER_BUDGET_EXCEEDED"].includes(error?.code)) throw error;
       errors.push(`Google: ${error.message}`);
     }
   }
 
   for (const query of variants) {
     try {
-      const result = await geocodeWithOpenWeather(query);
+      const result = await geocodeWithOpenWeather(query, signal, reserveProviderCall);
       if (Number.isFinite(Number(result?.lat)) && Number.isFinite(Number(result?.lon))) {
-        locationCache.set(key, result);
+        storeMemoryLocation(key, result);
         return result;
       }
     } catch (error) {
+      if (signal?.aborted || ["ERR_CANCELED", "PROVIDER_BUDGET_EXCEEDED"].includes(error?.code)) throw error;
       errors.push(`OpenWeather: ${error.message}`);
     }
   }

@@ -1,4 +1,6 @@
 import axios from "axios";
+import crypto from "crypto";
+import mongoose from "mongoose";
 import { Conversation, normalizeConversationMemory } from "../models/Conversation.js";
 import { Message } from "../models/Message.js";
 import { toolService } from "../services/toolService.js";
@@ -9,9 +11,141 @@ import { chatRequestSchema, validate } from "../utils/validation.js";
 import { verifyResponse } from "../services/responseVerifier.js";
 import { logger } from "../utils/logger.js";
 import { travelPlannerService } from "../services/travelPlannerService.js";
+import { ChatRequest } from "../models/ChatRequest.js";
+import { usageService } from "../services/usageService.js";
+import { User } from "../models/User.js";
 
 const MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+const CHAT_REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
+const CHAT_REQUEST_LEASE_MS = Math.max(2 * 60 * 1000, Number(process.env.CHAT_REQUEST_LEASE_MS || 10 * 60 * 1000));
+const CONVERSATION_LEASE_MS = Math.max(60 * 1000, Number(process.env.CONVERSATION_LEASE_MS || 5 * 60 * 1000));
+
+async function beginChatRequest(userId, clientRequestId) {
+  const processingOwner = crypto.randomUUID();
+  const processingLeaseUntil = new Date(Date.now() + CHAT_REQUEST_LEASE_MS);
+  try {
+    const request = await ChatRequest.create({
+      userId,
+      clientRequestId,
+      status: "processing",
+      processingOwner,
+      processingLeaseUntil,
+      expiresAt: new Date(Date.now() + CHAT_REQUEST_TTL_MS),
+    });
+    return { state: "started", request, processingOwner };
+  } catch (error) {
+    if (error?.code !== 11000) throw error;
+    const existing = await ChatRequest.findOne({ userId, clientRequestId });
+    if (existing?.status === "completed" && existing.response) return { state: "replay", response: existing.response };
+    const now = new Date();
+    const claimed = await ChatRequest.findOneAndUpdate(
+      {
+        userId,
+        clientRequestId,
+        status: { $ne: "completed" },
+        $or: [
+          { status: "failed" },
+          { processingLeaseUntil: { $lte: now } },
+          { processingLeaseUntil: { $exists: false } },
+        ],
+      },
+      {
+        $set: {
+          status: "processing",
+          processingOwner,
+          processingLeaseUntil,
+          failureReason: "",
+          expiresAt: new Date(Date.now() + CHAT_REQUEST_TTL_MS),
+        },
+      },
+      { new: true },
+    ).select("+processingOwner");
+    if (claimed) return { state: "started", request: claimed, processingOwner };
+    const latest = await ChatRequest.findOne({ userId, clientRequestId }).lean();
+    if (latest?.status === "completed" && latest.response) return { state: "replay", response: latest.response };
+    return { state: "processing" };
+  }
+}
+
+async function completeChatRequest(requestId, processingOwner, response) {
+  const result = await ChatRequest.updateOne(
+    { _id: requestId, processingOwner, status: "processing" },
+    { $set: { status: "completed", response, failureReason: "" }, $unset: { processingOwner: "", processingLeaseUntil: "" } },
+  );
+  if (!result.matchedCount) throw new Error("Chat request ownership was lost before completion");
+}
+
+async function failChatRequest(requestId, processingOwner, error) {
+  if (!requestId) return;
+  await ChatRequest.updateOne(
+    { _id: requestId, processingOwner, status: "processing" },
+    {
+      $set: { status: "failed", failureReason: String(error?.message || "Request failed").slice(0, 300) },
+      $unset: { processingOwner: "", processingLeaseUntil: "" },
+    },
+  ).catch(() => {});
+}
+
+function startChatRequestHeartbeat(requestId, processingOwner) {
+  const timer = setInterval(() => {
+    ChatRequest.updateOne(
+      { _id: requestId, processingOwner, status: "processing" },
+      { $set: { processingLeaseUntil: new Date(Date.now() + CHAT_REQUEST_LEASE_MS) } },
+    ).catch(() => {});
+  }, Math.max(15000, Math.min(30000, Math.floor(CHAT_REQUEST_LEASE_MS / 3))));
+  timer.unref();
+  return timer;
+}
+
+async function persistConversationTurn(conversation, messages, chatRequestId, processingOwner, responsePayload) {
+  await conversation.validate();
+  if (process.env.MONGODB_TRANSACTIONS === "true") {
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const completed = await ChatRequest.updateOne(
+          { _id: chatRequestId, processingOwner, status: "processing" },
+          { $set: { status: "completed", response: responsePayload, failureReason: "" }, $unset: { processingOwner: "", processingLeaseUntil: "" } },
+          { session },
+        );
+        if (!completed.matchedCount) throw new Error("Chat request ownership was lost before completion");
+        await Message.create(messages, { session, ordered: true });
+        await conversation.save({ session });
+      });
+      return;
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  const createdMessages = await Message.create(messages);
+  try {
+    await conversation.save();
+    await completeChatRequest(chatRequestId, processingOwner, responsePayload);
+  } catch (error) {
+    await Message.deleteMany({ _id: { $in: createdMessages.map((item) => item._id) } }).catch(() => {});
+    throw error;
+  }
+}
+
+async function settleWithConcurrency(items, concurrency, task) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      try {
+        results[index] = { status: "fulfilled", value: await task(items[index], index) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, () => worker()));
+  return results;
+}
 
 function sanitize(text = "") {
   return String(text || "")
@@ -52,14 +186,15 @@ function identityResponse() {
   return `**About ATLAS**\n\nATLAS is a travel planning assistant designed to help with destination research, accommodation choices, weather-aware planning, safety context, dining ideas and local travel logistics.\n\nIt can also use uploaded PDF, DOCX and TXT files when you ask questions about a document. It will not claim live prices or live availability unless that data is actually available.`;
 }
 
-function isDocumentFocusedRequest(message = "", documentIds = []) {
+export function isDocumentFocusedRequest(message = "", documentIds = []) {
   if (!documentIds?.length) return false;
-  const text = String(message || "").toLowerCase();
+  const text = String(message || "").toLowerCase().trim();
   const documentTerms = [
     "pdf", "document", "file", "uploaded", "attached", "attachment", "docx", "summarize", "summarise",
-    "summary", "explain this", "what is this", "what does this say", "according to", "from this", "in this"
+    "summary", "explain this", "what is this", "what does this say", "what does it say", "according to",
+    "from this document", "in this document", "the attachment", "this attachment", "this file"
   ];
-  return documentTerms.some((term) => text.includes(term)) || text.length < 80;
+  return documentTerms.some((term) => text.includes(term));
 }
 
 function buildTravelSystemPrompt(resolved, docContext = "", toolResults = [], userPreferences = {}) {
@@ -170,7 +305,7 @@ function relevantToolNames(intent, locations, documentFocused = false, resolved 
   return plans[intent] || [];
 }
 
-async function buildToolArgs(toolName, resolved) {
+async function buildToolArgs(toolName, resolved, signal, reserveProviderCall) {
   const location = resolved.destination || resolved.locations?.[0];
   const isCountryScope = resolved.locationScope === "country" || contextService.isCountryLike?.(location || "");
 
@@ -188,7 +323,7 @@ async function buildToolArgs(toolName, resolved) {
     const label = contextService.canonicalDestination?.(location || resolved.destination || "destination") || contextService.titleCase(location || resolved.destination || "destination");
     if (isCountryScope || !location) return { label, country: label };
     try {
-      const locData = await getLocationData(location);
+      const locData = await getLocationData(location, { signal, reserveProviderCall });
       return { label: locData?.city || label, country: locData?.country || resolved.memory?.country || label };
     } catch {
       return { label, country: resolved.memory?.country || label };
@@ -220,7 +355,7 @@ async function buildToolArgs(toolName, resolved) {
   let locData = null;
   if (location) {
     try {
-      locData = await getLocationData(location);
+      locData = await getLocationData(location, { signal, reserveProviderCall });
     } catch (error) {
       logger.debug("Location resolution skipped", { reason: error.message });
       locData = null;
@@ -395,8 +530,10 @@ function naturalJoin(items = []) {
   return `${list.slice(0, -1).join(", ")} and ${list.at(-1)}`;
 }
 
-function isSafetySensitiveDestination(destination = "") {
-  return /palest|gaza|west bank|iran|iraq|israel|lebanon|syria|afghanistan|yemen/i.test(destination);
+function hasHeightenedSafetyContext(safety = {}) {
+  const assessment = safety.safety_assessment || {};
+  const alertStatus = safety.official_advisory?.alert_status;
+  return assessment.news_attention_level === "high" || (Array.isArray(alertStatus) && alertStatus.length > 0);
 }
 
 
@@ -494,24 +631,19 @@ function articleBullet(article = {}) {
 function summarizeSafetyContext(safety = {}, destination = "your destination") {
   const rawArticles = Array.isArray(safety.current_situation) ? safety.current_situation : [];
   const assessment = safety.safety_assessment || {};
-  const risk = assessment.overall_risk_level || "review current advisories";
-  const score = Number.isFinite(Number(assessment.signal_score)) ? Number(assessment.signal_score) : null;
-  const level = assessment.signal_label || assessment.signal_level || "Current-news signal";
-  const isSensitive = isSafetySensitiveDestination(destination);
+  const attention = assessment.news_attention_label || "No reliable news-attention classification";
+  const confidence = assessment.coverage_confidence || "low";
+  const checkedAt = assessment.checked_at ? String(assessment.checked_at).slice(0, 16).replace("T", " ") + " UTC" : "time unavailable";
 
   const articles = rawArticles
     .filter((a) => a?.headline)
     .filter((a) => !/\bRT\b|Russia Today|Free Republic|Freerepublic|Slashdot|Biztoc|Crypto Briefing|Bitcoinist|Cointelegraph/i.test(String(a.source || "")))
     .slice(0, 3);
 
-  const signalLine = score !== null
-    ? `Safety signal: ${score}/100 (${level}). ${assessment.interpretation || "This is a current-news signal, not a guarantee of safety."}`
-    : `Current safety posture: ${risk}.`;
+  const signalLine = `Evidence coverage: ${confidence}. News attention: ${attention}. Checked ${checkedAt}. ${assessment.interpretation || "News coverage is context, not a travel-risk rating."}`;
 
   if (!articles.length) {
-    const tone = isSensitive
-      ? `I could not verify strong targeted news from the configured feed for ${destination}. For a sensitive destination, that should not be treated as a green signal; use official advisories and local contacts before booking.`
-      : `I did not find strong targeted safety news from the configured feed for ${destination}. This does not mean the place is 100% safe; it means the configured news feed did not return targeted disruption signals.`;
+    const tone = `I did not find strong targeted news from the configured feed for ${destination}. This is a coverage limitation, not evidence that the destination is safe. Use the retrieved government advisory and local information before booking.`;
     return [tone, signalLine];
   }
 
@@ -521,7 +653,7 @@ function summarizeSafetyContext(safety = {}, destination = "your destination") {
   const tourismLike = /tourism|tourist|travel|airport|pilgrim|hajj|visitor|event/i.test(combined);
 
   let tone;
-  if (isSensitive && conflictLike) {
+  if (assessment.news_attention_level === "high" && conflictLike) {
     tone = `The current news signal for ${destination} is high-attention. The returned items point to security, movement or conflict-related issues, so I would not treat this as an ordinary tourist trip.`;
   } else if (conflictLike || protestLike) {
     tone = `The current news signal for ${destination} suggests caution. Keep plans flexible, avoid demonstrations or border-sensitive areas, and compare this with official advisories.`;
@@ -545,6 +677,14 @@ function practicalDestinationFallback(destination = "your destination", resolved
 }
 
 function compactAdvisoryNote(safety = {}, destination = "your destination") {
+  const advisory = safety.official_advisory;
+  if (advisory?.url) {
+    const updated = advisory.updated_at ? ` Updated ${String(advisory.updated_at).slice(0, 10)}.` : "";
+    const alerts = Array.isArray(advisory.alert_status) && advisory.alert_status.length
+      ? ` Current alert: ${advisory.alert_status.join(" ")}`
+      : "";
+    return `[${advisory.title || `Official travel advice for ${destination}`}](${advisory.url}) was retrieved from ${advisory.source || "a government source"}.${updated}${alerts} Recheck it before departure because advice can change.`;
+  }
   const links = Array.isArray(safety.official_advisory_links) ? safety.official_advisory_links.slice(0, 2) : [];
   if (!links.length) return "";
   const linked = links.map((item) => `[${item.name.replace(/ travel advisories| travel advice/gi, "")}](${item.url})`).join(" and ");
@@ -675,7 +815,7 @@ function composeDestinationPipelineAnswer(resolved, toolResults = []) {
   const destinations = displayDestinations(resolved);
   const destination = naturalJoin(destinations.length ? destinations : [locationDisplay(resolved)]);
   const primaryDestination = destinations[0] || locationDisplay(resolved);
-  const isSensitive = destinations.some(isSafetySensitiveDestination) || isSafetySensitiveDestination(primaryDestination);
+  const isSensitive = hasHeightenedSafetyContext(safety);
   const isCountryScope = resolved.locationScope === "country" || contextService.isCountryLike?.(resolved.destination || "");
 
   if (!safety && !culture && !weather && !activities && !restaurants && !stays) return "";
@@ -841,7 +981,7 @@ function composeRouteAnswer(resolved, toolResults = []) {
     }).join("\n"));
   } else {
     lines.push(`\n**Route data note**`);
-    lines.push(route.data_quality?.note || "I could not verify step-by-step route data from Google Directions, so use the Maps link and adjust the mode if needed.");
+    lines.push(route.data_quality?.note || "I could not verify step-by-step route data from Google Routes API, so use the Maps link and adjust the mode if needed.");
   }
 
   const tips = Array.isArray(route.practical_tips) ? route.practical_tips.slice(0, 3) : [];
@@ -862,7 +1002,7 @@ function composeGroundedAnswer(message, resolved, toolResults = []) {
   return "";
 }
 
-async function callGroq(messages, tools = null, toolChoice = "auto", maxTokens = 900) {
+async function callGroq(messages, tools = null, toolChoice = "auto", maxTokens = 900, signal) {
   if (!process.env.GROQ_API_KEY) throw new Error("GROQ_API_KEY not configured");
 
   const payload = {
@@ -884,6 +1024,7 @@ async function callGroq(messages, tools = null, toolChoice = "auto", maxTokens =
       "Content-Type": "application/json",
     },
     timeout: 45000,
+    signal,
   });
 
   return res.data.choices?.[0]?.message;
@@ -946,14 +1087,33 @@ I could not verify live venue data for this exact request, so treat these as pla
   return `**Travel guidance for ${destination}**\n\nStart with your main purpose, then choose the area, daily pace and transport around that. Keep the plan flexible if the trip is soon.\n\n**Practical checks**\n• Confirm accommodation reviews and final prices before booking\n• Check weather close to departure\n• Save offline maps and your hotel address\n• Carry some local cash for smaller shops and transport\n\n**Data note**\nSome live sources may be limited right now, so this is practical planning guidance rather than guaranteed real-time availability.`;
 }
 
-async function getOrCreateConversation(req, message) {
+async function getOrCreateConversation(req, message, processingOwner) {
   const { conversationId } = req.body || {};
 
   if (conversationId) {
-    const existing = await Conversation.findOne({ _id: conversationId, userId: req.user._id });
+    const now = new Date();
+    const existing = await Conversation.findOneAndUpdate(
+      {
+        _id: conversationId,
+        userId: req.user._id,
+        $or: [
+          { processingOwner: processingOwner },
+          { processingOwner: { $exists: false } },
+          { processingOwner: null },
+          { processingLeaseUntil: { $lte: now } },
+        ],
+      },
+      { $set: { processingOwner, processingLeaseUntil: new Date(now.getTime() + CONVERSATION_LEASE_MS) } },
+      { new: true },
+    ).select("+processingOwner +processingLeaseUntil");
     if (existing) {
       req.atlasConversationCreated = false;
       return existing;
+    }
+    if (await Conversation.exists({ _id: conversationId, userId: req.user._id })) {
+      const error = new Error("Another message is already being processed for this conversation. Retry shortly.");
+      error.status = 409;
+      throw error;
     }
     const error = new Error("Conversation not found");
     error.status = 404;
@@ -967,13 +1127,35 @@ async function getOrCreateConversation(req, message) {
     messages: [],
     memory: { locations: [], interests: [], travelDates: [] },
     documentIds: [],
+    processingOwner,
+    processingLeaseUntil: new Date(Date.now() + CONVERSATION_LEASE_MS),
   });
   req.atlasConversationCreated = true;
   req.atlasConversationId = created._id;
   return created;
 }
 
-async function buildFinalAnswer(message, conversation, recentMessages, resolved, toolResults, retrievedDocs, documentFocused, userPreferences = {}) {
+function startConversationHeartbeat(conversationId, processingOwner) {
+  const intervalMs = Math.max(15000, Math.min(30000, Math.floor(CONVERSATION_LEASE_MS / 3)));
+  const timer = setInterval(() => {
+    Conversation.updateOne(
+      { _id: conversationId, processingOwner },
+      { $set: { processingLeaseUntil: new Date(Date.now() + CONVERSATION_LEASE_MS) } },
+    ).catch(() => {});
+  }, intervalMs);
+  timer.unref();
+  return timer;
+}
+
+async function releaseConversation(conversationId, processingOwner) {
+  if (!conversationId || !processingOwner) return;
+  await Conversation.updateOne(
+    { _id: conversationId, processingOwner },
+    { $unset: { processingOwner: "", processingLeaseUntil: "" } },
+  ).catch(() => {});
+}
+
+async function buildFinalAnswer(message, conversation, recentMessages, resolved, toolResults, retrievedDocs, documentFocused, userPreferences = {}, signal) {
   const docContext = documentService.buildDocumentContext(retrievedDocs, documentFocused ? 6500 : 3500);
 
   if (documentFocused) {
@@ -985,7 +1167,7 @@ async function buildFinalAnswer(message, conversation, recentMessages, resolved,
       { role: "system", content: buildDocumentSystemPrompt(docContext) },
       ...recent,
       { role: "user", content: message },
-    ], null, "none", 1000);
+    ], null, "none", 1000, signal);
 
     return sanitize(finalMessage?.content || "");
   }
@@ -1003,7 +1185,7 @@ async function buildFinalAnswer(message, conversation, recentMessages, resolved,
     { role: "system", content: toolContext },
     ...recent,
     { role: "user", content: resolved.enrichedUserMessage },
-  ], null, "none", 900);
+  ], null, "none", 900, signal);
 
   return sanitize(finalMessage?.content || "");
 }
@@ -1011,15 +1193,59 @@ async function buildFinalAnswer(message, conversation, recentMessages, resolved,
 export const chatController = {
   async handleChat(req, res) {
     const started = Date.now();
+    const requestController = new AbortController();
+    let conversationHeartbeat = null;
+    let chatRequestHeartbeat = null;
+    let activeChatOperation = false;
+    req.once("aborted", () => requestController.abort());
+    res.once("close", () => {
+      if (!res.writableEnded) requestController.abort();
+    });
 
     try {
       const parsed = validate(chatRequestSchema, req.body || {});
       if (parsed.error) return res.status(400).json({ message: parsed.error });
 
-      const { message, conversationId, documentIds: incomingDocumentIds } = parsed.data;
+      const operation = await User.updateOne(
+        { _id: req.user._id, deletionPending: { $ne: true } },
+        { $inc: { activeChatOperations: 1 } },
+      );
+      if (!operation.matchedCount) return res.status(423).json({ message: "Account deletion is in progress", code: "ACCOUNT_DELETION_PENDING" });
+      activeChatOperation = true;
+
+      const { clientRequestId, message, conversationId, documentIds: incomingDocumentIds } = parsed.data;
       req.body.conversationId = conversationId;
 
-      const conversation = await getOrCreateConversation(req, message);
+      const idempotency = await beginChatRequest(req.user._id, clientRequestId);
+      if (idempotency.state === "replay") {
+        res.setHeader("X-Idempotent-Replay", "true");
+        return res.json(idempotency.response);
+      }
+      if (idempotency.state === "processing") {
+        res.setHeader("Retry-After", "2");
+        return res.status(409).json({ message: "This chat request is already being processed." });
+      }
+      req.atlasChatRequestId = idempotency.request._id;
+      req.atlasChatRequestOwner = idempotency.processingOwner;
+      chatRequestHeartbeat = startChatRequestHeartbeat(req.atlasChatRequestId, req.atlasChatRequestOwner);
+
+      const quota = await usageService.reserveChat(req.user._id);
+      if (!quota.allowed) {
+        await ChatRequest.deleteOne({ _id: req.atlasChatRequestId, processingOwner: req.atlasChatRequestOwner });
+        req.atlasChatRequestId = null;
+        return res.status(429).json({ message: `Daily chat limit reached (${quota.limit}). Try again tomorrow.`, dailyLimit: quota.limit });
+      }
+
+      const authorizedDocumentIds = await documentService.validateUserDocumentIds(req.user._id, incomingDocumentIds);
+      if (authorizedDocumentIds.length !== incomingDocumentIds.length) {
+        await failChatRequest(req.atlasChatRequestId, req.atlasChatRequestOwner, new Error("One or more attached documents are unavailable"));
+        req.atlasChatRequestId = null;
+        return res.status(400).json({ message: "One or more attached documents are unavailable. Refresh the document list and try again." });
+      }
+
+      const conversation = await getOrCreateConversation(req, message, req.atlasChatRequestOwner);
+      req.atlasConversationId = conversation._id;
+      conversationHeartbeat = startConversationHeartbeat(conversation._id, req.atlasChatRequestOwner);
       const recentMessages = await Message.find({ conversationId: conversation._id, userId: req.user._id })
         .sort({ createdAt: -1 })
         .limit(12)
@@ -1032,58 +1258,59 @@ export const chatController = {
         conversation.lastMessagePreview = answer.slice(0, 180);
         conversation.messageCount = (conversation.messageCount || 0) + 2;
         if (!conversation.title || conversation.title === "New chat") conversation.title = message.slice(0, 60);
-        await conversation.validate();
-        const createdMessages = await Message.create([
-          { conversationId: conversation._id, userId: req.user._id, role: "user", content: message, intent: "system_identity" },
-          { conversationId: conversation._id, userId: req.user._id, role: "assistant", content: answer, intent: "system_identity" },
-        ]);
-        try {
-          await conversation.save();
-        } catch (error) {
-          await Message.deleteMany({ _id: { $in: createdMessages.map((item) => item._id) } }).catch(() => {});
-          throw error;
-        }
-        return res.json({
+        const responsePayload = {
           result: answer,
           conversationId: conversation._id.toString(),
           title: conversation.title,
           timestamp: new Date().toISOString(),
-        });
-      }
-
-      const authorizedDocumentIds = await documentService.validateUserDocumentIds(req.user._id, incomingDocumentIds);
-      if (authorizedDocumentIds.length !== incomingDocumentIds.length) {
-        return res.status(400).json({ message: "One or more attached documents are unavailable. Refresh the document list and try again." });
+        };
+        await persistConversationTurn(conversation, [
+          { conversationId: conversation._id, userId: req.user._id, role: "user", content: message, intent: "system_identity" },
+          { conversationId: conversation._id, userId: req.user._id, role: "assistant", content: answer, intent: "system_identity" },
+        ], req.atlasChatRequestId, req.atlasChatRequestOwner, responsePayload);
+        return res.json(responsePayload);
       }
 
       const documentFocused = isDocumentFocusedRequest(message, authorizedDocumentIds);
       const existingMemory = normalizeConversationMemory(conversation.memory);
       const baseResolved = contextService.resolveContext(message, existingMemory, historyForContext);
-      const llmPlan = documentFocused ? null : await travelPlannerService.createTravelPlan({ message, memory: existingMemory, previousMessages: historyForContext });
+      const plannerBudget = !documentFocused && travelPlannerService.isEnabled()
+        ? await usageService.reserveProviderUsage(req.user._id, { llmCalls: 1 })
+        : { allowed: false };
+      const llmPlan = plannerBudget.allowed
+        ? await travelPlannerService.createTravelPlan({ message, memory: existingMemory, previousMessages: historyForContext, signal: requestController.signal })
+        : null;
       const resolved = documentFocused ? baseResolved : travelPlannerService.applyTravelPlan(baseResolved, llmPlan);
 
       const retrievedDocs = authorizedDocumentIds.length
         ? await documentService.searchUserDocuments(req.user._id, message, authorizedDocumentIds)
         : [];
 
-      const toolsToUse = relevantToolNames(resolved.intent.type, resolved.locations, documentFocused, resolved).slice(0, 6);
-      const settledToolResults = await Promise.allSettled(
-        toolsToUse.map(async (toolName) => {
-          const args = await buildToolArgs(toolName, resolved);
+      const maxToolGroups = Math.max(1, Number(process.env.CHAT_MAX_TOOL_GROUPS || 4));
+      const toolConcurrency = Math.max(1, Number(process.env.CHAT_TOOL_CONCURRENCY || 2));
+      const toolsToUse = relevantToolNames(resolved.intent.type, resolved.locations, documentFocused, resolved).slice(0, maxToolGroups);
+      const reserveProviderCall = () => usageService.reserveExternalCall(req.user._id);
+      const settledToolResults = await settleWithConcurrency(
+        toolsToUse,
+        toolConcurrency,
+        async (toolName) => {
+          if (requestController.signal.aborted) throw new Error("Client disconnected");
+          const args = await buildToolArgs(toolName, resolved, requestController.signal, reserveProviderCall);
           if (!args) return null;
-          const result = await toolService.executeTool(toolName, args);
+          const result = await toolService.executeTool(toolName, args, { signal: requestController.signal, reserveProviderCall });
           return {
             tool: toolName,
             status: result?.error ? "failed" : "success",
             result,
             error: result?.error || null,
           };
-        }),
+        },
       );
       const toolResults = settledToolResults
         .map((item, index) => item.status === "fulfilled" ? item.value : { tool: toolsToUse[index], status: "failed", error: item.reason?.message || "Tool failed" })
         .filter(Boolean);
       const successfulToolResults = toolResults.filter((item) => item.status !== "failed" && !item.result?.error);
+      if (requestController.signal.aborted) throw new Error("Client disconnected");
 
       let answer;
       const liveDataRequired = resolved.intent.type === "weather_inquiry";
@@ -1096,15 +1323,22 @@ export const chatController = {
       } else if (liveDataRequired && !hasVerifiedToolData && !documentFocused) {
         answer = fallbackAnswer(message, resolved, retrievedDocs, documentFocused);
       } else {
-        try {
-          answer = await buildFinalAnswer(message, conversation, recentMessages, resolved, toolResults, retrievedDocs, documentFocused, req.user.preferences || {});
-        } catch (error) {
-          logger.warn("Final response generation fallback", { reason: error.message });
+        const finalLlmBudget = await usageService.reserveProviderUsage(req.user._id, { llmCalls: 1 });
+        if (!finalLlmBudget.allowed) {
           answer = fallbackAnswer(message, resolved, retrievedDocs, documentFocused);
+        } else {
+          try {
+            answer = await buildFinalAnswer(message, conversation, recentMessages, resolved, toolResults, retrievedDocs, documentFocused, req.user.preferences || {}, requestController.signal);
+          } catch (error) {
+            if (requestController.signal.aborted || error?.code === "ERR_CANCELED") throw error;
+            logger.warn("Final response generation fallback", { reason: error.message });
+            answer = fallbackAnswer(message, resolved, retrievedDocs, documentFocused);
+          }
         }
       }
 
       answer = sanitize(answer || fallbackAnswer(message, resolved, retrievedDocs, documentFocused));
+      if (requestController.signal.aborted) throw new Error("Client disconnected");
       const verificationResult = verifyResponse({
         answer,
         toolResults: successfulToolResults,
@@ -1119,9 +1353,24 @@ export const chatController = {
       conversation.messageCount = (conversation.messageCount || 0) + 2;
       conversation.documentIds = authorizedDocumentIds;
       if (!conversation.title || conversation.title === "New chat") conversation.title = message.slice(0, 60);
-      await conversation.validate();
-
-      const createdMessages = await Message.create([
+      const responsePayload = {
+        result: answer,
+        conversationId: conversation._id.toString(),
+        title: conversation.title,
+        memory: conversation.memory,
+        timestamp: new Date().toISOString(),
+        response_metadata: {
+          intent: documentFocused ? "document_chat" : resolved.intent.type,
+          processing_time_ms: Date.now() - started,
+          tool_count: toolResults.length,
+          document_matches: retrievedDocs.length,
+          document_focused: documentFocused,
+          liveActions,
+          response_verification: verificationResult.verification,
+          planner: resolved.planner ? { intent: resolved.planner.intent, confidence: resolved.planner.confidence, answer_style: resolved.planner.answer_style } : null,
+        },
+      };
+      await persistConversationTurn(conversation, [
         { conversationId: conversation._id, userId: req.user._id, role: "user", content: message, intent: documentFocused ? "document_chat" : resolved.intent.type },
         {
           conversationId: conversation._id,
@@ -1140,38 +1389,20 @@ export const chatController = {
             planner: resolved.planner ? { intent: resolved.planner.intent, confidence: resolved.planner.confidence, answerStyle: resolved.planner.answer_style } : null,
           },
         },
-      ]);
+      ], req.atlasChatRequestId, req.atlasChatRequestOwner, responsePayload);
 
-      try {
-        await conversation.save();
-      } catch (error) {
-        await Message.deleteMany({ _id: { $in: createdMessages.map((item) => item._id) } }).catch(() => {});
-        throw error;
-      }
-
-      res.json({
-        result: answer,
-        conversationId: conversation._id.toString(),
-        title: conversation.title,
-        memory: conversation.memory,
-        timestamp: new Date().toISOString(),
-        response_metadata: {
-          intent: documentFocused ? "document_chat" : resolved.intent.type,
-          processing_time_ms: Date.now() - started,
-          tool_count: toolResults.length,
-          document_matches: retrievedDocs.length,
-          document_focused: documentFocused,
-          liveActions,
-          response_verification: verificationResult.verification,
-          planner: resolved.planner ? { intent: resolved.planner.intent, confidence: resolved.planner.confidence, answer_style: resolved.planner.answer_style } : null,
-        },
-      });
+      res.json(responsePayload);
     } catch (error) {
       if (req.atlasConversationCreated && req.atlasConversationId) {
         await Promise.allSettled([
           Message.deleteMany({ conversationId: req.atlasConversationId, userId: req.user._id }),
           Conversation.deleteOne({ _id: req.atlasConversationId, userId: req.user._id, messageCount: 0 }),
         ]);
+      }
+      await failChatRequest(req.atlasChatRequestId, req.atlasChatRequestOwner, error);
+      if (requestController.signal.aborted) {
+        logger.info("Chat request cancelled after client disconnect", { requestId: req.requestId });
+        return;
       }
       logger.error("Chat request failed", { reason: error.message });
       const status = Number(error.status || 500);
@@ -1180,6 +1411,16 @@ export const chatController = {
         error: process.env.NODE_ENV === "development" ? error.message : undefined,
         requestId: req.requestId,
       });
+    } finally {
+      if (chatRequestHeartbeat) clearInterval(chatRequestHeartbeat);
+      if (conversationHeartbeat) clearInterval(conversationHeartbeat);
+      await releaseConversation(req.atlasConversationId, req.atlasChatRequestOwner);
+      if (activeChatOperation) {
+        await User.updateOne(
+          { _id: req.user?._id },
+          [{ $set: { activeChatOperations: { $max: [0, { $subtract: ["$activeChatOperations", 1] }] } } }],
+        ).catch(() => {});
+      }
     }
   },
 
