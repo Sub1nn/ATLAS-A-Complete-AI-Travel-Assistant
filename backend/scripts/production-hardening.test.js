@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { verifyResponse } from "../services/responseVerifier.js";
 import { cacheKey, getOrSetCache } from "../services/cacheService.js";
 import { hasAllowedSignature } from "../controllers/documentController.js";
@@ -18,12 +23,31 @@ import { DailyUsage } from "../models/DailyUsage.js";
 import { Document } from "../models/Document.js";
 import { AccountDeletion } from "../models/AccountDeletion.js";
 import { StorageUsage } from "../models/StorageUsage.js";
+import { OperationLease } from "../models/OperationLease.js";
+import { DocumentDeletion } from "../models/DocumentDeletion.js";
+import { WorkerHeartbeat } from "../models/WorkerHeartbeat.js";
+import { GlobalUsage } from "../models/GlobalUsage.js";
 import { sessionService } from "../services/sessionService.js";
 import { emailService } from "../services/emailService.js";
 import { usageService } from "../services/usageService.js";
 import { authSignupSchema, chatRequestSchema, validate } from "../utils/validation.js";
 
 process.env.NODE_ENV = "test";
+const execFileAsync = promisify(execFile);
+
+test("document extraction runs in a bounded child process", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "atlas-extractor-test-"));
+  const source = path.join(directory, "sample.txt");
+  await fs.writeFile(source, "Safe travel notes for Helsinki");
+  try {
+    const { stdout } = await execFileAsync(process.execPath, [new URL("./extract-document-child.js", import.meta.url).pathname, source, "text/plain", "sample.txt"], {
+      env: { ...process.env, MAX_DOCUMENT_TEXT_CHARS: "1000" },
+    });
+    assert.equal(stdout, "Safe travel notes for Helsinki");
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("response verifier adds caution for unsupported prices and availability", () => {
   const { answer, verification } = verifyResponse({
@@ -140,6 +164,10 @@ test("privacy, idempotency, usage and processing fields are indexed", () => {
   assert.ok(User.schema.path("deletionPending"));
   assert.ok(AccountDeletion.schema.path("leaseOwner"));
   assert.ok(StorageUsage.schema.path("documentCount"));
+  assert.ok(OperationLease.schema.path("expiresAt"));
+  assert.ok(DocumentDeletion.schema.path("leaseOwner"));
+  assert.ok(WorkerHeartbeat.schema.path("lastSeenAt"));
+  assert.ok(GlobalUsage.schema.path("providerCalls"));
   assert.equal(usageService._test.dayKey(new Date("2026-06-22T12:00:00Z")), "2026-06-22");
 });
 

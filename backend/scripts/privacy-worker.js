@@ -2,7 +2,8 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import { connectDatabase } from "../db/mongoose.js";
-import { documentQueueService } from "../services/documentQueueService.js";
+import { accountDeletionService } from "../services/accountDeletionService.js";
+import { documentDeletionService } from "../services/documentDeletionService.js";
 import { workerHealthService } from "../services/workerHealthService.js";
 import { assertProductionEnvironment } from "../utils/security.js";
 
@@ -11,5 +12,5 @@ dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
 assertProductionEnvironment();
 if (!(await connectDatabase())) throw new Error("MongoDB connection is unavailable");
-await workerHealthService.start("documents");
-await documentQueueService.startWorker();
+await workerHealthService.start("privacy");
+await Promise.all([accountDeletionService.startWorker(), documentDeletionService.startWorker()]);

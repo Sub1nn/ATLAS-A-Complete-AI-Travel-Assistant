@@ -42,8 +42,7 @@ const UserSchema = new mongoose.Schema(
     lastLoginAt: Date,
     deletionPending: { type: Boolean, default: false, index: true },
     deletionRequestedAt: Date,
-    activeChatOperations: { type: Number, default: 0, min: 0, select: false },
-    activeUploadOperations: { type: Number, default: 0, min: 0, select: false },
+    operationLeaseFenceAt: { type: Date, select: false },
   },
   { timestamps: true },
 );

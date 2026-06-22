@@ -11,6 +11,10 @@ import { ChatRequest } from "../models/ChatRequest.js";
 import { DailyUsage } from "../models/DailyUsage.js";
 import { AccountDeletion } from "../models/AccountDeletion.js";
 import { StorageUsage } from "../models/StorageUsage.js";
+import { OperationLease } from "../models/OperationLease.js";
+import { DocumentDeletion } from "../models/DocumentDeletion.js";
+import { WorkerHeartbeat } from "../models/WorkerHeartbeat.js";
+import { GlobalUsage } from "../models/GlobalUsage.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
@@ -28,6 +32,10 @@ try {
     DailyUsage.createIndexes(),
     AccountDeletion.createIndexes(),
     StorageUsage.createIndexes(),
+    OperationLease.createIndexes(),
+    DocumentDeletion.createIndexes(),
+    WorkerHeartbeat.createIndexes(),
+    GlobalUsage.createIndexes(),
   ]);
   console.log("MongoDB indexes created successfully.");
 } finally {

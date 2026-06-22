@@ -6,8 +6,7 @@ import { Conversation } from "../models/Conversation.js";
 import { Document } from "../models/Document.js";
 import { Message } from "../models/Message.js";
 import { User } from "../models/User.js";
-import { vectorStore } from "../services/vectorStore.js";
-import { documentQueueService } from "../services/documentQueueService.js";
+import { documentDeletionService } from "../services/documentDeletionService.js";
 import { assertProductionEnvironment } from "../utils/security.js";
 import { storageUsageService } from "../services/storageUsageService.js";
 
@@ -15,7 +14,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 assertProductionEnvironment();
 
-const summary = { users: 0, messages: 0, conversations: 0, documents: 0, remoteDeletionFailures: 0 };
+const summary = { users: 0, messages: 0, conversations: 0, documentDeletionsQueued: 0 };
 
 try {
   if (!(await connectDatabase())) throw new Error("MongoDB connection is unavailable");
@@ -26,23 +25,10 @@ try {
     const days = Math.max(30, Math.min(Number(user.dataRetentionDays || process.env.DEFAULT_DATA_RETENTION_DAYS || 365), 730));
     const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-    const oldDocuments = await Document.find({ userId: user._id, createdAt: { $lt: cutoff } }).select("_id chunks +rawUploadId").lean();
+    const oldDocuments = await Document.find({ userId: user._id, createdAt: { $lt: cutoff }, deletionPending: { $ne: true } }).select("_id").lean();
     for (const document of oldDocuments) {
-      if (vectorStore.isConfigured()) {
-        const remote = await vectorStore.deleteDocumentChunks({ userId: user._id, documentId: document._id, chunkCount: document.chunks?.length || 0 });
-        if (!remote.deleted) {
-          summary.remoteDeletionFailures += 1;
-          continue;
-        }
-      }
-      const rawDeletion = await documentQueueService.deleteUpload(document.rawUploadId);
-      if (!rawDeletion.deleted) {
-        summary.remoteDeletionFailures += 1;
-        continue;
-      }
-      const deleted = await Document.deleteOne({ _id: document._id, userId: user._id });
-      summary.documents += deleted.deletedCount || 0;
-      await Conversation.updateMany({ userId: user._id, documentIds: document._id }, { $pull: { documentIds: document._id } });
+      await documentDeletionService.requestDeletion(document._id, user._id, "retention");
+      summary.documentDeletionsQueued += 1;
     }
 
     const deletedMessages = await Message.deleteMany({ userId: user._id, createdAt: { $lt: cutoff } });
@@ -70,8 +56,7 @@ try {
     await storageUsageService.reconcile(user._id);
   }
 
-  console.log(JSON.stringify({ ok: summary.remoteDeletionFailures === 0, ...summary }));
-  if (summary.remoteDeletionFailures) process.exitCode = 2;
+  console.log(JSON.stringify({ ok: true, ...summary }));
 } finally {
   await closeDatabase();
 }

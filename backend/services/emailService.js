@@ -91,4 +91,28 @@ export const emailService = {
       html: `<p>Hi ${safeName},</p><p>Reset your ATLAS password using this link:</p><p><a href="${safeLink}">Reset password</a></p><p>This link expires in 1 hour. If you did not request this, ignore this email.</p>`,
     });
   },
+
+  async sendAccountDeletionUpdate(email, completed, trackingToken = "") {
+    const statusUrl = trackingToken ? `${appBaseUrl()}/account-deletion-status.html#token=${encodeURIComponent(trackingToken)}` : "";
+    return this.sendMail({
+      to: email,
+      subject: completed ? "Your ATLAS account was deleted" : "ATLAS account deletion needs attention",
+      text: completed
+        ? `Your ATLAS account and associated data were deleted. ${statusUrl ? `Status receipt: ${statusUrl}` : ""}`
+        : `ATLAS could not complete your account deletion automatically. The operation is retained for administrative retry. ${statusUrl ? `Status: ${statusUrl}` : ""}`,
+      html: completed
+        ? `<p>Your ATLAS account and associated data were deleted.</p>${statusUrl ? `<p><a href="${escapeHtml(statusUrl)}">View deletion receipt</a></p>` : ""}`
+        : `<p>ATLAS could not complete your account deletion automatically. The operation has been flagged for administrative retry.</p>${statusUrl ? `<p><a href="${escapeHtml(statusUrl)}">View deletion status</a></p>` : ""}`,
+    });
+  },
+
+  async sendAccountDeletionRequested(email, trackingToken) {
+    const statusUrl = `${appBaseUrl()}/account-deletion-status.html#token=${encodeURIComponent(trackingToken)}`;
+    return this.sendMail({
+      to: email,
+      subject: "Your ATLAS account deletion was requested",
+      text: `Your account deletion is being processed. Keep this private status link until deletion completes: ${statusUrl}`,
+      html: `<p>Your ATLAS account deletion is being processed.</p><p>Keep this private link until deletion completes: <a href="${escapeHtml(statusUrl)}">View deletion status</a></p>`,
+    });
+  },
 };

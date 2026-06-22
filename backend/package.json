@@ -22,10 +22,12 @@
     "db:indexes": "node scripts/sync-indexes.js",
     "privacy:retention": "node scripts/enforce-retention.js",
     "worker:documents": "node scripts/document-worker.js",
+    "worker:privacy": "node scripts/privacy-worker.js",
     "worker:retention": "node scripts/retention-scheduler.js",
     "test:integration": "node scripts/integration-test.js",
     "test:load": "node scripts/load-test.js",
-    "test:load:authenticated": "node scripts/authenticated-load-test.js"
+    "test:load:authenticated": "node scripts/authenticated-load-test.js",
+    "test:soak": "node scripts/soak-test.js"
   },
   "keywords": [
     "travel",

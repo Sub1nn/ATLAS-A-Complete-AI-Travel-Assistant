@@ -16,26 +16,31 @@ const [{ default: app }, { User }] = await Promise.all([
   import("../app.js"),
   import("../models/User.js"),
 ]);
-const [{ Session }, { ChatRequest }, { DailyUsage }, { Document }, { Conversation }, { Message }, { AccountDeletion }, { StorageUsage }, { usageService }, { documentQueueService }, { accountDeletionService }, { storageUsageService }] = await Promise.all([
+const [{ Session }, { ChatRequest }, { DailyUsage }, { GlobalUsage }, { Document }, { Conversation }, { Message }, { AccountDeletion }, { OperationLease }, { DocumentDeletion }, { StorageUsage }, { usageService }, { documentQueueService }, { accountDeletionService }, { documentDeletionService }, { storageUsageService }, { chatController }] = await Promise.all([
   import("../models/Session.js"),
   import("../models/ChatRequest.js"),
   import("../models/DailyUsage.js"),
+  import("../models/GlobalUsage.js"),
   import("../models/Document.js"),
   import("../models/Conversation.js"),
   import("../models/Message.js"),
   import("../models/AccountDeletion.js"),
+  import("../models/OperationLease.js"),
+  import("../models/DocumentDeletion.js"),
   import("../models/StorageUsage.js"),
   import("../services/usageService.js"),
   import("../services/documentQueueService.js"),
   import("../services/accountDeletionService.js"),
+  import("../services/documentDeletionService.js"),
   import("../services/storageUsageService.js"),
+  import("../controllers/chatController.js"),
 ]);
 
 const email = `integration-${Date.now()}@example.test`;
 const password = "IntegrationPassword123";
 
 try {
-  await Promise.all([ChatRequest.syncIndexes(), StorageUsage.syncIndexes(), AccountDeletion.syncIndexes()]);
+  await Promise.all([ChatRequest.syncIndexes(), StorageUsage.syncIndexes(), AccountDeletion.syncIndexes(), OperationLease.syncIndexes(), DocumentDeletion.syncIndexes(), GlobalUsage.syncIndexes()]);
   await User.create({
     name: "Integration User",
     email,
@@ -66,6 +71,12 @@ try {
   const reservations = await Promise.all(Array.from({ length: 10 }, () => usageService.reserveChat(refresh.body.user.id)));
   assert.equal(reservations.filter(({ allowed }) => allowed).length, 10);
   assert.equal((await DailyUsage.findOne({ userId: refresh.body.user.id }).lean()).chatRequests, 10);
+
+  process.env.GLOBAL_DAILY_PROVIDER_CALL_LIMIT = "4";
+  const globalReservations = await Promise.all(Array.from({ length: 8 }, () => usageService.reserveExternalCall(refresh.body.user.id)));
+  assert.equal(globalReservations.filter(({ allowed }) => allowed).length, 4);
+  assert.equal((await GlobalUsage.findOne({}).lean()).providerCalls, 4);
+  process.env.GLOBAL_DAILY_PROVIDER_CALL_LIMIT = "10000";
 
   const invalidRequestId = crypto.randomUUID();
   const invalidAttachment = await request(app)
@@ -98,7 +109,36 @@ try {
   assert.equal(lockedConversation.status, 409);
   assert.equal((await ChatRequest.findOne({ clientRequestId: lockedRequestId }).lean()).status, "failed");
   await Conversation.updateOne({ _id: completedChat.response.conversationId }, { $unset: { processingOwner: "", processingLeaseUntil: "" } });
-  assert.equal((await User.findById(refresh.body.user.id).select("+activeChatOperations").lean()).activeChatOperations, 0);
+  assert.equal(await OperationLease.countDocuments({ userId: refresh.body.user.id }), 0);
+
+  const fencedConversation = await Conversation.create({
+    userId: refresh.body.user.id,
+    title: "Newer conversation state",
+    processingOwner: "newer-owner",
+    processingLeaseUntil: new Date(Date.now() + 60000),
+  });
+  const staleRequest = await ChatRequest.create({
+    userId: refresh.body.user.id,
+    clientRequestId: crypto.randomUUID(),
+    status: "processing",
+    processingOwner: "stale-owner",
+    processingLeaseUntil: new Date(Date.now() + 60000),
+    expiresAt: new Date(Date.now() + 60000),
+  });
+  fencedConversation.title = "Stale overwrite";
+  await assert.rejects(
+    chatController._test.persistConversationTurn(
+      fencedConversation,
+      [{ userId: refresh.body.user.id, conversationId: fencedConversation._id, role: "user", content: "stale" }],
+      staleRequest._id,
+      "stale-owner",
+      { conversationId: fencedConversation._id.toString(), answer: "stale" },
+    ),
+    /lease ownership was lost/i,
+  );
+  assert.equal((await Conversation.findById(fencedConversation._id).lean()).title, "Newer conversation state");
+  assert.equal(await Message.countDocuments({ conversationId: fencedConversation._id }), 0);
+  await Conversation.updateOne({ _id: fencedConversation._id }, { $unset: { processingOwner: "", processingLeaseUntil: "" } });
 
   const leaseDocument = await Document.create({
     userId: refresh.body.user.id,
@@ -116,6 +156,23 @@ try {
     (error) => error.code === "DOCUMENT_LEASE_LOST",
   );
   await Document.deleteOne({ _id: leaseDocument._id });
+
+  const deletionRaceDocument = await Document.create({
+    userId: refresh.body.user.id,
+    originalName: "document-deletion-race.txt",
+    mimeType: "text/plain",
+    size: 0,
+    processingStatus: "processing",
+    leaseOwner: "active-document-worker",
+    leaseUntil: new Date(Date.now() + 60000),
+  });
+  await documentDeletionService.requestDeletion(deletionRaceDocument._id, refresh.body.user.id);
+  assert.equal((await documentDeletionService.processNext()).waiting, true);
+  assert.equal(await Document.countDocuments({ _id: deletionRaceDocument._id }), 1);
+  await Document.updateOne({ _id: deletionRaceDocument._id }, { $set: { leaseUntil: new Date(Date.now() - 1000) } });
+  await DocumentDeletion.updateOne({ documentId: deletionRaceDocument._id }, { $set: { nextAttemptAt: new Date(Date.now() - 1000) } });
+  assert.equal((await documentDeletionService.processNext()).deleted, true);
+  assert.equal(await Document.countDocuments({ _id: deletionRaceDocument._id }), 0);
 
   const storageReservations = await Promise.all(
     Array.from({ length: 5 }, () => storageUsageService.reserve(refresh.body.user.id, 1, { maxDocuments: 3, maxBytes: 100 })),
@@ -143,14 +200,20 @@ try {
     leaseOwner: "active-worker",
     leaseUntil: new Date(Date.now() + 60000),
   });
-  await User.updateOne({ _id: refresh.body.user.id }, { $set: { activeUploadOperations: 1 } });
+  await OperationLease.create({
+    userId: refresh.body.user.id,
+    owner: crypto.randomUUID(),
+    type: "upload",
+    expiresAt: new Date(Date.now() + 60000),
+  });
   const deletion = await agent.delete("/api/auth/account").set("Authorization", `Bearer ${refresh.body.token}`).send({ password });
   assert.equal(deletion.status, 202);
+  assert.match(deletion.body.trackingToken, /^[a-f0-9]{64}$/);
   assert.equal((await User.findOne({ email }).lean()).deletionPending, true);
   assert.equal((await accountDeletionService.processNext()).waiting, true);
   assert.equal(await User.countDocuments({ email }), 1);
   await Document.updateOne({ _id: activeDeletionDocument._id }, { $set: { leaseUntil: new Date(Date.now() - 1000) } });
-  await User.updateOne({ _id: refresh.body.user.id }, { $set: { activeUploadOperations: 0 } });
+  await OperationLease.updateMany({ userId: refresh.body.user.id }, { $set: { expiresAt: new Date(Date.now() - 1000) } });
   await AccountDeletion.updateOne({ userId: refresh.body.user.id }, { $set: { nextAttemptAt: new Date(Date.now() - 1000) } });
   assert.equal((await accountDeletionService.processNext()).deleted, true);
   assert.equal(await User.countDocuments({ email }), 0);
@@ -158,6 +221,10 @@ try {
   assert.equal(await ChatRequest.countDocuments({ userId: refresh.body.user.id }), 0);
   assert.equal(await DailyUsage.countDocuments({ userId: refresh.body.user.id }), 0);
   assert.equal(await AccountDeletion.countDocuments({ userId: refresh.body.user.id }), 0);
+  assert.equal(await AccountDeletion.countDocuments({ status: "completed" }), 1);
+  const deletionStatus = await request(app).get(`/api/auth/account-deletion-status?token=${deletion.body.trackingToken}`);
+  assert.equal(deletionStatus.status, 200);
+  assert.equal(deletionStatus.body.status, "completed");
   assert.equal(await StorageUsage.countDocuments({ userId: refresh.body.user.id }), 0);
   assert.equal(await Conversation.countDocuments({ userId: refresh.body.user.id }), 0);
   console.log("ATLAS authenticated integration flow passed");

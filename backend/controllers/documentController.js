@@ -1,15 +1,14 @@
 import crypto from "crypto";
 import fs from "fs";
-import mongoose from "mongoose";
 import os from "os";
 import path from "path";
 import multer from "multer";
 import { Document } from "../models/Document.js";
 import { vectorStore } from "../services/vectorStore.js";
-import { Conversation } from "../models/Conversation.js";
 import { documentQueueService } from "../services/documentQueueService.js";
 import { storageUsageService } from "../services/storageUsageService.js";
-import { User } from "../models/User.js";
+import { operationLeaseService } from "../services/operationLeaseService.js";
+import { documentDeletionService } from "../services/documentDeletionService.js";
 
 const MAX_FILE_SIZE = Number(process.env.MAX_UPLOAD_BYTES || 12 * 1024 * 1024);
 const MAX_USER_DOCUMENTS = Number(process.env.MAX_USER_DOCUMENTS || 100);
@@ -86,21 +85,12 @@ export const documentController = {
     req.file.originalname = safeName;
 
     let doc;
-    let activeUploadOperation = false;
+    let operationLease = null;
+    let operationHeartbeat = null;
     try {
-      const createDocument = async (session = null) => {
-        const options = session ? { session } : undefined;
-        const operation = await User.updateOne(
-          { _id: req.user._id, deletionPending: { $ne: true } },
-          { $inc: { activeUploadOperations: 1 } },
-          options,
-        );
-        if (!operation.matchedCount) {
-          const error = new Error("Account deletion is in progress");
-          error.status = 423;
-          throw error;
-        }
-        const document = new Document({
+      operationLease = await operationLeaseService.acquire(req.user._id, "upload");
+      operationHeartbeat = operationLeaseService.heartbeat(operationLease);
+      doc = await Document.create({
         userId: req.user._id,
         originalName: req.file.originalname,
         fileName: req.file.originalname,
@@ -114,22 +104,7 @@ export const documentController = {
         vectorIndexName: vectorStore.isConfigured() ? vectorStore.indexName() : undefined,
         vectorNamespace: vectorStore.isConfigured() ? vectorStore.namespaceFor(req.user._id) : undefined,
         vectorEmbeddingModel: vectorStore.isConfigured() ? vectorStore.embeddingModel() : undefined,
-        });
-        await document.save(options);
-        return document;
-      };
-      if (process.env.MONGODB_TRANSACTIONS === "true") {
-        const session = await mongoose.startSession();
-        try {
-          await session.withTransaction(async () => { doc = await createDocument(session); });
-          activeUploadOperation = true;
-        } finally {
-          await session.endSession();
-        }
-      } else {
-        doc = await createDocument();
-        activeUploadOperation = true;
-      }
+      });
       doc.rawUploadId = await documentQueueService.storeUpload(req.file, { userId: req.user._id.toString(), documentId: doc._id.toString() });
       await doc.save();
       await documentQueueService.enqueue(doc._id);
@@ -139,12 +114,7 @@ export const documentController = {
       await storageUsageService.release(req.user._id, req.file.size);
       throw error;
     } finally {
-      if (activeUploadOperation) {
-        await User.updateOne(
-          { _id: req.user._id },
-          [{ $set: { activeUploadOperations: { $max: [0, { $subtract: ["$activeUploadOperations", 1] }] } } }],
-        ).catch(() => {});
-      }
+      await operationLeaseService.release(operationLease, operationHeartbeat);
       await cleanupTemp();
     }
 
@@ -165,7 +135,7 @@ export const documentController = {
   },
 
   async list(req, res) {
-    const docs = await Document.find({ userId: req.user._id })
+    const docs = await Document.find({ userId: req.user._id, deletionPending: { $ne: true } })
       .select("originalName size createdAt chunks processingStatus processingError attempts vectorStatus vectorProvider vectorRecordCount vectorIndexedAt indexingError")
       .sort({ createdAt: -1 })
       .limit(100)
@@ -190,20 +160,10 @@ export const documentController = {
   },
 
   async remove(req, res) {
-    const doc = await Document.findOne({ _id: req.params.id, userId: req.user._id }).select("_id userId size chunks vectorNamespace +rawUploadId").lean();
+    const doc = await Document.findOne({ _id: req.params.id, userId: req.user._id }).select("_id").lean();
     if (!doc) return res.status(404).json({ message: "Document not found" });
-    if (vectorStore.isConfigured()) {
-      const remote = await vectorStore.deleteDocumentChunks({ userId: req.user._id, documentId: doc._id, chunkCount: doc.chunks?.length || 0 });
-      if (!remote.deleted) return res.status(503).json({ message: "Document deletion is temporarily unavailable because remote vector data could not be deleted." });
-    }
-    const rawDeletion = await documentQueueService.deleteUpload(doc.rawUploadId);
-    if (!rawDeletion.deleted) return res.status(503).json({ message: "Document deletion is temporarily unavailable because the original upload could not be deleted." });
-    const [deleted] = await Promise.all([
-      Document.deleteOne({ _id: req.params.id, userId: req.user._id }),
-      Conversation.updateMany({ userId: req.user._id, documentIds: doc._id }, { $pull: { documentIds: doc._id } }),
-    ]);
-    if (deleted.deletedCount) await storageUsageService.release(req.user._id, Number(doc.size || 0));
-    res.json({ ok: true });
+    await documentDeletionService.requestDeletion(doc._id, req.user._id, "user");
+    res.status(202).json({ ok: true, deletionPending: true });
   },
 
   async retry(req, res) {

@@ -53,6 +53,8 @@ export function assertProductionEnvironment() {
     "PRIVACY_LAWFUL_BASIS",
     "PRIVACY_TRANSFER_SAFEGUARDS",
     "PRIVACY_SUPERVISORY_AUTHORITY",
+    "GLOBAL_DAILY_PROVIDER_CALL_LIMIT",
+    "GLOBAL_DAILY_LLM_CALL_LIMIT",
   ];
   const unsafe = required.filter((key) => isPlaceholderSecret(process.env[key]));
 
@@ -74,6 +76,16 @@ export function assertProductionEnvironment() {
 
   if (process.env.MONGODB_TRANSACTIONS !== "true") {
     throw new Error("MONGODB_TRANSACTIONS=true is required in production. Use a MongoDB replica set or managed cluster.");
+  }
+
+  if (process.env.WORKERS_REQUIRED !== "true") {
+    throw new Error("WORKERS_REQUIRED=true is required in production so readiness detects stalled background processing.");
+  }
+
+  for (const key of ["GLOBAL_DAILY_PROVIDER_CALL_LIMIT", "GLOBAL_DAILY_LLM_CALL_LIMIT"]) {
+    if (!Number.isFinite(Number(process.env[key])) || Number(process.env[key]) <= 0) {
+      throw new Error(`${key} must be a positive production spending limit.`);
+    }
   }
 
   try {

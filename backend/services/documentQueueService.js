@@ -1,5 +1,10 @@
 import fs from "fs";
+import fsPromises from "fs/promises";
 import crypto from "crypto";
+import os from "os";
+import path from "path";
+import { spawn } from "child_process";
+import { fileURLToPath } from "url";
 import mongoose from "mongoose";
 import { Document } from "../models/Document.js";
 import { User } from "../models/User.js";
@@ -27,14 +32,66 @@ function storeUpload(file, metadata = {}) {
   });
 }
 
-function readUpload(uploadId) {
+function downloadUpload(uploadId, destination) {
   return new Promise((resolve, reject) => {
-    const chunks = [];
     const stream = bucket().openDownloadStream(uploadId);
-    stream.on("data", (chunk) => chunks.push(chunk));
+    const output = fs.createWriteStream(destination, { flags: "wx", mode: 0o600 });
     stream.on("error", reject);
-    stream.on("end", () => resolve(Buffer.concat(chunks)));
+    output.on("error", reject);
+    output.on("finish", resolve);
+    stream.pipe(output);
   });
+}
+
+async function extractInChild(uploadId, mimeType, originalName) {
+  const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), "atlas-document-"));
+  const filePath = path.join(directory, "upload");
+  const scriptPath = fileURLToPath(new URL("../scripts/extract-document-child.js", import.meta.url));
+  const timeoutMs = Math.max(1000, Number(process.env.DOCUMENT_EXTRACTION_TIMEOUT_MS || 60000));
+  const memoryMb = Math.max(64, Number(process.env.DOCUMENT_EXTRACTION_MEMORY_MB || 256));
+  const maxOutputBytes = Math.max(4096, Number(process.env.MAX_DOCUMENT_TEXT_CHARS || 250000) * 4);
+  try {
+    await downloadUpload(uploadId, filePath);
+    return await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [`--max-old-space-size=${memoryMb}`, scriptPath, filePath, mimeType || "", originalName || "document"], {
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const output = [];
+      const errors = [];
+      let outputBytes = 0;
+      let settled = false;
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        fn(value);
+      };
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish(reject, new Error(`Document extraction exceeded ${timeoutMs}ms`));
+      }, timeoutMs);
+      child.stdout.on("data", (chunk) => {
+        outputBytes += chunk.length;
+        if (outputBytes > maxOutputBytes) {
+          child.kill("SIGKILL");
+          finish(reject, new Error("Document extraction output exceeded the configured limit"));
+          return;
+        }
+        output.push(chunk);
+      });
+      child.stderr.on("data", (chunk) => {
+        if (Buffer.concat(errors).length < 4096) errors.push(chunk);
+      });
+      child.once("error", (error) => finish(reject, error));
+      child.once("exit", (code) => {
+        if (code === 0) finish(resolve, Buffer.concat(output).toString("utf8"));
+        else finish(reject, new Error(Buffer.concat(errors).toString("utf8").trim().slice(0, 500) || `Document extractor exited with code ${code}`));
+      });
+    });
+  } finally {
+    await fsPromises.rm(directory, { recursive: true, force: true });
+  }
 }
 
 async function deleteUpload(uploadId) {
@@ -47,6 +104,15 @@ async function deleteUpload(uploadId) {
     logger.warn("GridFS upload deletion failed", { reason: error.message });
     return { deleted: false, reason: error.message };
   }
+}
+
+async function deleteUserUploads(userId) {
+  const uploads = await bucket().find({ "metadata.userId": String(userId) }).project({ _id: 1 }).toArray();
+  for (const upload of uploads) {
+    const result = await deleteUpload(upload._id);
+    if (!result.deleted) return result;
+  }
+  return { deleted: true, count: uploads.length };
 }
 
 async function claimDocument(documentId = null) {
@@ -102,8 +168,7 @@ async function processDocument(documentId = null) {
   const heartbeat = startLeaseHeartbeat(document._id, leaseOwner);
 
   try {
-    const buffer = await readUpload(document.rawUploadId);
-    const text = await documentService.extractText({ buffer, mimetype: document.mimeType, originalname: document.originalName });
+    const text = await extractInChild(document.rawUploadId, document.mimeType, document.originalName);
     if (!text || text.trim().length < 20) throw new Error("Not enough readable text could be extracted");
     const boundedText = text.slice(0, Number(process.env.MAX_DOCUMENT_TEXT_CHARS || 250000));
     document.text = boundedText;
@@ -218,4 +283,4 @@ async function startWorker() {
   }
 }
 
-export const documentQueueService = { storeUpload, deleteUpload, enqueue, retry, processDocument, startWorker, _test: { claimDocument, assertDocumentOwnership } };
+export const documentQueueService = { storeUpload, deleteUpload, deleteUserUploads, enqueue, retry, processDocument, startWorker, _test: { claimDocument, assertDocumentOwnership, extractInChild } };

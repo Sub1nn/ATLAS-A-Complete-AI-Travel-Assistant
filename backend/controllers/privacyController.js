@@ -7,7 +7,9 @@ import { Session } from "../models/Session.js";
 import { User } from "../models/User.js";
 import { sessionService } from "../services/sessionService.js";
 import { accountDeletionService } from "../services/accountDeletionService.js";
+import { emailService } from "../services/emailService.js";
 import { accountDeleteSchema, retentionSettingsSchema, validate } from "../utils/validation.js";
+import { createRandomToken, hashToken } from "../utils/security.js";
 
 async function writeChunk(res, chunk) {
   if (res.destroyed) return false;
@@ -76,6 +78,7 @@ export const privacyController = {
       return res.status(401).json({ message: "Password confirmation failed" });
     }
 
+    const trackingToken = createRandomToken(32);
     const queueDeletion = async (session = null) => {
       const options = session ? { session } : undefined;
       await User.updateOne(
@@ -85,7 +88,7 @@ export const privacyController = {
       );
       await Document.updateMany({ userId: user._id }, { $set: { deletionPending: true } }, options);
       await Session.deleteMany({ userId: user._id }, options);
-      await accountDeletionService.enqueue(user._id, session);
+      await accountDeletionService.enqueue(user._id, { trackingTokenHash: hashToken(trackingToken), notificationEmail: user.email }, session);
     };
 
     if (process.env.MONGODB_TRANSACTIONS === "true") {
@@ -98,7 +101,18 @@ export const privacyController = {
     } else {
       await queueDeletion();
     }
+    await emailService.sendAccountDeletionRequested(user.email, trackingToken);
     sessionService.clearCookie(res);
-    res.status(202).json({ ok: true, deletionPending: true, message: "Account deletion was accepted and is being completed safely." });
+    res.setHeader("Cache-Control", "no-store");
+    res.status(202).json({ ok: true, deletionPending: true, trackingToken, message: "Account deletion was accepted and is being completed safely." });
+  },
+
+  async deletionStatus(req, res) {
+    const token = String(req.get("X-Deletion-Token") || req.query.token || "");
+    if (!/^[a-f0-9]{64}$/i.test(token)) return res.status(400).json({ message: "A valid deletion tracking token is required" });
+    const status = await accountDeletionService.statusByTokenHash(hashToken(token));
+    if (!status) return res.status(404).json({ message: "Deletion status was not found or has expired" });
+    res.setHeader("Cache-Control", "no-store");
+    res.json(status);
   },
 };

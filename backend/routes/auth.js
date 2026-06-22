@@ -23,4 +23,5 @@ router.post("/accept-policies", requireAuth, asyncHandler(authController.acceptP
 router.get("/data-export", requireAuth, asyncHandler(privacyController.exportData));
 router.patch("/privacy-settings", requireAuth, asyncHandler(privacyController.updateRetention));
 router.delete("/account", requireAuth, asyncHandler(privacyController.deleteAccount));
+router.get("/account-deletion-status", asyncHandler(privacyController.deletionStatus));
 export default router;

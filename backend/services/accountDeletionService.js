@@ -9,19 +9,23 @@ import { Message } from "../models/Message.js";
 import { Session } from "../models/Session.js";
 import { User } from "../models/User.js";
 import { StorageUsage } from "../models/StorageUsage.js";
+import { OperationLease } from "../models/OperationLease.js";
+import { DocumentDeletion } from "../models/DocumentDeletion.js";
 import { documentQueueService } from "./documentQueueService.js";
 import { vectorStore } from "./vectorStore.js";
 import { logger } from "../utils/logger.js";
+import { emailService } from "./emailService.js";
+import { reportOperationalError } from "./errorReporter.js";
 
 const leaseMs = () => Math.max(60000, Number(process.env.ACCOUNT_DELETION_LEASE_MS || 10 * 60 * 1000));
 const maxAttempts = () => Math.max(1, Number(process.env.ACCOUNT_DELETION_MAX_ATTEMPTS || 20));
 
-async function enqueue(userId, mongoSession = null) {
+async function enqueue(userId, { trackingTokenHash, notificationEmail } = {}, mongoSession = null) {
   try {
     return await AccountDeletion.findOneAndUpdate(
       { userId },
       {
-        $set: { status: "queued", nextAttemptAt: new Date(), lastError: "" },
+        $set: { status: "queued", nextAttemptAt: new Date(), lastError: "", trackingTokenHash, notificationEmail },
         $unset: { leaseUntil: "", leaseOwner: "" },
         $setOnInsert: { attempts: 0 },
       },
@@ -49,7 +53,7 @@ async function claim() {
       $inc: { attempts: 1 },
     },
     { new: true, sort: { nextAttemptAt: 1, createdAt: 1 } },
-  ).select("+leaseOwner");
+  ).select("+leaseOwner +notificationEmail");
 }
 
 function startHeartbeat(job) {
@@ -63,8 +67,17 @@ function startHeartbeat(job) {
   return timer;
 }
 
-async function deleteLocalRecords(job, session = null) {
+async function completeLocalRecords(job, session = null) {
   const options = session ? { session } : undefined;
+  const completed = await AccountDeletion.updateOne(
+    { _id: job._id, leaseOwner: job.leaseOwner, status: "processing" },
+    {
+      $set: { status: "completed", completedAt: new Date(), expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), lastError: "" },
+      $unset: { userId: "", notificationEmail: "", leaseOwner: "", leaseUntil: "", nextAttemptAt: "" },
+    },
+    options,
+  );
+  if (!completed.matchedCount) throw Object.assign(new Error("Account deletion lease ownership was lost before completion"), { code: "ACCOUNT_DELETION_LEASE_LOST" });
   await Message.deleteMany({ userId: job.userId }, options);
   await Conversation.deleteMany({ userId: job.userId }, options);
   await Document.deleteMany({ userId: job.userId }, options);
@@ -72,8 +85,9 @@ async function deleteLocalRecords(job, session = null) {
   await ChatRequest.deleteMany({ userId: job.userId }, options);
   await DailyUsage.deleteMany({ userId: job.userId }, options);
   await StorageUsage.deleteMany({ userId: job.userId }, options);
+  await OperationLease.deleteMany({ userId: job.userId }, options);
+  await DocumentDeletion.deleteMany({ userId: job.userId }, options);
   await User.deleteOne({ _id: job.userId }, options);
-  await AccountDeletion.deleteOne({ _id: job._id, leaseOwner: job.leaseOwner }, options);
 }
 
 async function processNext() {
@@ -83,16 +97,16 @@ async function processNext() {
   try {
     await Document.updateMany({ userId: job.userId }, { $set: { deletionPending: true } });
     const now = new Date();
-    const [activeDocuments, activeConversations, userActivity] = await Promise.all([
+    const [activeDocuments, activeConversations, activeOperations] = await Promise.all([
       Document.countDocuments({
         userId: job.userId,
         processingStatus: "processing",
         leaseUntil: { $gt: now },
       }),
       Conversation.countDocuments({ userId: job.userId, processingLeaseUntil: { $gt: now } }),
-      User.findById(job.userId).select("+activeChatOperations +activeUploadOperations").lean(),
+      OperationLease.countDocuments({ userId: job.userId, expiresAt: { $gt: now } }),
     ]);
-    if (activeDocuments || activeConversations || userActivity?.activeChatOperations || userActivity?.activeUploadOperations) {
+    if (activeDocuments || activeConversations || activeOperations) {
       await AccountDeletion.updateOne(
         { _id: job._id, leaseOwner: job.leaseOwner },
         {
@@ -120,17 +134,21 @@ async function processNext() {
       const raw = await documentQueueService.deleteUpload(document.rawUploadId);
       if (!raw.deleted) throw new Error(`Original upload deletion failed for document ${document._id}`);
     }
+    const orphanedUploads = await documentQueueService.deleteUserUploads(job.userId);
+    if (!orphanedUploads.deleted) throw new Error("One or more original uploads could not be deleted");
 
     if (process.env.MONGODB_TRANSACTIONS === "true") {
       const session = await mongoose.startSession();
       try {
-        await session.withTransaction(() => deleteLocalRecords(job, session));
+        await session.withTransaction(() => completeLocalRecords(job, session));
       } finally {
         await session.endSession();
       }
     } else {
-      await deleteLocalRecords(job);
+      await completeLocalRecords(job);
     }
+    const email = job.notificationEmail;
+    if (email) await emailService.sendAccountDeletionUpdate(email, true);
     logger.info("Account deletion completed", { userId: job.userId.toString() });
     return { deleted: true, userId: job.userId.toString() };
   } catch (error) {
@@ -140,18 +158,54 @@ async function processNext() {
       { _id: job._id, leaseOwner: job.leaseOwner },
       {
         $set: {
-          status: exhausted ? "failed" : "queued",
+          status: exhausted ? "dead_letter" : "queued",
           nextAttemptAt: exhausted ? null : new Date(Date.now() + delay),
           lastError: String(error.message || "Account deletion failed").slice(0, 500),
         },
         $unset: { leaseUntil: "", leaseOwner: "" },
       },
     );
+    if (exhausted) {
+      reportOperationalError(`Account deletion dead-lettered: ${error.message}`, { service: "account-deletion-worker", severity: "critical" });
+      if (job.notificationEmail) await emailService.sendAccountDeletionUpdate(job.notificationEmail, false);
+    }
     logger.warn("Account deletion attempt failed", { userId: job.userId.toString(), reason: error.message, exhausted });
     return { deleted: false, retryScheduled: !exhausted, reason: error.message };
   } finally {
     clearInterval(heartbeat);
   }
+}
+
+async function statusByTokenHash(trackingTokenHash) {
+  const job = await AccountDeletion.findOne({ trackingTokenHash }).select("status attempts lastError completedAt createdAt updatedAt").lean();
+  if (!job) return null;
+  return {
+    status: job.status,
+    attempts: job.attempts,
+    message: job.status === "completed"
+      ? "Account deletion completed."
+      : job.status === "dead_letter"
+        ? "Automatic deletion could not complete and has been flagged for administrative retry."
+        : "Account deletion is in progress.",
+    completedAt: job.completedAt || null,
+    updatedAt: job.updatedAt,
+  };
+}
+
+async function retryDeadLetter(id) {
+  return AccountDeletion.findOneAndUpdate(
+    { _id: id, status: "dead_letter", userId: { $exists: true } },
+    { $set: { status: "queued", attempts: 0, nextAttemptAt: new Date(), lastError: "" } },
+    { new: true },
+  );
+}
+
+async function listDeadLetters(limit = 100) {
+  return AccountDeletion.find({ status: "dead_letter" })
+    .select("_id userId attempts lastError createdAt updatedAt")
+    .sort({ updatedAt: -1 })
+    .limit(Math.max(1, Math.min(Number(limit || 100), 500)))
+    .lean();
 }
 
 async function startWorker() {
@@ -163,4 +217,4 @@ async function startWorker() {
   }
 }
 
-export const accountDeletionService = { enqueue, processNext, startWorker, _test: { claim } };
+export const accountDeletionService = { enqueue, processNext, startWorker, statusByTokenHash, retryDeadLetter, listDeadLetters, _test: { claim } };

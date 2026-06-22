@@ -13,6 +13,10 @@ import { databaseReady } from "./db/mongoose.js";
 import { cacheStatus } from "./services/cacheService.js";
 import { logger } from "./utils/logger.js";
 import { metricsService } from "./services/metricsService.js";
+import { accountDeletionService } from "./services/accountDeletionService.js";
+import { documentDeletionService } from "./services/documentDeletionService.js";
+import { workerHealthService } from "./services/workerHealthService.js";
+import { asyncHandler } from "./utils/asyncHandler.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -119,9 +123,12 @@ app.get("/api/legal", (req, res) => {
 });
 
 // Health check endpoint
-function healthPayload() {
+async function healthPayload() {
   const cache = cacheStatus();
-  const ready = databaseReady() && (process.env.REDIS_REQUIRED !== "true" || cache.redisConnected);
+  const workers = process.env.WORKERS_REQUIRED === "true" && databaseReady()
+    ? await workerHealthService.snapshot().catch(() => ({ healthy: false, missing: ["worker-status-unavailable"] }))
+    : null;
+  const ready = databaseReady() && (process.env.REDIS_REQUIRED !== "true" || cache.redisConnected) && (!workers || workers.healthy);
   return {
     status: ready ? "healthy" : "degraded",
     timestamp: new Date().toISOString(),
@@ -130,6 +137,7 @@ function healthPayload() {
     uptime: process.uptime(),
     database: databaseReady() ? "connected" : "unavailable",
     cache,
+    ...(workers ? { workers } : {}),
   };
 }
 
@@ -137,15 +145,41 @@ app.get("/health/live", (req, res) => {
   res.json({ status: "alive", timestamp: new Date().toISOString(), uptime: process.uptime() });
 });
 
-app.get(["/health", "/health/ready"], (req, res) => {
-  const payload = healthPayload();
+app.get(["/health", "/health/ready"], asyncHandler(async (req, res) => {
+  const payload = await healthPayload();
   res.status(payload.status === "healthy" ? 200 : 503).json(payload);
-});
+}));
 
-app.get("/internal/metrics", async (req, res) => {
+app.get("/internal/metrics", asyncHandler(async (req, res) => {
   if (!metricsService.authorize(req)) return res.status(404).json({ message: "Not found" });
-  return res.json(await metricsService.snapshot());
-});
+  const [metrics, workers] = await Promise.all([metricsService.snapshot(), workerHealthService.snapshot()]);
+  return res.json({ ...metrics, workers });
+}));
+
+app.post("/internal/account-deletions/:id/retry", asyncHandler(async (req, res) => {
+  if (!metricsService.authorize(req)) return res.status(404).json({ message: "Not found" });
+  if (!/^[a-fA-F0-9]{24}$/.test(req.params.id)) return res.status(400).json({ message: "Invalid deletion job ID" });
+  const job = await accountDeletionService.retryDeadLetter(req.params.id);
+  if (!job) return res.status(404).json({ message: "Dead-letter deletion job not found" });
+  return res.status(202).json({ ok: true, status: job.status });
+}));
+
+app.post("/internal/document-deletions/:id/retry", asyncHandler(async (req, res) => {
+  if (!metricsService.authorize(req)) return res.status(404).json({ message: "Not found" });
+  if (!/^[a-fA-F0-9]{24}$/.test(req.params.id)) return res.status(400).json({ message: "Invalid deletion job ID" });
+  const job = await documentDeletionService.retryDeadLetter(req.params.id);
+  if (!job) return res.status(404).json({ message: "Dead-letter deletion job not found" });
+  return res.status(202).json({ ok: true, status: job.status });
+}));
+
+app.get("/internal/deletion-dead-letters", asyncHandler(async (req, res) => {
+  if (!metricsService.authorize(req)) return res.status(404).json({ message: "Not found" });
+  const [accounts, documents] = await Promise.all([
+    accountDeletionService.listDeadLetters(),
+    documentDeletionService.listDeadLetters(),
+  ]);
+  return res.json({ accounts, documents });
+}));
 
 // 404 handler
 app.use("*", (req, res) => {

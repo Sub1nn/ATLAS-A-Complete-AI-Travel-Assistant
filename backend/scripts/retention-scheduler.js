@@ -1,4 +1,16 @@
 import { spawn } from "child_process";
+import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
+import { connectDatabase } from "../db/mongoose.js";
+import { workerHealthService } from "../services/workerHealthService.js";
+import { assertProductionEnvironment } from "../utils/security.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, "../.env") });
+assertProductionEnvironment();
+if (!(await connectDatabase())) throw new Error("MongoDB connection is unavailable");
+await workerHealthService.start("retention");
 
 const intervalMs = Math.max(60 * 60 * 1000, Number(process.env.RETENTION_INTERVAL_MS || 24 * 60 * 60 * 1000));
 

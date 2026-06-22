@@ -13,7 +13,7 @@ import { logger } from "../utils/logger.js";
 import { travelPlannerService } from "../services/travelPlannerService.js";
 import { ChatRequest } from "../models/ChatRequest.js";
 import { usageService } from "../services/usageService.js";
-import { User } from "../models/User.js";
+import { operationLeaseService } from "../services/operationLeaseService.js";
 
 const MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
@@ -100,6 +100,27 @@ function startChatRequestHeartbeat(requestId, processingOwner) {
 
 async function persistConversationTurn(conversation, messages, chatRequestId, processingOwner, responsePayload) {
   await conversation.validate();
+  const persistFencedConversation = async (session = null) => {
+    const updated = await Conversation.updateOne(
+      { _id: conversation._id, userId: conversation.userId, processingOwner },
+      {
+        $set: {
+          title: conversation.title,
+          memory: conversation.memory,
+          summary: conversation.summary || "",
+          lastMessagePreview: conversation.lastMessagePreview,
+          messageCount: conversation.messageCount,
+          documentIds: conversation.documentIds,
+        },
+      },
+      session ? { session } : undefined,
+    );
+    if (!updated.matchedCount) {
+      const error = new Error("Conversation lease ownership was lost before persistence");
+      error.status = 409;
+      throw error;
+    }
+  };
   if (process.env.MONGODB_TRANSACTIONS === "true") {
     const session = await mongoose.startSession();
     try {
@@ -111,7 +132,7 @@ async function persistConversationTurn(conversation, messages, chatRequestId, pr
         );
         if (!completed.matchedCount) throw new Error("Chat request ownership was lost before completion");
         await Message.create(messages, { session, ordered: true });
-        await conversation.save({ session });
+        await persistFencedConversation(session);
       });
       return;
     } finally {
@@ -121,7 +142,7 @@ async function persistConversationTurn(conversation, messages, chatRequestId, pr
 
   const createdMessages = await Message.create(messages);
   try {
-    await conversation.save();
+    await persistFencedConversation();
     await completeChatRequest(chatRequestId, processingOwner, responsePayload);
   } catch (error) {
     await Message.deleteMany({ _id: { $in: createdMessages.map((item) => item._id) } }).catch(() => {});
@@ -1196,7 +1217,8 @@ export const chatController = {
     const requestController = new AbortController();
     let conversationHeartbeat = null;
     let chatRequestHeartbeat = null;
-    let activeChatOperation = false;
+    let operationLease = null;
+    let operationHeartbeat = null;
     req.once("aborted", () => requestController.abort());
     res.once("close", () => {
       if (!res.writableEnded) requestController.abort();
@@ -1206,12 +1228,8 @@ export const chatController = {
       const parsed = validate(chatRequestSchema, req.body || {});
       if (parsed.error) return res.status(400).json({ message: parsed.error });
 
-      const operation = await User.updateOne(
-        { _id: req.user._id, deletionPending: { $ne: true } },
-        { $inc: { activeChatOperations: 1 } },
-      );
-      if (!operation.matchedCount) return res.status(423).json({ message: "Account deletion is in progress", code: "ACCOUNT_DELETION_PENDING" });
-      activeChatOperation = true;
+      operationLease = await operationLeaseService.acquire(req.user._id, "chat");
+      operationHeartbeat = operationLeaseService.heartbeat(operationLease);
 
       const { clientRequestId, message, conversationId, documentIds: incomingDocumentIds } = parsed.data;
       req.body.conversationId = conversationId;
@@ -1415,28 +1433,60 @@ export const chatController = {
       if (chatRequestHeartbeat) clearInterval(chatRequestHeartbeat);
       if (conversationHeartbeat) clearInterval(conversationHeartbeat);
       await releaseConversation(req.atlasConversationId, req.atlasChatRequestOwner);
-      if (activeChatOperation) {
-        await User.updateOne(
-          { _id: req.user?._id },
-          [{ $set: { activeChatOperations: { $max: [0, { $subtract: ["$activeChatOperations", 1] }] } } }],
-        ).catch(() => {});
-      }
+      await operationLeaseService.release(operationLease, operationHeartbeat);
     }
   },
 
   async resetContext(req, res) {
-    const conversation = await Conversation.findOne({ _id: req.body?.conversationId, userId: req.user._id });
-    if (conversation) {
-      await Message.deleteMany({ conversationId: conversation._id, userId: req.user._id });
-      conversation.messages = [];
-      conversation.memory = { locations: [], interests: [], travelDates: [] };
-      conversation.summary = "";
-      conversation.lastMessagePreview = "";
-      conversation.messageCount = 0;
-      conversation.documentIds = [];
-      await conversation.save();
+    if (!mongoose.isValidObjectId(req.body?.conversationId)) return res.status(400).json({ message: "A valid conversation ID is required" });
+    const processingOwner = crypto.randomUUID();
+    const operationLease = await operationLeaseService.acquire(req.user._id, "chat");
+    const operationHeartbeat = operationLeaseService.heartbeat(operationLease);
+    let conversationId = null;
+    try {
+      const conversation = await Conversation.findOneAndUpdate(
+        {
+          _id: req.body?.conversationId,
+          userId: req.user._id,
+          $or: [
+            { processingOwner: { $exists: false } },
+            { processingOwner: null },
+            { processingLeaseUntil: { $lte: new Date() } },
+          ],
+        },
+        { $set: { processingOwner, processingLeaseUntil: new Date(Date.now() + CONVERSATION_LEASE_MS) } },
+        { new: true },
+      );
+      if (!conversation) {
+        if (await Conversation.exists({ _id: req.body?.conversationId, userId: req.user._id })) return res.status(409).json({ message: "This conversation is currently being updated. Retry shortly." });
+        return res.json({ ok: true });
+      }
+      conversationId = conversation._id;
+      const reset = async (session = null) => {
+        const options = session ? { session } : undefined;
+        await Message.deleteMany({ conversationId, userId: req.user._id }, options);
+        const updated = await Conversation.updateOne(
+          { _id: conversationId, userId: req.user._id, processingOwner },
+          { $set: { memory: { locations: [], interests: [], travelDates: [] }, summary: "", lastMessagePreview: "", messageCount: 0, documentIds: [] } },
+          options,
+        );
+        if (!updated.matchedCount) throw Object.assign(new Error("Conversation lease ownership was lost before reset"), { status: 409 });
+      };
+      if (process.env.MONGODB_TRANSACTIONS === "true") {
+        const session = await mongoose.startSession();
+        try {
+          await session.withTransaction(() => reset(session));
+        } finally {
+          await session.endSession();
+        }
+      } else {
+        await reset();
+      }
+      return res.json({ ok: true });
+    } finally {
+      await releaseConversation(conversationId, processingOwner);
+      await operationLeaseService.release(operationLease, operationHeartbeat);
     }
-    res.json({ ok: true });
   },
 
   async getContext(req, res) {
@@ -1447,4 +1497,6 @@ export const chatController = {
   async getQualityAnalytics(req, res) {
     res.json({ message: "Quality analytics are handled through persisted conversations in this version." });
   },
+
+  _test: { persistConversationTurn },
 };
