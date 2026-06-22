@@ -83,6 +83,8 @@ npm run pinecone:setup
 - Dockerized frontend
 - Dockerized backend
 - MongoDB container using Docker Compose
+- Separate document, privacy-deletion and retention workers
+- Worker heartbeat and queue-health reporting
 - Nginx-based frontend production server
 - Backend health check endpoint
 - Environment-based configuration
@@ -289,7 +291,7 @@ Express Backend API
 | GET    | `/api/documents`        | List uploaded documents       |
 | POST   | `/api/documents/upload` | Upload PDF, DOCX, or TXT file |
 | POST   | `/api/documents/:id/retry` | Retry failed document processing |
-| DELETE | `/api/documents/:id`    | Delete uploaded document      |
+| DELETE | `/api/documents/:id`    | Queue durable document deletion |
 
 ### Health Check
 
@@ -298,6 +300,7 @@ Express Backend API
 | GET    | `/health` | Backend health check |
 | GET    | `/health/ready` | Dependency readiness check |
 | GET    | `/health/live` | Process liveness check |
+| GET    | `/api/auth/account-deletion-status` | Check deletion status using the tracking token |
 
 ---
 
@@ -487,7 +490,11 @@ http://localhost:5173
 The project includes a full Docker Compose setup with:
 
 - MongoDB
+- One-shot database index migration
 - Backend API
+- Document processing worker
+- Privacy and deletion worker
+- Retention worker
 - Frontend served through Nginx
 
 ### Start the full application
@@ -635,9 +642,16 @@ Before deploying this application publicly, review the following:
 - Configure automated MongoDB backups and restore testing
 - Configure the operator, privacy contact, jurisdiction, lawful basis, international-transfer safeguards and supervisory authority after legal review
 - Run the document and retention workers continuously
-- Treat the document worker as required for coordinated account deletion as well as document indexing
+- Run the privacy worker independently from document parsing
+- Alert when `/health/ready` reports missing workers, old queues, or deletion dead letters
+- Use the metrics-token-protected `/internal/deletion-dead-letters` endpoint and retry endpoints to recover exhausted account or document deletions
+- Configure global provider/LLM budgets and billing alerts in the provider consoles
 - Use a MongoDB replica set with `MONGODB_TRANSACTIONS=true`
 - Terminate HTTPS at the hosting load balancer or reverse proxy
+
+### Capacity validation
+
+`npm run test:integration` exercises same-conversation contention, fenced writes, expiring operation leases, global provider budgets, and document/account deletion races. `npm run test:load:authenticated` supplies the short authenticated regression load. Run `npm run test:soak` against the production load balancer with deployment-specific `SOAK_TEST_DURATION_MS`, `SOAK_TEST_CONCURRENCY`, and `SOAK_TEST_URL` values. Public-scale claims still require results from the real multi-instance deployment with paid providers enabled, realistic uploads, provider latency/failure injection, shutdown tests, and billing alarms.
 
 ## Optional Product Improvements
 

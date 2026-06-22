@@ -33,6 +33,26 @@ services:
       timeout: 5s
       retries: 10
 
+  db-migrate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: atlas-db-migrate
+    command: ["npm", "run", "db:indexes"]
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      NODE_ENV: production
+      MONGODB_URI: mongodb://mongo:27017/atlas_travel?replicaSet=rs0
+      MONGODB_AUTO_INDEX: "false"
+      MONGODB_TRANSACTIONS: "true"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - atlas-network
+
   backend:
     build:
       context: ./backend
@@ -50,12 +70,16 @@ services:
       MONGODB_TRANSACTIONS: "true"
       REDIS_URL: redis://redis:6379
       REDIS_REQUIRED: "true"
+      WORKERS_REQUIRED: "true"
+      REQUIRED_WORKERS: documents,privacy,retention
+      GLOBAL_DAILY_PROVIDER_CALL_LIMIT: ${GLOBAL_DAILY_PROVIDER_CALL_LIMIT:-10000}
+      GLOBAL_DAILY_LLM_CALL_LIMIT: ${GLOBAL_DAILY_LLM_CALL_LIMIT:-5000}
       TRUST_PROXY: "1"
     ports:
       - "127.0.0.1:4000:4000"
     depends_on:
-      mongo:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     networks:
@@ -81,12 +105,53 @@ services:
       NODE_ENV: production
       MONGODB_URI: mongodb://mongo:27017/atlas_travel?replicaSet=rs0
       MONGODB_AUTO_INDEX: "false"
+      MONGODB_TRANSACTIONS: "true"
+      WORKERS_REQUIRED: "true"
+      GLOBAL_DAILY_PROVIDER_CALL_LIMIT: ${GLOBAL_DAILY_PROVIDER_CALL_LIMIT:-10000}
+      GLOBAL_DAILY_LLM_CALL_LIMIT: ${GLOBAL_DAILY_LLM_CALL_LIMIT:-5000}
     depends_on:
-      mongo:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     mem_limit: 512m
     networks:
       - atlas-network
+    healthcheck:
+      test: ["CMD", "node", "scripts/worker-healthcheck.js", "documents"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  privacy-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: atlas-privacy-worker
+    restart: unless-stopped
+    command: ["npm", "run", "worker:privacy"]
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      NODE_ENV: production
+      MONGODB_URI: mongodb://mongo:27017/atlas_travel?replicaSet=rs0
+      MONGODB_AUTO_INDEX: "false"
+      MONGODB_TRANSACTIONS: "true"
+      WORKERS_REQUIRED: "true"
+      GLOBAL_DAILY_PROVIDER_CALL_LIMIT: ${GLOBAL_DAILY_PROVIDER_CALL_LIMIT:-10000}
+      GLOBAL_DAILY_LLM_CALL_LIMIT: ${GLOBAL_DAILY_LLM_CALL_LIMIT:-5000}
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+    mem_limit: 256m
+    networks:
+      - atlas-network
+    healthcheck:
+      test: ["CMD", "node", "scripts/worker-healthcheck.js", "privacy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   retention-worker:
     build:
@@ -102,12 +167,22 @@ services:
       NODE_ENV: production
       MONGODB_URI: mongodb://mongo:27017/atlas_travel?replicaSet=rs0
       MONGODB_AUTO_INDEX: "false"
+      MONGODB_TRANSACTIONS: "true"
+      WORKERS_REQUIRED: "true"
+      GLOBAL_DAILY_PROVIDER_CALL_LIMIT: ${GLOBAL_DAILY_PROVIDER_CALL_LIMIT:-10000}
+      GLOBAL_DAILY_LLM_CALL_LIMIT: ${GLOBAL_DAILY_LLM_CALL_LIMIT:-5000}
     depends_on:
-      mongo:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     mem_limit: 256m
     networks:
       - atlas-network
+    healthcheck:
+      test: ["CMD", "node", "scripts/worker-healthcheck.js", "retention"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   frontend:
     build:

@@ -43,7 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker compose config -q
-      - run: docker compose build backend document-worker retention-worker frontend
+      - run: docker compose build db-migrate backend document-worker privacy-worker retention-worker frontend
 
   integration:
     runs-on: ubuntu-latest
