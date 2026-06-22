@@ -21,8 +21,8 @@ The application combines a React frontend, Node.js/Express backend, MongoDB pers
 - Chat-based travel planning interface
 - Destination-aware responses
 - Context memory inside each conversation
-- Support for travel planning, local guidance, safety context, weather, accommodation guidance, and practical trip advice
-- Response formatting designed for clean user-facing output
+- Support for travel planning, local guidance, safety context, weather, accommodation guidance, sports/activity discovery, route planning, and practical trip advice
+- Dynamic response formatting that changes according to the user intent instead of using one generic travel template
 
 ### Conversation history
 
@@ -45,12 +45,40 @@ The application combines a React frontend, Node.js/Express backend, MongoDB pers
 ATLAS can use external services for live or contextual travel information:
 
 - Groq LLM API for AI responses
-- Google Maps / Places APIs for location and place information
+- Google Places API (New) and Routes API v2 for location, place and route information
 - OpenWeather API for weather data
 - NewsAPI for current safety or destination context
 - Yelp API support for local recommendations
 
-### Deployment support
+---
+
+## Pinecone semantic document retrieval
+
+ATLAS supports Pinecone-backed semantic retrieval for uploaded PDF, DOCX and TXT files. MongoDB stores the source document record. Pinecone stores vectors plus document identifiers, filenames and bounded document-chunk text; integrated-index mode also stores its searchable text field. See `PINECONE_RAG_SETUP.md` for setup details and `TRAVEL_RESPONSE_FLOW.md` for the orchestration design.
+
+Recommended backend variables:
+
+```env
+PINECONE_ENABLED=true
+PINECONE_API_KEY=your_pinecone_api_key
+PINECONE_INDEX_NAME=atlas-documents
+PINECONE_INDEX_HOST=your_pinecone_index_host_if_using_an_existing_index
+PINECONE_INDEX_MODE=inference
+PINECONE_TEXT_FIELD=text
+PINECONE_EMBEDDING_MODEL=llama-text-embed-v2
+PINECONE_EMBEDDING_DIMENSIONS=1024
+PINECONE_NAMESPACE_PREFIX=atlas-user
+```
+
+Use `PINECONE_INDEX_MODE=inference` for the included automatic setup script. Integrated mode is supported when an integrated-embedding index has already been created in Pinecone with a compatible text field mapping.
+
+Create the Pinecone index once from `backend/`:
+
+```bash
+npm run pinecone:setup
+```
+
+## Deployment support
 
 - Dockerized frontend
 - Dockerized backend
@@ -103,7 +131,6 @@ ATLAS-AI-Travel_Assistant/
 │
 ├── backend/
 │   ├── config/
-│   │   ├── intelligentConfig.js
 │   │   └── rateLimiter.js
 │   │
 │   ├── controllers/
@@ -132,15 +159,14 @@ ATLAS-AI-Travel_Assistant/
 │   ├── services/
 │   │   ├── contextService.js
 │   │   ├── documentService.js
-│   │   ├── responseEngine.js
+│   │   ├── responseVerifier.js
+│   │   ├── vectorStore.js
 │   │   └── toolService.js
 │   │
 │   ├── utils/
 │   │   ├── fallbackResponses.js
 │   │   ├── locationUtils.js
 │   │   ├── networkTest.js
-│   │   ├── profileUtils.js
-│   │   ├── responseMonitor.js
 │   │   ├── systemPrompts.js
 │   │   └── validation.js
 │   │
@@ -154,7 +180,6 @@ ATLAS-AI-Travel_Assistant/
 │   │   ├── components/
 │   │   │   ├── auth/
 │   │   │   ├── chat/
-│   │   │   ├── documents/
 │   │   │   ├── features/
 │   │   │   ├── sidebar/
 │   │   │   └── ui/
@@ -226,45 +251,53 @@ Express Backend API
 
 ### Authentication
 
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | `/api/auth/signup` | Create a new user account |
-| POST | `/api/auth/login` | Log in and receive JWT token |
-| GET | `/api/auth/me` | Get the authenticated user profile |
+| Method | Endpoint           | Description                        |
+| ------ | ------------------ | ---------------------------------- |
+| POST   | `/api/auth/signup` | Create a new user account          |
+| POST   | `/api/auth/login`  | Log in and receive JWT token       |
+| GET    | `/api/auth/me`     | Get the authenticated user profile |
+| POST   | `/api/auth/verify-email` | Verify an email token |
+| POST   | `/api/auth/resend-verification` | Resend a verification email |
+| POST   | `/api/auth/forgot-password` | Request a password reset |
+| POST   | `/api/auth/reset-password` | Reset a password with a token |
+| PATCH  | `/api/auth/preferences` | Update travel preferences |
 
 ### Chat
 
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | `/api/chat` | Send a message to the AI travel assistant |
-| POST | `/api/reset-context` | Reset conversation context |
-| GET | `/api/context/:userId` | Get user context |
-| GET | `/api/quality-analytics` | Get response quality analytics |
-| GET | `/api/network-test` | Test external API connectivity |
+| Method | Endpoint                 | Description                               |
+| ------ | ------------------------ | ----------------------------------------- |
+| POST   | `/api/chat`              | Send a message to the AI travel assistant |
+| POST   | `/api/reset-context`     | Reset conversation context                |
+| GET    | `/api/context/:conversationId` | Get conversation context             |
+| GET    | `/api/quality-analytics` | Get response quality analytics            |
+| GET    | `/api/network-test`      | Test external API connectivity            |
 
 ### Conversations
 
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/conversations` | List user conversations |
-| POST | `/api/conversations` | Create a new conversation |
-| GET | `/api/conversations/:id` | Get one conversation |
-| DELETE | `/api/conversations/:id` | Delete one conversation |
-| DELETE | `/api/conversations` | Delete all conversations |
+| Method | Endpoint                 | Description               |
+| ------ | ------------------------ | ------------------------- |
+| GET    | `/api/conversations`     | List user conversations   |
+| POST   | `/api/conversations`     | Create a new conversation |
+| GET    | `/api/conversations/:id` | Get one conversation      |
+| DELETE | `/api/conversations/:id` | Delete one conversation   |
+| DELETE | `/api/conversations`     | Delete all conversations  |
 
 ### Documents
 
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/documents` | List uploaded documents |
-| POST | `/api/documents/upload` | Upload PDF, DOCX, or TXT file |
-| DELETE | `/api/documents/:id` | Delete uploaded document |
+| Method | Endpoint                | Description                   |
+| ------ | ----------------------- | ----------------------------- |
+| GET    | `/api/documents`        | List uploaded documents       |
+| POST   | `/api/documents/upload` | Upload PDF, DOCX, or TXT file |
+| POST   | `/api/documents/:id/retry` | Retry failed document processing |
+| DELETE | `/api/documents/:id`    | Delete uploaded document      |
 
 ### Health Check
 
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/health` | Backend health check |
+| Method | Endpoint  | Description          |
+| ------ | --------- | -------------------- |
+| GET    | `/health` | Backend health check |
+| GET    | `/health/ready` | Dependency readiness check |
+| GET    | `/health/live` | Process liveness check |
 
 ---
 
@@ -282,7 +315,10 @@ MONGODB_URI=mongodb://localhost:27017/atlas_travel
 
 # Authentication
 JWT_SECRET=change_this_to_a_long_random_secret
-JWT_EXPIRES_IN=7d
+JWT_ACCESS_EXPIRES_IN=15m
+REFRESH_TOKEN_DAYS=30
+PRIVACY_POLICY_VERSION=2026-06-22
+TERMS_VERSION=2026-06-22
 
 # LLM provider
 GROQ_API_KEY=your_groq_api_key
@@ -380,18 +416,20 @@ git clone https://github.com/your-username/ATLAS-AI-Travel_Assistant.git
 cd ATLAS-AI-Travel_Assistant
 ```
 
+Use Node.js 20.19+ or 22.12+. The Docker images use Node.js 22.
+
 ### 2. Install backend dependencies
 
 ```bash
 cd backend
-npm install
+npm ci
 ```
 
 ### 3. Install frontend dependencies
 
 ```bash
 cd ../frontend
-npm install
+npm ci
 ```
 
 ### 4. Start MongoDB locally
@@ -539,16 +577,19 @@ Extract text
 Split text into chunks
   │
   ▼
-Generate keyword metadata
+Generate searchable chunks
   │
   ▼
-Store document and chunks in MongoDB
+Store document metadata and fallback chunks in MongoDB
   │
   ▼
-Retrieve relevant chunks during chat
+Index chunks in the user-specific Pinecone namespace when Pinecone is enabled
+  │
+  ▼
+Retrieve semantically relevant chunks during chat, with MongoDB fallback if Pinecone is unavailable
 ```
 
-Current document retrieval is keyword and chunk based. A future improvement would be to add embedding-based vector search with a vector database such as Pinecone, Weaviate, Qdrant, or MongoDB Atlas Vector Search.
+Current document retrieval uses Pinecone semantic search when configured. MongoDB remains the source of truth for users, conversations, messages and document metadata.
 
 ---
 
@@ -587,93 +628,21 @@ Before deploying this application publicly, review the following:
 - Enable HTTPS
 - Configure production CORS origin
 - Use a managed MongoDB instance
-- Add request and error monitoring
+- Configure `METRICS_TOKEN` and an HTTPS `ERROR_REPORTING_WEBHOOK_URL`
 - Review rate limits for external APIs
+- Configure Resend and verify its sending domain
+- Run `npm run db:indexes` during managed-database deployment
+- Configure automated MongoDB backups and restore testing
+- Configure the operator, privacy contact, jurisdiction, lawful basis, international-transfer safeguards and supervisory authority after legal review
+- Run the document and retention workers continuously
+- Treat the document worker as required for coordinated account deletion as well as document indexing
+- Use a MongoDB replica set with `MONGODB_TRANSACTIONS=true`
+- Terminate HTTPS at the hosting load balancer or reverse proxy
 
-### Recommended
-
-- Add automated tests
-- Add refresh token support
-- Move authentication tokens from localStorage to secure httpOnly cookies
-- Add email verification
-- Add password reset flow
-- Add input validation for all request bodies
-- Add file size limits per user
-- Add document storage cleanup
-- Add vector-based document retrieval
-- Add CI/CD pipeline
-- Add deployment-specific logging
-
----
-
-## Current Limitations
-
-This project is functional as a full-stack portfolio application, but some parts can be improved before production use:
-
-- Document search currently uses keyword matching rather than semantic vector search.
-- JWT tokens are stored in frontend localStorage.
-- There is no refresh-token flow yet.
-- There is no email verification or password reset feature yet.
-- External API results depend on available API keys and provider limits.
-- Test coverage is not yet implemented.
-- Some diagnostic and legacy files may be cleaned or moved into a dedicated scripts folder.
-
----
-
-## Suggested GitHub Repository Checklist
-
-Before pushing the updated version:
-
-```bash
-# Check tracked environment files
-git ls-files | grep ".env"
-
-# Check ignored files
-git status --ignored
-
-# Remove macOS files if present
-find . -name ".DS_Store" -delete
-
-# Reinstall dependencies if needed
-cd backend && rm -rf node_modules && npm install
-cd ../frontend && rm -rf node_modules && npm install
-
-# Run build check
-cd frontend
-npm run build
-```
-
-Recommended files to commit:
-
-```text
-README.md
-DOCKER_DEPLOYMENT.md
-docker-compose.yml
-backend/
-frontend/
-backend/package-lock.json
-frontend/package-lock.json
-.env.example files
-```
-
-Files that should not be committed:
-
-```text
-.env
-backend/.env
-frontend/.env
-node_modules/
-dist/
-.DS_Store
-```
-
----
-
-## Future Improvements
+## Optional Product Improvements
 
 Planned improvements that would make ATLAS stronger:
 
-- Embedding-based document retrieval
 - Itinerary builder with editable day-by-day plans
 - Map-based place visualization
 - User profile preferences
@@ -716,3 +685,16 @@ This project is licensed under the MIT License.
 Subin Khatiwada
 
 Master’s student in robotics and machine learning with interests in full-stack development, AI systems, intelligent automation, and practical machine learning applications.
+
+---
+
+Real `.env` files are excluded from the final ZIP. Start from `.env.example`, `backend/.env.example` and `frontend/.env.example` when configuring local or cloud deployments.
+
+
+## Google Places API (New) and Routes API v2
+
+ATLAS uses Google Places API (New) for venue, restaurant, accommodation and activity discovery. Routes use the Routes API v2 `computeRoutes` endpoint with an explicit response field mask. Enable **Places API (New)** and **Routes API** in Google Cloud and restrict the backend key to those APIs. The diagnostic script treats permission errors as failed connectivity.
+
+## Travel orchestration update
+
+The backend now uses an intent-first travel pipeline. Google Places API (New) is used for live place discovery, OpenWeather for weather, NewsAPI for current safety context, Google Routes API v2 for routes, Pinecone for document RAG, and Groq for structured planning and final language generation. The response composer handles destination planning, sports/activity searches, hotels/stays, dining/nightlife, route planning, weather and safety with distinct layouts.
