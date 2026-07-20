@@ -75,20 +75,22 @@ const headingText = (line) =>
     .trim();
 
 const isNoteHeading = (text) =>
-  /^(data note|price note|availability note|safety note|weather note|booking note|live data note)$/i.test(
+  /^(data note|planning note|price note|availability note|safety note|weather note|booking note|route note|live data note)$/i.test(
     text,
   );
 
 const shouldHideHeading = (text) =>
   /^(next steps|tools used|analysis sources used|\d+ tools? used)$/i.test(text);
 
-const NoteBlock = ({ children }) => (
-  <div className="my-4 flex items-start gap-3 rounded-xl border border-slate-800/80 bg-slate-900/40 px-4 py-3">
-    <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-slate-700 text-[10px] font-semibold text-slate-400">
-      i
-    </div>
+const isCompactSubheading = (text) =>
+  /^(what to do|food|food to try|where to stay|good base areas|local notes|local habits and logistics|experiences worth planning|experiences worth planning around|customs and packing checks|how to choose|map checks|before you go|budget note|price note|typical planning range)(?:\b|$)/i.test(
+    text,
+  );
 
-    <p className="m-0 text-sm leading-6 text-slate-400">{children}</p>
+const NoteBlock = ({ children }) => (
+  <div className="my-4 rounded-2xl border border-sky-400/15 bg-sky-400/[0.04] px-4 py-3">
+
+    <p className="m-0 text-sm leading-6 text-slate-300">{children}</p>
   </div>
 );
 
@@ -108,6 +110,7 @@ export const formatMessage = (content) => {
   let currentList = [];
   let currentListType = null;
   let pendingNote = false;
+  let headingCount = 0;
 
   const flushList = (keyBase) => {
     if (currentList.length === 0) return;
@@ -169,12 +172,37 @@ export const formatMessage = (content) => {
         return;
       }
 
+      const isFirstHeading = headingCount === 0;
+      headingCount += 1;
+      const compactSubheading = !isFirstHeading && isCompactSubheading(text);
+
       blocks.push(
-        <div key={`heading-${index}`} className="mt-7 first:mt-0">
-          <h3 className="text-[15px] font-semibold uppercase tracking-[0.14em] text-sky-300">
-            {text}
-          </h3>
-          <div className="mt-3 h-px w-full bg-gradient-to-r from-sky-400/35 via-slate-700/50 to-transparent" />
+        <div
+          key={`heading-${index}`}
+          className={
+            isFirstHeading
+              ? "mb-4 mt-0"
+              : compactSubheading
+              ? "mt-5 first:mt-0"
+              : "mt-7 first:mt-0"
+          }
+        >
+          {isFirstHeading ? (
+            <h2 className="text-xl font-semibold tracking-tight text-slate-50 sm:text-2xl">
+              {text}
+            </h2>
+          ) : compactSubheading ? (
+            <h4 className="text-sm font-semibold text-slate-100">
+              {text}
+            </h4>
+          ) : (
+            <h3 className="text-[15px] font-semibold tracking-tight text-sky-200 sm:text-base">
+              {text}
+            </h3>
+          )}
+          {!isFirstHeading && !compactSubheading && (
+            <div className="mt-3 h-px w-full bg-gradient-to-r from-sky-400/35 via-slate-700/50 to-transparent" />
+          )}
         </div>,
       );
 
