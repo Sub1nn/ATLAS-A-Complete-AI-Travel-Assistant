@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "async_hooks";
 import { cacheKey, getOrSetCache } from "./cacheService.js";
 import { logger } from "../utils/logger.js";
 import { getLocationData } from "../utils/locationUtils.js";
+import { countryService } from "./countryService.js";
 
 const tools = [
   {
@@ -127,6 +128,7 @@ const tools = [
 const TIMEOUTS = {
   weather: 10000,
   google_places: 9000,
+  google_timezone: 5000,
   directions: 9000,
   yelp: 9000,
   news: 12000,
@@ -152,6 +154,17 @@ async function reserveProviderCall(service) {
     error.status = 429;
     throw error;
   }
+}
+
+function userSafeProviderError(error, fallback = "ATLAS could not complete this live check right now.") {
+  const message = String(error?.message || "");
+  if (error?.code === "PROVIDER_BUDGET_EXCEEDED" || /external-provider call budget|provider-call budget|call budget/i.test(message)) {
+    return "ATLAS has reached today’s live-check limit for this feature. Use the fallback link if available and try again later.";
+  }
+  if (/api key|token|credential|authorization|forbidden|unauthorized/i.test(message)) {
+    return "ATLAS could not complete this live check because the provider connection is not available right now.";
+  }
+  return fallback;
 }
 
 function shouldRecordProviderFailure(error) {
@@ -181,7 +194,11 @@ function recordProviderFailure(service) {
 }
 
 function googlePlacesKey() {
-  return process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || "";
+  return process.env.GOOGLE_MAPS_SERVER_API_KEY || "";
+}
+
+function googleMapsServerKey() {
+  return process.env.GOOGLE_MAPS_SERVER_API_KEY || "";
 }
 
 function openWeatherKey() {
@@ -211,7 +228,10 @@ function titleCase(value = "") {
     .replace(/[_-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .replace(/\b[\p{L}]/gu, (c) => c.toUpperCase());
+    .split(" ")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toLocaleUpperCase() + word.slice(1))
+    .join(" ");
 }
 
 function toNumber(value, name) {
@@ -224,6 +244,7 @@ function ttlForService(service = "default") {
   if (service === "google_geocode") return Number(process.env.CACHE_GEOCODE_TTL_SECONDS || 7 * 24 * 60 * 60);
   if (service === "weather") return Number(process.env.CACHE_WEATHER_TTL_SECONDS || 15 * 60);
   if (service === "google_places") return Number(process.env.CACHE_PLACES_TTL_SECONDS || 5 * 60);
+  if (service === "google_timezone") return Number(process.env.CACHE_TIMEZONE_TTL_SECONDS || 24 * 60 * 60);
   if (service === "directions") return Number(process.env.CACHE_DIRECTIONS_TTL_SECONDS || 60);
   if (service === "yelp") return Number(process.env.CACHE_YELP_TTL_SECONDS || 30 * 60);
   if (service === "news") return Number(process.env.CACHE_NEWS_TTL_SECONDS || 45 * 60);
@@ -453,6 +474,125 @@ function rankPlaces(places = []) {
   });
 }
 
+const LOW_VALUE_ATTRACTION_TYPES = new Set([
+  "bus_station",
+  "transit_station",
+  "train_station",
+  "subway_station",
+  "taxi_stand",
+  "parking",
+  "gas_station",
+  "car_repair",
+  "car_dealer",
+  "car_rental",
+  "car_wash",
+  "electric_vehicle_charging_station",
+  "storage",
+  "airport",
+]);
+
+function isLowValueAttractionPlace(place = {}) {
+  const types = Array.isArray(place.types) ? place.types : [];
+  if (types.some((type) => LOW_VALUE_ATTRACTION_TYPES.has(type))) return true;
+  const text = normalize(`${placeName(place)} ${placeAddress(place)}`);
+  return /\b(airport\s+park|bus\s+(park|station|stop|terminal)|parking|car\s+park|taxi\s+stand|fuel\s+station|gas\s+station)\b/.test(text);
+}
+
+function rankAttractionPlaces(places = []) {
+  return rankPlaces(places.filter((place) => !isLowValueAttractionPlace(place)));
+}
+
+function placeSearchText(place = {}) {
+  return normalize([
+    placeName(place),
+    placeAddress(place),
+    ...(place.types || []),
+  ].filter(Boolean).join(" "));
+}
+
+const SPORTS_ACTIVITY_PATTERNS = {
+  tennis: /\b(tennis|tennisplatz|tennishalle|tennisverein|tenniskentta|tenniskenttä|tennisseura|tennishalli|court de tennis|pista de tenis|campo da tennis|tennisbana|tennisbane|テニス|테니스)\b/,
+  badminton: /\b(badminton|sulkapallo|sulkapallohalli|sulkapallokentta|sulkapallokenttä)\b/,
+  football: /\b(football|soccer|futsal|jalkapallo|pitch|field)\b/,
+  basketball: /\b(basketball|koripallo)\b/,
+  volleyball: /\b(volleyball|lentopallo)\b/,
+  swimming: /\b(swimming|pool|aquatic|uimahalli|uima)\b/,
+  gym: /\b(gym|fitness|liikuntakeskus|kuntosali)\b/,
+  padel: /\b(padel)\b/,
+  pickleball: /\b(pickleball)\b/,
+  squash: /\b(squash)\b/,
+  golf: /\b(golf)\b/,
+  climbing: /\b(climbing|bouldering|kiipeily)\b/,
+  bowling: /\b(bowling|keila)\b/,
+  skating: /\b(skating|skate|rink|luistelu|jäähalli|jaahalli)\b/,
+  running: /\b(running|jogging|track|athletics|urheilukentta|urheilukenttä)\b/,
+  sports: /\b(sport|sports|liikunta|urheilu|athletic|fitness|gym|hall|court|field|pitch|centre|center)\b/,
+};
+
+const SPORTS_VENUE_PATTERN = /\b(court|courts|club|hall|halli|liikuntahalli|urheilutalo|kentta|kenttä|keskus|centre|center|complex|stadium|arena|field|pitch|rink|track|puisto|urheilupuisto|liikuntakeskus|sports)\b/;
+
+function placeHasActivityMatch(place = {}, activityKey = "sports") {
+  const pattern = SPORTS_ACTIVITY_PATTERNS[activityKey] || SPORTS_ACTIVITY_PATTERNS.sports;
+  return pattern.test(placeSearchText(place));
+}
+
+function isPlausibleTennisVenue(place = {}) {
+  const text = placeSearchText(place);
+  const types = new Set((place.types || []).map(normalize));
+  if (placeHasActivityMatch(place, "tennis")) return true;
+  if (/\b(poolbar|pool bar|billiard|biljardi|bowling|keila|pub|bar|cafe|restaurant|karaoke|night club|nightclub)\b/.test(text)) return false;
+  if (types.has("bar") || types.has("restaurant") || types.has("cafe") || types.has("night_club")) return false;
+  if (/\b(arena|areena|stadium|ice hockey|hockey|jaahalli|jäähalli)\b/.test(text)) return false;
+  return /\b(urheilutalo|liikuntakeskus|liikuntahalli|sports hall|sports centre|sports center|sports complex)\b/.test(text)
+    || types.has("sports_complex");
+}
+
+function sportsPlaceScore(place = {}, activityKey = "sports") {
+  const text = placeSearchText(place);
+  const types = new Set((place.types || []).map(normalize));
+  let score = 0;
+
+  const primaryPattern = SPORTS_ACTIVITY_PATTERNS[activityKey] || SPORTS_ACTIVITY_PATTERNS.sports;
+  const venuePattern = SPORTS_VENUE_PATTERN;
+  if (primaryPattern.test(text)) score += 8;
+  if (venuePattern.test(text)) score += 3;
+  if (types.has("sports_complex") || types.has("stadium") || types.has("gym") || types.has("park")) score += 2;
+  if (place.rating) score += Math.min(Number(place.rating || 0), 5) / 2;
+  if (placeReviewCount(place)) score += Math.min(placeReviewCount(place), 300) / 300;
+
+  const unrelatedTypes = [
+    "supermarket",
+    "grocery store",
+    "shopping mall",
+    "department store",
+    "restaurant",
+    "cafe",
+    "bar",
+    "store",
+    "gas station",
+    "lodging",
+  ];
+  const looksRetailOrDining = unrelatedTypes.some((type) => types.has(type) || text.includes(type));
+  if (looksRetailOrDining && !primaryPattern.test(text)) score -= 10;
+  if (activityKey === "tennis" && !isPlausibleTennisVenue(place)) score -= 12;
+  if (activityKey === "tennis" && /\bpadel\b/.test(text) && !/\btennis\b|tennis(kentta|kenttä|halli|seura)/.test(text)) score -= 4;
+  if (activityKey === "tennis" && /\b(gym|fitness|kuntosali)\b/.test(text) && !/\b(tennis|tenniskentta|tenniskenttä|tennishalli|tennisseura|urheilutalo|liikuntakeskus|liikuntahalli|sports hall)\b/.test(text)) score -= 5;
+
+  return score;
+}
+
+function rankSportsPlaces(places = [], interestType = "") {
+  const activityKey = activityKeyFromText(interestType) || "sports";
+  const scored = places.map((place) => ({ place, score: sportsPlaceScore(place, activityKey) }));
+  const exact = scored.filter((item) => item.score >= 5);
+  const usable = activityKey === "tennis"
+    ? exact.filter((item) => isPlausibleTennisVenue(item.place))
+    : exact.length >= 3 ? exact : scored.filter((item) => item.score >= 2);
+  return usable
+    .sort((a, b) => b.score - a.score)
+    .map((item) => item.place);
+}
+
 const GOOGLE_PLACES_NEW_FIELD_MASK = [
   "places.id",
   "places.name",
@@ -602,7 +742,7 @@ function conciseSearchLabel(term = "") {
     [/^local restaurants$/i, "Local restaurants"],
   ];
   for (const [pattern, label] of labels) if (pattern.test(normalized)) return label;
-  return titleCase(normalized).replace(/\bIn\b/g, "in").slice(0, 54);
+  return titleCase(normalized).replace(/\bIn\b/g, "in").replace(/\bNear\b/g, "near").slice(0, 54);
 }
 
 async function runPlaceSearchPlan(plan = [], lat, lon, locationName, maxCalls = 7) {
@@ -1050,7 +1190,7 @@ function noPlacesResult(locationName, category, suggestions = []) {
     search_actions: searchActions,
     data_quality: dataNote(
       "limited",
-      `Live venue search did not return verified ${category} matches for this exact request. Do not present specific venue names as verified live results unless they appear in another reliable source.`,
+      `ATLAS could not verify ${category} matches for this exact request. Do not present specific venue names as verified live results unless they appear in another reliable source.`,
       { fallback_suggestions: suggestions }
     ),
     planning_tips: "Use the live map searches as a next step, then confirm opening hours, accessibility, prices and recent reviews before going.",
@@ -1103,15 +1243,65 @@ function formatForecastItem(item = {}, timezoneSeconds = 0) {
   };
 }
 
+function localTimeFromTimeZone(timeZoneId = "", timestampSeconds = Date.now() / 1000) {
+  if (!timeZoneId) return "";
+  try {
+    return new Intl.DateTimeFormat("en-GB", {
+      timeZone: timeZoneId,
+      weekday: "short",
+      day: "2-digit",
+      month: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(new Date(Number(timestampSeconds) * 1000));
+  } catch {
+    return "";
+  }
+}
+
+async function googleTimeZone({ lat, lon, timestampSeconds = Math.floor(Date.now() / 1000) }) {
+  const key = googleMapsServerKey();
+  if (!key) return null;
+
+  const data = await withRetry(
+    () => httpGet(
+      "https://maps.googleapis.com/maps/api/timezone/json",
+      { location: `${lat},${lon}`, timestamp: timestampSeconds, key },
+      "google_timezone",
+    ),
+    "google_timezone",
+  );
+
+  if (data?.status !== "OK") {
+    const message = data?.errorMessage || data?.status || "unknown Time Zone API response";
+    throw new Error(`Google Time Zone API returned ${message}`);
+  }
+
+  return {
+    time_zone_id: data.timeZoneId || "",
+    time_zone_name: data.timeZoneName || "",
+    raw_offset_seconds: Number(data.rawOffset || 0),
+    dst_offset_seconds: Number(data.dstOffset || 0),
+    local_time: localTimeFromTimeZone(data.timeZoneId, timestampSeconds),
+    source: "google_timezone_api",
+  };
+}
+
 async function weatherTool({ latitude, longitude, location_name, target_date = "", date_label = "" }) {
   const lat = toNumber(latitude, "latitude");
   const lon = toNumber(longitude, "longitude");
   const key = openWeatherKey();
   if (!key) throw new Error("OpenWeather API key is not configured");
+  const timestampSeconds = Math.floor(Date.now() / 1000);
 
-  const [current, forecast] = await Promise.all([
+  const [current, forecast, timezoneResult] = await Promise.all([
     withRetry(() => httpGet("https://api.openweathermap.org/data/2.5/weather", { lat, lon, appid: key, units: "metric" }, "weather"), "weather"),
     withRetry(() => httpGet("https://api.openweathermap.org/data/2.5/forecast", { lat, lon, appid: key, units: "metric" }, "weather"), "weather"),
+    googleTimeZone({ lat, lon, timestampSeconds }).catch((error) => {
+      logger.debug("Google Time Zone lookup skipped", { reason: error.message });
+      return null;
+    }),
   ]);
 
   if (!current?.main || !current?.weather?.length) throw new Error("Weather API returned incomplete current conditions");
@@ -1149,6 +1339,7 @@ async function weatherTool({ latitude, longitude, location_name, target_date = "
       matched_target_date: target_date ? matchedTargetDate : true,
       timezone_offset_seconds: timezoneSeconds,
     },
+    local_time: timezoneResult,
     hourly_forecast: scopedForecast.slice(0, target_date ? 10 : 8).map((item) => formatForecastItem(item, timezoneSeconds)),
     travel_recommendations: {
       best_approach: getWeatherAdvice(temp, condition),
@@ -1158,9 +1349,9 @@ async function weatherTool({ latitude, longitude, location_name, target_date = "
     data_quality: dataNote(
       target_date && !matchedTargetDate ? "limited" : "verified",
       target_date && !matchedTargetDate
-        ? "OpenWeather returned current conditions, but the 5-day forecast did not include the requested target date. Ask the user to check again closer to the activity."
-        : "Current weather and forecast data were returned by OpenWeather for the resolved coordinates. Wind values are converted from m/s to km/h.",
-      { source: "openweather", updated_at: new Date().toISOString() }
+        ? "ATLAS found current conditions, but the available 5-day forecast did not include the requested target date. Ask the user to check again closer to the activity."
+        : "ATLAS verified current weather and forecast data for the resolved coordinates. Wind values are converted from m/s to km/h.",
+      { source: timezoneResult ? "openweather_and_google_timezone_api" : "openweather", updated_at: new Date().toISOString() }
     ),
   };
 }
@@ -1182,6 +1373,17 @@ async function restaurantTool({ lat, lon, location_name, cuisine_preference = "l
 
   let restaurants = raw;
   const budget = normalize(budget_level);
+  const cuisineText = normalize(cuisine_preference);
+  if (!/cafe|coffee|nightlife|bar|pub|club/.test(cuisineText)) {
+    restaurants = restaurants.filter((place) => {
+      const types = new Set((place.types || []).map(normalize));
+      const text = placeSearchText(place);
+      const name = normalize(placeName(place));
+      if (/\b(cafe|coffee|bar|pub)\b/.test(name) && !/\brestaurant|lokanta|kebap|kebab|ocakbasi|ocakbaşı|meyhane\b/.test(name)) return false;
+      const isCafeOrBarOnly = (types.has("cafe") || types.has("bar") || types.has("night club") || /\b(cafe|coffee|bar|pub)\b/.test(text)) && !types.has("restaurant") && !/\brestaurant|lokanta|kebap|kebab|ocakbasi|ocakbaşı|meyhane\b/.test(text);
+      return !isCafeOrBarOnly;
+    });
+  }
   if (/budget|cheap/.test(budget)) restaurants = restaurants.filter((r) => !r.price_level || r.price_level <= 2);
   if (/premium|luxury/.test(budget)) restaurants = restaurants.filter((r) => !r.price_level || r.price_level >= 2);
   restaurants = rankPlaces(restaurants).slice(0, 8);
@@ -1194,8 +1396,8 @@ async function restaurantTool({ lat, lon, location_name, cuisine_preference = "l
       .filter((step) => step.mode === "text")
       .slice(0, 5)
       .map((step) => mapsSearchAction(conciseSearchLabel(step.query.replace(new RegExp(`\\s+in\\s+${location_name.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}$`, "i"), "")), step.query, "restaurant")),
-    dining_tips: "Use this as a verified discovery shortlist from Google Places. Confirm opening hours, current menu and reservation needs before going.",
-    data_quality: dataNote("verified", "Restaurant results were returned by Google Places. Ratings and opening status can change, so verify before visiting.", { source: yelpKey() ? "google_places_new_and_yelp_api" : "google_places_new" }),
+    dining_tips: "Use this as an ATLAS shortlist. Confirm opening hours, current menu and reservation needs before going.",
+    data_quality: dataNote("verified", "ATLAS verified restaurant names, ratings and available open-status signals. These can change, so confirm before visiting.", { source: yelpKey() ? "google_places_new_and_yelp_api" : "google_places_new" }),
     search_metadata: { total_found: restaurants.length, used_queries, source: yelpKey() ? "google_places_new_and_yelp_api" : "google_places_new" },
   };
 }
@@ -1213,7 +1415,7 @@ async function accommodationTool({ lat, lon, location_name, budget_category = "b
       properties: [],
       data_quality: dataNote(
         "limited",
-        "Google Places did not return verified accommodation matches for this exact request. Do not present hotel names as verified live options.",
+        "ATLAS could not verify accommodation matches for this exact request. Do not present hotel names as verified live options.",
         { fallback_suggestions: ["hostels", "guesthouses", "homestays", "simple hotels", "apartments with recent reviews"] }
       ),
       booking_insights: "Confirm final nightly prices, taxes, cancellation policy and recent reviews on booking platforms for your exact dates.",
@@ -1231,8 +1433,8 @@ async function accommodationTool({ lat, lon, location_name, budget_category = "b
       .filter((step) => step.mode === "text")
       .slice(0, 5)
       .map((step) => mapsSearchAction(conciseSearchLabel(step.query.replace(new RegExp(`\\s+in\\s+${location_name.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}$`, "i"), "")), step.query, "stay")),
-    booking_insights: "Google Places does not provide guaranteed live booking prices. Use these verified property names as a discovery shortlist, then confirm exact nightly rates and taxes on booking platforms or property websites.",
-    data_quality: dataNote("verified", "Accommodation names and ratings were returned by Google Places; live room prices and availability were not returned.", { source: "google_places_new", live_prices_available: false }),
+    booking_insights: "ATLAS can verify property discovery details, but not guaranteed live booking prices. Confirm exact nightly rates, taxes and availability on booking platforms or property websites.",
+    data_quality: dataNote("verified", "ATLAS verified accommodation names and ratings; live room prices and availability were not available.", { source: "google_places_new", live_prices_available: false }),
     search_metadata: { total_found: ranked.length, used_queries, source: "google_places_new" },
   };
 }
@@ -1252,10 +1454,21 @@ async function attractionsTool({ lat, lon, location_name, interest_type = "attra
     };
   }
 
-  const recommendations = rankPlaces(raw).slice(0, 10).map((place) => ({
+  const isSportsRequest = /tennis|court|sports|badminton|football|soccer|basketball|volleyball|swimming|gym|fitness|padel|pickleball|squash|golf|climbing|bowling|skating|running/.test(normalize(interest_type));
+  const rankedPlaces = isSportsRequest ? rankSportsPlaces(raw, interest_type) : rankAttractionPlaces(raw);
+  if (!rankedPlaces.length && isSportsRequest) {
+    const suggestions = planner_map_searches.length ? planner_map_searches : activitySpecificSuggestions(interest_type, location_name);
+    return {
+      ...noPlacesResult(location_name, activityKeyFromText(interest_type) || "sports venue", suggestions),
+      experience_category: interest_type,
+      search_metadata: { used_queries, errors: errors.slice(0, 3), source: "google_places_new" },
+    };
+  }
+
+  const recommendations = rankedPlaces.slice(0, 10).map((place) => ({
     ...(isYelpPlace(place) ? compactYelpPlace(place, location_name) : compactPlace(place, location_name)),
     category: (place.types || []).filter((type) => !["establishment", "point_of_interest"].includes(type)).join(", ") || interest_type,
-    why_visit: place.rating >= 4 ? "Highly rated by Google users" : "Relevant local option returned by Google Places",
+    why_visit: place.rating >= 4 ? "Highly rated by travellers" : "Relevant local option found by ATLAS",
   }));
 
   return {
@@ -1263,12 +1476,12 @@ async function attractionsTool({ lat, lon, location_name, interest_type = "attra
     experience_category: interest_type,
     recommendations,
     search_actions: (planner_map_searches.length ? planner_map_searches : activitySpecificSuggestions(interest_type, location_name)).slice(0, 5).map((term) => mapsSearchAction(conciseSearchLabel(term), /\bin\s+/i.test(term) ? term : `${term} in ${location_name}`, "search")),
-    planning_tips: /tennis|court|sports|badminton|football|soccer|basketball|volleyball|swimming|gym|fitness|padel|pickleball|squash|golf|climbing|bowling|skating/.test(normalize(interest_type))
-      ? "Use this as a verified discovery shortlist from Google Places. Google Places usually cannot confirm whether a court is free, so check the municipality, club website or venue phone number before going."
-      : "Use this as a verified discovery shortlist. Check opening hours, stroller access, booking rules and recent reviews before visiting.",
-    data_quality: dataNote("verified", /tennis|court|sports|badminton|football|soccer|basketball|volleyball|swimming|gym|fitness|padel|pickleball|squash|golf|climbing|bowling|skating/.test(normalize(interest_type))
-      ? "Venue results were returned by Google Places. Free/public access cannot be guaranteed from Places data alone."
-      : "Activity and venue results were returned by Google Places. Suitability details such as baby facilities or accessibility should still be checked directly.", { source: yelpKey() ? "google_places_new_and_yelp_api" : "google_places_new" }),
+    planning_tips: isSportsRequest
+      ? "Use this as an ATLAS discovery shortlist. ATLAS usually cannot confirm whether a court is free or reservable, so check the municipality, club website or venue phone number before going."
+      : "Use this as an ATLAS discovery shortlist. Check opening hours, stroller access, booking rules and recent reviews before visiting.",
+    data_quality: dataNote("verified", isSportsRequest
+      ? "ATLAS verified venue discovery details. Free/public access cannot be guaranteed from place data alone."
+      : "ATLAS verified activity and venue discovery details. Suitability details such as baby facilities or accessibility should still be checked directly.", { source: yelpKey() ? "google_places_new_and_yelp_api" : "google_places_new" }),
     search_metadata: { total_found: recommendations.length, used_queries, source: yelpKey() ? "google_places_new_and_yelp_api" : "google_places_new" },
   };
 }
@@ -1292,21 +1505,47 @@ function distanceText(meters) {
   return value < 1000 ? `${Math.round(value)} m` : `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)} km`;
 }
 
+function localizedTransitTime(value = {}) {
+  return value?.time?.text || "";
+}
+
+function compactTransitInstruction(step = {}) {
+  const details = step.transitDetails || {};
+  if (!details.transitLine && !details.stopDetails) return "";
+  const line = details.transitLine?.nameShort || details.transitLine?.name || details.tripShortText || "transit";
+  const headsign = details.headsign ? ` toward ${details.headsign}` : "";
+  const departureStop = details.stopDetails?.departureStop?.name || "";
+  const arrivalStop = details.stopDetails?.arrivalStop?.name || "";
+  const departureTime = localizedTransitTime(details.localizedValues?.departureTime);
+  const arrivalTime = localizedTransitTime(details.localizedValues?.arrivalTime);
+  const stopText = Number.isFinite(Number(details.stopCount)) ? `, ${details.stopCount} stop${Number(details.stopCount) === 1 ? "" : "s"}` : "";
+  const timeText = [departureTime, arrivalTime].filter(Boolean).join(" → ");
+  const stationText = departureStop && arrivalStop ? ` from ${departureStop} to ${arrivalStop}` : "";
+  return `Take ${line}${headsign}${stationText}${stopText}${timeText ? ` (${timeText})` : ""}`;
+}
+
 function compactRouteLeg(route = {}, origin = "", destination = "") {
   const leg = route.legs?.[0] || {};
+  const steps = (leg.steps || []).map((step) => {
+    const transitInstruction = compactTransitInstruction(step);
+    return {
+      instruction: transitInstruction || String(step.navigationInstruction?.instructions || "").replace(/\s+/g, " ").trim(),
+      distance: distanceText(step.distanceMeters),
+      duration: durationText(step.staticDuration),
+      travel_mode: step.travelMode || "",
+      transit_line: step.transitDetails?.transitLine?.nameShort || step.transitDetails?.transitLine?.name || "",
+      is_transit: Boolean(step.transitDetails || step.travelMode === "TRANSIT"),
+    };
+  }).filter((step) => step.instruction);
+
   return {
     summary: route.description || "Suggested route",
     distance: distanceText(route.distanceMeters),
     duration: durationText(route.duration),
     start_address: origin,
     end_address: destination,
-    steps: (leg.steps || []).slice(0, 6).map((step) => ({
-      instruction: String(step.navigationInstruction?.instructions || "").replace(/\s+/g, " ").trim(),
-      distance: distanceText(step.distanceMeters),
-      duration: durationText(step.staticDuration),
-      travel_mode: step.travelMode || "",
-      transit_line: "",
-    })).filter((step) => step.instruction),
+    steps: steps.slice(0, 12),
+    transit_step_count: steps.filter((step) => step.is_transit).length,
   };
 }
 
@@ -1324,7 +1563,9 @@ async function routeTool({ origin, destination, mode = "transit" }) {
     };
   }
 
-  const travelMode = ["driving", "walking", "bicycling", "transit"].includes(normalize(mode)) ? normalize(mode) : "transit";
+  const requestedMode = normalize(mode);
+  const travelMode = ["driving", "walking", "bicycling", "transit"].includes(requestedMode) ? requestedMode : "transit";
+  const displayMode = /train/.test(requestedMode) ? "train" : travelMode;
   const mapUrl = mapsDirectionsUrl(from, to, travelMode);
   const key = googlePlacesKey();
 
@@ -1332,10 +1573,10 @@ async function routeTool({ origin, destination, mode = "transit" }) {
     return {
       origin: from,
       destination: to,
-      mode: travelMode,
+      mode: displayMode,
       routes: [],
       search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${from} → ${to}`, url: mapUrl, is_search: true }],
-      data_quality: dataNote("limited", "Google Maps API key is not configured, so ATLAS can only provide a map link."),
+      data_quality: dataNote("limited", "ATLAS route verification is not configured, so only a map link is available."),
       practical_tips: ["Open the route in Maps and choose public transport, walking or driving depending on your situation."],
     };
   }
@@ -1350,6 +1591,15 @@ async function routeTool({ origin, destination, mode = "transit" }) {
       "routes.legs.steps.staticDuration",
       "routes.legs.steps.navigationInstruction.instructions",
       "routes.legs.steps.travelMode",
+      "routes.legs.steps.transitDetails.headsign",
+      "routes.legs.steps.transitDetails.stopCount",
+      "routes.legs.steps.transitDetails.tripShortText",
+      "routes.legs.steps.transitDetails.transitLine.name",
+      "routes.legs.steps.transitDetails.transitLine.nameShort",
+      "routes.legs.steps.transitDetails.stopDetails.arrivalStop.name",
+      "routes.legs.steps.transitDetails.stopDetails.departureStop.name",
+      "routes.legs.steps.transitDetails.localizedValues.arrivalTime.time.text",
+      "routes.legs.steps.transitDetails.localizedValues.departureTime.time.text",
     ].join(",");
     const data = await withRetry(
       () => httpPost(
@@ -1372,20 +1622,20 @@ async function routeTool({ origin, destination, mode = "transit" }) {
     return {
       origin: from,
       destination: to,
-      mode: travelMode,
+      mode: displayMode,
       routes,
       search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${from} → ${to}`, url: mapUrl, is_search: true }],
-      data_quality: dataNote(routes.length ? "verified" : "limited", routes.length ? "Route data was returned by Google Routes API. Exact live traffic and disruptions should still be checked in Maps." : "Google Routes API returned no route for this request; use the Maps link and adjust origin, destination or mode.", { source: "google_routes_api_v2" }),
+      data_quality: dataNote(routes.length ? "verified" : "limited", routes.length ? "ATLAS verified route distance and duration. Exact live traffic and disruptions should still be checked before leaving." : "ATLAS could not verify a route for this request; use the Maps link and adjust origin, destination or mode.", { source: "google_routes_api_v2" }),
       practical_tips: ["Check live traffic, transit disruptions and last departure times before leaving.", "For tourist trips, save the route offline or screenshot key steps."],
     };
   } catch (error) {
     return {
       origin: from,
       destination: to,
-      mode: travelMode,
+      mode: displayMode,
       routes: [],
       search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${from} → ${to}`, url: mapUrl, is_search: true }],
-      data_quality: dataNote("limited", `Google Routes API could not be checked: ${error.message}`),
+      data_quality: dataNote("limited", userSafeProviderError(error, "ATLAS could not verify this route right now.")),
       practical_tips: ["Use the Maps route link as a fallback and confirm traffic, transit schedules and walking safety before leaving."],
     };
   }
@@ -1401,6 +1651,7 @@ function sensitiveDestinationAliases(location = "", country = "") {
   if (/iraq/.test(text)) return ["Iraq", "Baghdad"];
   if (/afghanistan/.test(text)) return ["Afghanistan", "Kabul"];
   if (/yemen/.test(text)) return ["Yemen", "Sanaa"];
+  if (/united arab emirates|uae|abu dhabi|dubai/.test(text)) return [location, country, "United Arab Emirates", "UAE", "Abu Dhabi", "Dubai"].filter(Boolean);
   return [location, country].filter(Boolean);
 }
 
@@ -1443,6 +1694,7 @@ function isRelevantNewsArticle(article = {}, location = "", country = "") {
   const description = article.description || "";
   const content = article.content || "";
   const source = article.source?.name || "";
+  const headlineHaystack = normalize(`${title} ${description}`);
   const haystack = normalize(`${title} ${description} ${content}`);
   if (!haystack) return false;
 
@@ -1463,18 +1715,48 @@ function isRelevantNewsArticle(article = {}, location = "", country = "") {
   } else if (isIsrael) {
     if (!/\b(israel\w*|jerusalem|tel aviv|gaza|west bank)\b/i.test(haystack)) return false;
   } else {
-    const destTokens = destinationKeywords(location, country);
-    const hasDestination = destTokens.some((token) => new RegExp(`\\b${token.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\b`, "i").test(haystack));
+    const genericDestinationTokens = new Set(["united", "arab", "the", "and", "city", "region", "area"]);
+    const aliases = sensitiveDestinationAliases(location, country);
+    const hasDestination = aliases.some((alias) => {
+      const key = normalize(alias);
+      if (!key) return false;
+      if (key.includes(" ")) return headlineHaystack.includes(key);
+      if (genericDestinationTokens.has(key)) return false;
+      return new RegExp(`\\b${key.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\b`, "i").test(headlineHaystack);
+    });
     if (!hasDestination) return false;
   }
 
   const safetyTerms = [
-    "tourist", "tourism", "traveller", "traveler", "travel advisory", "security", "safety", "advisory", "conflict", "war", "attack", "border", "checkpoint", "protest", "unrest", "closure", "evacuation", "flotilla", "hajj", "detainee", "ceasefire", "violence", "airport", "visa"
+    "tourist", "traveller", "traveler", "travel advisory", "security", "safety", "advisory", "conflict", "war", "attack", "checkpoint", "protest", "unrest", "closure", "evacuation", "flotilla", "detainee", "detention", "ceasefire", "violence", "airport", "visa"
   ];
 
   // Generic destination mentions are not enough. Require a travel/safety term so the UI
   // does not show unrelated political or business headlines as tourist guidance.
-  return safetyTerms.some((term) => haystack.includes(term));
+  const relevanceText = isPalestine || isIran || isIsrael ? haystack : headlineHaystack;
+  const hasSafetyTerm = safetyTerms.some((term) => relevanceText.includes(term));
+  if (!hasSafetyTerm) return false;
+
+  const headlineText = `${title} ${description}`;
+  const strongSafety = /\b(travel advisory|security|safety|conflict|war|attack|border closure|border dispute|border clash|checkpoint|protest|unrest|closure|evacuation|detainee|detention|violence|airport closure|visa|tourist warning)\b/i.test(relevanceText);
+  const directSafetyHeadline = /\b(travel advisory|tourist warning|security alert|safety warning|attack|war|armed conflict|protest|unrest|detention|violence|airport closure|border closure|evacuation)\b/i.test(headlineText);
+  const directTravellerDisruption = /\b(tourist|tourists|traveller|traveler|travel advisory|tourist warning|security alert|safety warning|airport closure|flight disruption|regional flight|stranded|visa|evacuation|attack|protest|unrest|border closure)\b/i.test(headlineText);
+  const healthcareOrBusinessImpactOnly = /\b(hospital|hospitals|healthcare|patients?|business(?:es)?|energy prices?|oil prices?|market uncertainty|global businesses)\b/i.test(headlineText)
+    && !directTravellerDisruption;
+  if (healthcareOrBusinessImpactOnly) return false;
+  const sportsOrEntertainmentOnly = /\b(formula\s*1|f1|grand prix|autosport|race|racing|driver|football|cricket|tennis|match|championship|concert|film|movie|celebrity)\b/i.test(headlineText)
+    && !directSafetyHeadline;
+  if (sportsOrEntertainmentOnly) return false;
+  const financeOrCryptoOnly = /\b(crypto|bitcoin|xrp|token|blockchain|stock|stocks|shares?|market|markets|price prediction|earnings|business|investment|funding|startup)\b/i.test(headlineText)
+    && !directSafetyHeadline;
+  if (financeOrCryptoOnly) return false;
+  const businessOnly = /\b(fuel exports?|stockpiles?|oil|gas|market|markets|shares?|stocks?|investment|trade|tariff|earnings|business|conference|summit|bond|currency)\b/i.test(haystack)
+    && !strongSafety;
+  if (businessOnly) return false;
+  if (/\b(fuel exports?|stockpiles?|oil|gas|market|markets|shares?|stocks?|investment|trade|tariff|earnings)\b/i.test(headlineText) && !/\b(travel advisory|security|safety|attack|war|conflict|protest|unrest|closure|detention|violence)\b/i.test(headlineText)) return false;
+  if (/\b(tourism bill|tourism board|tourism promotion|tourism revenue|tourism industry)\b/i.test(headlineText) && !strongSafety) return false;
+
+  return true;
 }
 
 const NEWS_ATTENTION_RULES = [
@@ -1484,6 +1766,97 @@ const NEWS_ATTENTION_RULES = [
   { level: "elevated", label: "weather or natural-hazard disruption in recent coverage", pattern: /\b(flood|landslide|earthquake|storm|wildfire|heatwave|monsoon warning|travel disruption)\b/i },
   { level: "elevated", label: "official-warning language reported in recent coverage", pattern: /\b(tourist warning|travel advisory|security alert|avoid travel|reconsider travel)\b/i },
 ];
+
+function destinationBaselineCaution(location = "", country = "") {
+  const text = normalize(`${location} ${country}`);
+  const tiers = [
+    { score: 92, label: "active war or extreme official-warning baseline", pattern: /\b(afghanistan|syria|yemen|gaza)\b/ },
+    { score: 84, label: "active conflict or severe movement-risk baseline", pattern: /\b(ukraine|sudan|south sudan|somalia|haiti|myanmar)\b/ },
+    { score: 78, label: "high geopolitical/security restriction baseline", pattern: /\b(iran|iraq|lebanon|north korea|libya)\b/ },
+    { score: 68, label: "elevated regional-security baseline", pattern: /\b(israel|palestin|west bank|venezuela|pakistan)\b/ },
+    { score: 52, label: "higher urban/security precaution baseline", pattern: /\b(brazil|rio de janeiro|mexico|kenya|south africa)\b/ },
+    { score: 36, label: "moderate infrastructure, road or natural-hazard baseline", pattern: /\b(nepal|peru|india|indonesia|philippines|morocco|egypt|turkey)\b/ },
+  ];
+  const match = tiers.find((tier) => tier.pattern.test(text));
+  return match || { score: 24, label: "ordinary destination baseline" };
+}
+
+function advisoryCaution(officialAdvisory = null) {
+  const text = normalize([
+    officialAdvisory?.title,
+    ...(Array.isArray(officialAdvisory?.alert_status) ? officialAdvisory.alert_status : []),
+  ].filter(Boolean).join(" "));
+  if (!text) return { score: 0, label: "no retrieved official advisory warning" };
+  if (/\b(advise against all travel|do not travel|avoid all travel)\b/i.test(text)) {
+    return { score: 95, label: "official advisory includes against-all-travel language" };
+  }
+  if (/\b(advise against all but essential travel|avoid all but essential travel)\b/i.test(text)) {
+    return { score: 82, label: "official advisory includes against-all-but-essential-travel language" };
+  }
+  if (/\b(terrorism|armed conflict|military|border|security|protest|unrest|kidnapping|detention|crime|state of emergency)\b/i.test(text)) {
+    return { score: 58, label: "official advisory has active safety/security warnings" };
+  }
+  return { score: 30, label: "official advisory retrieved without strong alert language" };
+}
+
+function articleCaution(articles = [], coverage = {}) {
+  const haystack = articles.map((a) => `${a.title || a.headline || ""} ${a.description || a.summary || ""}`).join(" ");
+  let score = coverage.news_attention_level === "high" ? 72
+    : coverage.news_attention_level === "elevated" ? 52
+    : coverage.news_attention_level === "limited" ? 30
+    : 12;
+  const drivers = [];
+
+  const rules = [
+    { score: 86, label: "recent coverage mentions war, missiles, airstrikes or armed conflict", pattern: /\b(war|missile|airstrike|rocket|bombing|armed conflict|military operation)\b/i },
+    { score: 78, label: "recent coverage mentions attacks, deaths, kidnapping or hostages", pattern: /\b(attack|shooting|explosion|deadly|killed|wounded|kidnapping|hostage)\b/i },
+    { score: 62, label: "recent coverage mentions unrest, protests, checkpoints or border disruption", pattern: /\b(unrest|clashes|protest|demonstration|strike|checkpoint|roadblock|border closure|airport closure)\b/i },
+    { score: 48, label: "recent coverage mentions natural hazards or travel disruption", pattern: /\b(flood|landslide|earthquake|storm|wildfire|monsoon warning|travel disruption)\b/i },
+  ];
+  for (const rule of rules) {
+    if (rule.pattern.test(haystack)) {
+      score = Math.max(score, rule.score);
+      drivers.push(rule.label);
+    }
+  }
+
+  return { score, drivers };
+}
+
+function cautionLabel(score = 0) {
+  if (score >= 85) return { level: "severe", label: "Red-flag / avoid or defer unless essential" };
+  if (score >= 70) return { level: "high", label: "High caution" };
+  if (score >= 50) return { level: "elevated", label: "Elevated caution" };
+  if (score >= 30) return { level: "moderate", label: "Moderate caution" };
+  return { level: "standard", label: "Standard precautions" };
+}
+
+function calculateSafetyCaution({ location = "", country = "", articles = [], officialAdvisory = null, coverage = {} } = {}) {
+  const baseline = destinationBaselineCaution(location, country);
+  const advisory = advisoryCaution(officialAdvisory);
+  const news = articleCaution(articles, coverage);
+  const strongOfficialWarning = advisory.score >= 58;
+  const severeNewsSignal = news.score >= 72;
+  const newsScore = baseline.score <= 40 && !strongOfficialWarning && !severeNewsSignal
+    ? Math.min(news.score, 48)
+    : news.score;
+  const score = Math.max(baseline.score, advisory.score, newsScore);
+  const label = cautionLabel(score);
+  const drivers = [
+    baseline.label,
+    advisory.label,
+    ...(coverage.main_signals || []),
+    ...news.drivers,
+  ].filter(Boolean);
+
+  return {
+    score,
+    level: label.level,
+    label: label.label,
+    drivers: [...new Set(drivers)].slice(0, 5),
+    interpretation: "ATLAS caution score is a planning signal from destination baseline, retrieved official advisory language and recent safety-related news. It is not an official government risk rating.",
+  };
+}
 
 function newsCoverageFromArticles(articles = []) {
   const levelRank = { unavailable: 0, limited: 1, elevated: 2, high: 3 };
@@ -1518,26 +1891,26 @@ function newsCoverageFromArticles(articles = []) {
     evidence_count: articles.length,
     latest_published_at: latestPublishedAt,
     main_signals: [...new Set(signals)].slice(0, 5),
-    interpretation: "This classification describes retrieved news coverage only. It is not a destination risk score or a substitute for an official government travel advisory.",
+    interpretation: "This classification describes retrieved news coverage volume/severity only. It is separate from the ATLAS caution score and is not a substitute for an official government travel advisory.",
   };
 }
 
 function officialAdvisoryLinks(location = "", country = "") {
-  const parts = [location, country].filter(Boolean);
-  const unique = [];
-  const seen = new Set();
-  for (const part of parts) {
-    const key = normalize(part);
-    if (key && !seen.has(key)) {
-      unique.push(part);
-      seen.add(key);
-    }
-  }
-  const label = encodeURIComponent(unique.join(" ") || location || country || "travel");
+  const countryName = countryService.canonicalCountryName(country || location);
+  const alpha3 = countryService.countryAlpha3ForName(country || location).toLowerCase();
+  if (!alpha3) return [];
+
   return [
-    { name: "Finland MFA travel advisories", url: "https://um.fi/matkustustiedotteet-a-o" },
-    { name: "UK FCDO travel advice", url: `https://www.gov.uk/foreign-travel-advice/search?q=${label}` },
-    { name: "US State Department travel advisories", url: "https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories.html" },
+    {
+      name: `WHO health profile for ${countryName}`,
+      url: `https://www.who.int/countries/${alpha3}`,
+      scope: "country health profile",
+    },
+    {
+      name: `ReliefWeb updates for ${countryName}`,
+      url: `https://reliefweb.int/country/${alpha3}`,
+      scope: "country-specific humanitarian and disruption updates",
+    },
   ];
 }
 
@@ -1559,7 +1932,11 @@ async function fetchGovUkTravelAdvisory(location = "", country = "") {
     );
     const results = Array.isArray(search?.results) ? search.results : [];
     const target = normalize(country || location);
-    const match = results.find((item) => normalize(item.title || "").startsWith(target)) || results[0];
+    const match = results.find((item) => {
+      const title = normalize(item.title || "");
+      if (!target || !title) return false;
+      return title.startsWith(target) || title.includes(`${target} travel advice`) || target.includes(title.replace(/\s+travel advice$/, ""));
+    });
     if (!match?.link || !String(match.link).startsWith("/foreign-travel-advice/")) return null;
 
     const content = await withRetry(
@@ -1626,6 +2003,7 @@ async function safetyTool({ location, country, specific_concerns = "general" }) 
 
   const coverage = newsCoverageFromArticles(articles);
   const combinedConfidence = officialAdvisory && articles.length >= 3 ? "medium-high" : officialAdvisory ? "medium" : coverage.coverage_confidence;
+  const caution = calculateSafetyCaution({ location, country, articles, officialAdvisory, coverage });
 
   return {
     location,
@@ -1636,6 +2014,11 @@ async function safetyTool({ location, country, specific_concerns = "general" }) 
     safety_assessment: {
       ...coverage,
       coverage_confidence: combinedConfidence,
+      caution_score: caution.score,
+      caution_level: caution.level,
+      caution_label: caution.label,
+      caution_drivers: caution.drivers,
+      caution_interpretation: caution.interpretation,
       official_advisory_status: officialAdvisory ? "retrieved" : "unavailable",
       checked_at: checkedAt,
     },
@@ -1647,7 +2030,7 @@ async function safetyTool({ location, country, specific_concerns = "general" }) 
     data_quality: dataNote(
       officialAdvisory || articles.length ? "verified" : "limited",
       officialAdvisory
-        ? "A current UK government travel-advice page was retrieved. Recent news is supplied only as supporting context, never as a risk score."
+        ? "A current UK government travel-advice page was retrieved. Recent news and advisory language are used as supporting context for the ATLAS caution score."
         : "An official advisory could not be retrieved. Any recent news is incomplete context and must not be treated as a safety determination.",
       { sources: [officialAdvisory ? "govuk_fcdo" : null, articles.length ? "newsapi" : null].filter(Boolean), used_queries: usedQueries, errors: errors.slice(0, 2), irrelevant_matches_filtered: true, checked_at: checkedAt },
     ),
@@ -1695,7 +2078,7 @@ async function culturalTool({ location, country, insight_type = "culture" }) {
       country,
       insight_category: insight_type,
       practical_tips: culturalTips(insight_type),
-      data_quality: dataNote("limited", `Current cultural/news context could not be checked: ${error.message}`),
+      data_quality: dataNote("limited", userSafeProviderError(error, "Current cultural or news context could not be checked right now.")),
     };
   }
 }
@@ -1754,5 +2137,5 @@ export const toolService = {
     }
   },
 
-  _test: { yelpHeaders, newsCoverageFromArticles, fetchGovUkTravelAdvisory, compactRouteLeg, shouldRecordProviderFailure, assertCircuitClosed, recordProviderFailure, recordProviderSuccess },
+  _test: { yelpHeaders, newsCoverageFromArticles, calculateSafetyCaution, isRelevantNewsArticle, officialAdvisoryLinks, fetchGovUkTravelAdvisory, compactRouteLeg, isLowValueAttractionPlace, shouldRecordProviderFailure, assertCircuitClosed, recordProviderFailure, recordProviderSuccess },
 };

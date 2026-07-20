@@ -45,7 +45,7 @@ const NON_LOCATION_VALUES = new Set([
 ]);
 
 function getGoogleKey() {
-  return process.env.GOOGLE_API_KEY || process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_PLACES_API_KEY || "";
+  return process.env.GOOGLE_MAPS_SERVER_API_KEY || "";
 }
 
 function getOpenWeatherKey() {
@@ -287,7 +287,7 @@ export async function getLocationData(location, { signal, reserveProviderCall } 
 
   const configMessage = configured.length
     ? `Configured geocoders tried: ${configured.join(", ")}.`
-    : "No geocoding API key is configured. Set GOOGLE_MAPS_API_KEY or OPEN_WEATHER_KEY.";
+    : "No geocoding API key is configured. Set GOOGLE_MAPS_SERVER_API_KEY or OPEN_WEATHER_KEY.";
 
   logger.warn(`Location data error: Location not found. ${configMessage}`);
   if (errors.length) logger.debug("Location resolver details", { errors: errors.slice(0, 3).join(" | ") });
