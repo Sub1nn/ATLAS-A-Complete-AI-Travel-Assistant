@@ -10,7 +10,15 @@ function expiry(date = new Date()) {
   return new Date(date.getTime() + 35 * 24 * 60 * 60 * 1000);
 }
 
+function developmentUsageLimitsDisabled() {
+  return process.env.NODE_ENV === "development" && process.env.ENFORCE_DEVELOPMENT_LIMITS !== "true";
+}
+
 async function reserveChat(userId) {
+  if (developmentUsageLimitsDisabled()) {
+    return { allowed: true, used: 0, limit: Number.MAX_SAFE_INTEGER, developmentBypass: true };
+  }
+
   const day = dayKey();
   const limit = Math.max(1, Number(process.env.DAILY_CHAT_REQUEST_LIMIT || 50));
   const updated = await DailyUsage.findOneAndUpdate(
@@ -62,6 +70,15 @@ async function ensureGlobalUsage(day) {
 }
 
 async function reserveGlobalUsage(day, requestedProviders, requestedLlm) {
+  if (developmentUsageLimitsDisabled()) {
+    return {
+      allowed: true,
+      providerLimit: Number.MAX_SAFE_INTEGER,
+      llmLimit: Number.MAX_SAFE_INTEGER,
+      developmentBypass: true,
+    };
+  }
+
   const providerLimit = Math.max(1, Number(process.env.GLOBAL_DAILY_PROVIDER_CALL_LIMIT || 10000));
   const llmLimit = Math.max(1, Number(process.env.GLOBAL_DAILY_LLM_CALL_LIMIT || 5000));
   await ensureGlobalUsage(day);
@@ -89,6 +106,17 @@ async function reserveGlobalUsage(day, requestedProviders, requestedLlm) {
 }
 
 async function reserveProviderUsage(userId, { toolCalls = 0, externalCalls = 0, llmCalls = 0 } = {}) {
+  if (developmentUsageLimitsDisabled()) {
+    return {
+      allowed: true,
+      providerCalls: 0,
+      llmCalls: 0,
+      providerLimit: Number.MAX_SAFE_INTEGER,
+      llmLimit: Number.MAX_SAFE_INTEGER,
+      developmentBypass: true,
+    };
+  }
+
   const day = dayKey();
   const requestedProviders = Math.max(0, Number(externalCalls || toolCalls || 0));
   const requestedLlm = Math.max(0, Number(llmCalls || 0));
@@ -119,4 +147,4 @@ async function reserveExternalCall(userId, calls = 1) {
   return reserveProviderUsage(userId, { externalCalls: Math.max(1, Number(calls || 1)) });
 }
 
-export const usageService = { reserveChat, reserveProviderUsage, reserveExternalCall, _test: { dayKey, expiry, reserveGlobalUsage } };
+export const usageService = { reserveChat, reserveProviderUsage, reserveExternalCall, _test: { dayKey, expiry, reserveGlobalUsage, developmentUsageLimitsDisabled } };

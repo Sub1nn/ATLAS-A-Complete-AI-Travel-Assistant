@@ -14,6 +14,10 @@ function clientKey(req) {
   return req.user?._id ? `user:${req.user._id.toString()}` : req.ip;
 }
 
+function developmentRateLimitsDisabled() {
+  return process.env.NODE_ENV === "development" && process.env.ENFORCE_DEVELOPMENT_LIMITS !== "true";
+}
+
 function safeIpKey(req) {
   return req.ip || req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || "unknown-ip";
 }
@@ -104,7 +108,7 @@ function redisStore(prefix) {
 }
 
 function createLimiter({ prefix, windowMs: limiterWindowMs, max, message, keyGenerator = safeIpKey }) {
-  return rateLimit({
+  const limiter = rateLimit({
     windowMs: limiterWindowMs,
     max,
     keyGenerator,
@@ -125,6 +129,11 @@ function createLimiter({ prefix, windowMs: limiterWindowMs, max, message, keyGen
       });
     },
   });
+
+  return (req, res, next) => {
+    if (developmentRateLimitsDisabled()) return next();
+    return limiter(req, res, next);
+  };
 }
 
 export const rateLimiter = createLimiter({
