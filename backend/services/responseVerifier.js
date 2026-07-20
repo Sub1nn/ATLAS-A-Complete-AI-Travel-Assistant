@@ -54,7 +54,9 @@ function appendNote(answer, note) {
 function softenGuarantees(answer) {
   let output = answer;
   for (const pattern of GUARANTEE_PATTERNS) {
-    output = output.replace(pattern, (match) => {
+    output = output.replace(pattern, (match, offset, fullText) => {
+      const prefix = fullText.slice(Math.max(0, offset - 8), offset).toLowerCase();
+      if (/\bnot\s+$/.test(prefix)) return match;
       if (/safe|risk/i.test(match)) return "lower-risk based on available information";
       return "likely";
     });
