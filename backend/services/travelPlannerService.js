@@ -30,6 +30,15 @@ function cleanString(value = "", max = 120) {
     .slice(0, max);
 }
 
+function cleanDestination(value = "") {
+  return cleanString(value, 120)
+    .replace(/\s+\b(?:in|during|around|for)\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|spring|summer|autumn|fall|winter|this\s+weekend|next\s+weekend|next\s+week|this\s+week)\b.*$/i, "")
+    .replace(/\s+\b(?:and|or)\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|spring|summer|autumn|fall|winter)\b.*$/i, "")
+    .replace(/\b(?:today|tomorrow|tonight|this\s+weekend|next\s+weekend|next\s+week|this\s+week)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function safeArray(value, limit = 8) {
   if (!Array.isArray(value)) return [];
   return value.map((item) => cleanString(item, 90)).filter(Boolean).slice(0, limit);
@@ -38,7 +47,7 @@ function safeArray(value, limit = 8) {
 function sanitizePlan(plan = {}) {
   const intent = ALLOWED_INTENTS.has(plan.intent) ? plan.intent : "";
   const confidence = Number(plan.confidence || 0);
-  const destination = cleanString(plan.destination || "");
+  const destination = cleanDestination(plan.destination || "");
   const activity = cleanString(plan.activity || "", 40).toLowerCase();
   const dateText = cleanString(plan.date_text || plan.dateText || "", 60);
   const targetDate = /^\d{4}-\d{2}-\d{2}$/.test(String(plan.target_date || "")) ? String(plan.target_date) : "";
@@ -89,7 +98,7 @@ export async function createTravelPlan({ message = "", memory = {}, previousMess
       activity: "specific sport/activity such as tennis, badminton, museum, restaurant, hotel, hiking; empty if broad destination planning",
       date_text: "raw user date phrase such as this Saturday, tomorrow, this weekend",
       target_date: "YYYY-MM-DD when resolvable, otherwise empty",
-      route: { origin: "", destination: "", mode: "transit|driving|walking|bicycling" },
+      route: { origin: "", destination: "", mode: "train|transit|driving|walking|bicycling" },
       required_tools: ["weather", "places", "news", "culture", "route", "hotels", "restaurants", "nightlife"],
       place_search_queries: ["short query strings for place search, requested activity first"],
       map_searches: ["short Google Maps searches, requested intent first"],
@@ -130,6 +139,17 @@ export async function createTravelPlan({ message = "", memory = {}, previousMess
 
 export function applyTravelPlan(resolved = {}, plan = null) {
   if (!plan || plan.confidence < 0.62) return resolved;
+  const contextSwitchPrompt = /\b(instead|rather|change|switch|what about|how about)\b/i.test(String(resolved.enrichedUserMessage || ""));
+  const keepLocationOnlyDestinationIntent = resolved.intent?.locationOnlyFollowUp
+    && resolved.intent?.type === "destination_planning"
+    && !contextSwitchPrompt;
+  const keepRefinementDestinationIntent = resolved.intent?.type === "destination_planning"
+    && Boolean(resolved.destination || resolved.memory?.destination)
+    && /\b(budget|cheap|affordable|low[-\s]?cost|vegetarian|vegan|halal|kosher|gluten[-\s]?free|dietary|no meat|plant[-\s]?based)\b/i.test(String(resolved.enrichedUserMessage || ""));
+  const keepItineraryDestinationIntent = resolved.intent?.type === "destination_planning"
+    && Boolean(resolved.destination || resolved.memory?.destination)
+    && /\b(plan|itinerary|one[-\s]?day|1[-\s]?day|day plan|morning|lunch|afternoon|stay base|base area)\b/i.test(String(resolved.enrichedUserMessage || ""));
+  const keepDestinationIntent = keepLocationOnlyDestinationIntent || keepRefinementDestinationIntent || keepItineraryDestinationIntent;
 
   const next = {
     ...resolved,
@@ -138,14 +158,18 @@ export function applyTravelPlan(resolved = {}, plan = null) {
     memory: { ...(resolved.memory || {}) },
   };
 
-  if (plan.intent && ALLOWED_INTENTS.has(plan.intent) && plan.intent !== "document_chat") {
+  if (plan.intent && ALLOWED_INTENTS.has(plan.intent) && plan.intent !== "document_chat" && !keepDestinationIntent) {
     next.intent = { ...next.intent, type: plan.intent, plannerConfidence: plan.confidence };
   }
 
-  if (plan.destination) {
-    next.destination = contextService.canonicalDestination(plan.destination);
-    next.locations = [next.destination, ...(resolved.locations || []).filter((loc) => contextService.normalize(loc) !== contextService.normalize(next.destination))].slice(0, 3);
+  if (plan.destination && !keepLocationOnlyDestinationIntent) {
+    const cleanedDestination = cleanDestination(plan.destination);
+    next.destination = contextService.canonicalDestination(cleanedDestination || plan.destination);
     next.locationScope = plan.location_scope === "country" ? "country" : plan.location_scope === "region" ? "region" : "city";
+    const contextSwitch = contextSwitchPrompt || next.locationScope === "country";
+    next.locations = contextSwitch
+      ? [next.destination]
+      : [next.destination, ...(resolved.locations || []).filter((loc) => contextService.normalize(loc) !== contextService.normalize(next.destination))].slice(0, 3);
     next.memory.destination = next.destination;
     next.memory.locations = [...new Set([next.destination, ...(next.memory.locations || [])])].slice(0, 8);
     next.memory.locationScope = next.locationScope;
@@ -160,7 +184,7 @@ export function applyTravelPlan(resolved = {}, plan = null) {
     next.dates = dateContext.raw ? [dateContext.raw] : resolved.dates || [];
   }
 
-  if (plan.activity && plan.intent === "activity_recommendations") {
+  if (plan.activity && plan.intent === "activity_recommendations" && !keepDestinationIntent) {
     const activity = contextService.extractPrimaryActivity(plan.activity) || plan.activity;
     next.activityRequest = {
       activity,
@@ -174,8 +198,17 @@ export function applyTravelPlan(resolved = {}, plan = null) {
   }
 
   if (plan.route?.origin && plan.route?.destination && plan.intent === "route_planning") {
-    next.routeRequest = plan.route;
-    next.memory.route = plan.route;
+    const deterministicRoute = resolved.routeRequest || null;
+    const route = deterministicRoute?.origin && deterministicRoute?.destination
+      ? {
+          ...plan.route,
+          origin: deterministicRoute.origin,
+          destination: deterministicRoute.destination,
+          mode: deterministicRoute.mode || plan.route.mode || "transit",
+        }
+      : plan.route;
+    next.routeRequest = route;
+    next.memory.route = route;
   }
 
   return next;
