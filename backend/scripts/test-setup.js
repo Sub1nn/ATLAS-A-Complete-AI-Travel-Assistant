@@ -22,9 +22,7 @@ const requiredEnvVars = [
 ];
 
 const optionalEnvVars = [
-  "GOOGLE_MAPS_API_KEY",
-  "GOOGLE_API_KEY",
-  "GOOGLE_PLACES_API_KEY",
+  "GOOGLE_MAPS_SERVER_API_KEY",
   "OPEN_WEATHER_KEY",
   "NEWS_API_KEY",
   "YELP_API_KEY",

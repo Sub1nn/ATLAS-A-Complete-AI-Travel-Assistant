@@ -2,7 +2,7 @@
 import axios from "axios";
 
 function googlePlacesKey() {
-  return process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || "";
+  return process.env.GOOGLE_MAPS_SERVER_API_KEY || "";
 }
 
 function googlePlacesHeaders() {
@@ -15,7 +15,7 @@ function googlePlacesHeaders() {
 
 async function googlePlacesTextSearch(textQuery, { maxResultCount = 5, locationBias } = {}) {
   const key = googlePlacesKey();
-  if (!key) throw new Error("GOOGLE_PLACES_API_KEY, GOOGLE_MAPS_API_KEY or GOOGLE_API_KEY is not configured");
+  if (!key) throw new Error("GOOGLE_MAPS_SERVER_API_KEY is not configured");
 
   const body = {
     textQuery,
@@ -85,14 +85,16 @@ export const networkTest = {
   },
 
   async testAllAPIs() {
-    const [groq, google, openweather, googleplaces, news] = await Promise.all([
+    const [groq, google, google_timezone, google_routes, openweather, googleplaces, news] = await Promise.all([
       this.testGroqConnectivity(),
       this.testGoogleMaps(),
+      this.testGoogleTimeZone(),
+      this.testGoogleRoutes(),
       this.testOpenWeather(),
       this.testGooglePlaces(),
       this.testNewsAPI(),
     ]);
-    const results = { groq, google, openweather, googleplaces, news };
+    const results = { groq, google, google_timezone, google_routes, openweather, googleplaces, news };
 
     console.log("📊 API Connectivity Results:", results);
     return results;
@@ -100,8 +102,8 @@ export const networkTest = {
 
   async testGoogleMaps() {
     try {
-      const key = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_PLACES_API_KEY;
-      if (!key) return { success: false, error: "Google Maps API key is not configured" };
+      const key = process.env.GOOGLE_MAPS_SERVER_API_KEY;
+      if (!key) return { success: false, error: "GOOGLE_MAPS_SERVER_API_KEY is not configured" };
       const response = await axios.get("https://maps.googleapis.com/maps/api/geocode/json", {
         params: { address: "Helsinki", key },
         timeout: 5000,
@@ -112,6 +114,62 @@ export const networkTest = {
         status: response.status,
         api_status: apiStatus,
         error: ["OK", "ZERO_RESULTS"].includes(apiStatus) ? undefined : response.data?.error_message || apiStatus,
+      };
+    } catch (error) {
+      return { success: false, error: error.message, code: error.code, status: error.response?.status };
+    }
+  },
+
+  async testGoogleTimeZone() {
+    try {
+      const key = process.env.GOOGLE_MAPS_SERVER_API_KEY;
+      if (!key) return { success: false, error: "GOOGLE_MAPS_SERVER_API_KEY is not configured" };
+      const response = await axios.get("https://maps.googleapis.com/maps/api/timezone/json", {
+        params: { location: "60.1699,24.9384", timestamp: Math.floor(Date.now() / 1000), key },
+        timeout: 5000,
+      });
+      const apiStatus = response.data?.status;
+      return {
+        success: response.status === 200 && apiStatus === "OK",
+        status: response.status,
+        api_status: apiStatus,
+        time_zone_id: response.data?.timeZoneId,
+        error: apiStatus === "OK" ? undefined : response.data?.errorMessage || apiStatus,
+      };
+    } catch (error) {
+      return { success: false, error: error.message, code: error.code, status: error.response?.status };
+    }
+  },
+
+  async testGoogleRoutes() {
+    try {
+      const key = process.env.GOOGLE_MAPS_SERVER_API_KEY;
+      if (!key) return { success: false, error: "GOOGLE_MAPS_SERVER_API_KEY is not configured" };
+      const response = await axios.post(
+        "https://routes.googleapis.com/directions/v2:computeRoutes",
+        {
+          origin: { address: "Helsinki railway station" },
+          destination: { address: "Helsinki airport" },
+          travelMode: "TRANSIT",
+          languageCode: "en-US",
+          units: "METRIC",
+        },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": key,
+            "X-Goog-FieldMask": "routes.distanceMeters,routes.duration",
+          },
+          timeout: 8000,
+          validateStatus: (status) => status < 500,
+        },
+      );
+      const routes = Array.isArray(response.data?.routes) ? response.data.routes : [];
+      return {
+        success: response.status === 200 && routes.length > 0,
+        status: response.status,
+        routes_count: routes.length,
+        error: response.status >= 400 ? response.data?.error?.message || `Routes API returned HTTP ${response.status}` : undefined,
       };
     } catch (error) {
       return { success: false, error: error.message, code: error.code, status: error.response?.status };
@@ -201,6 +259,8 @@ export const networkTest = {
       { name: "groq", test: () => this.testGroqConnectivity() },
       { name: "openweather", test: () => this.testOpenWeather() },
       { name: "googleplaces", test: () => this.testGooglePlaces() },
+      { name: "googletimezone", test: () => this.testGoogleTimeZone() },
+      { name: "googleroutes", test: () => this.testGoogleRoutes() },
       { name: "news", test: () => this.testNewsAPI() },
       { name: "google", test: () => this.testGoogleMaps() },
     ];
@@ -284,7 +344,9 @@ export const networkTest = {
       environment: process.env.NODE_ENV || "development",
       api_keys_configured: {
         groq: !!process.env.GROQ_API_KEY && !process.env.GROQ_API_KEY.includes("your_"),
-        google: !!process.env.GOOGLE_API_KEY && !process.env.GOOGLE_API_KEY.includes("your_"),
+        google: !!process.env.GOOGLE_MAPS_SERVER_API_KEY && !process.env.GOOGLE_MAPS_SERVER_API_KEY.includes("your_"),
+        google_timezone: !!process.env.GOOGLE_MAPS_SERVER_API_KEY && !process.env.GOOGLE_MAPS_SERVER_API_KEY.includes("your_"),
+        google_routes: !!process.env.GOOGLE_MAPS_SERVER_API_KEY && !process.env.GOOGLE_MAPS_SERVER_API_KEY.includes("your_"),
         openweather: !!process.env.OPEN_WEATHER_KEY && !process.env.OPEN_WEATHER_KEY.includes("your_"),
         google_places: !!googlePlacesKey() && !googlePlacesKey().includes("your_"),
         news: !!process.env.NEWS_API_KEY && !process.env.NEWS_API_KEY.includes("your_"),
