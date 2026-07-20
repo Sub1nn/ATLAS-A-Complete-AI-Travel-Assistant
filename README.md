@@ -166,10 +166,8 @@ ATLAS-AI-Travel_Assistant/
 │   │   └── toolService.js
 │   │
 │   ├── utils/
-│   │   ├── fallbackResponses.js
 │   │   ├── locationUtils.js
 │   │   ├── networkTest.js
-│   │   ├── systemPrompts.js
 │   │   └── validation.js
 │   │
 │   ├── app.js
@@ -183,8 +181,7 @@ ATLAS-AI-Travel_Assistant/
 │   │   │   ├── auth/
 │   │   │   ├── chat/
 │   │   │   ├── features/
-│   │   │   ├── sidebar/
-│   │   │   └── ui/
+│   │   │   └── sidebar/
 │   │   │
 │   │   ├── hooks/
 │   │   │   ├── useAuth.js
@@ -194,8 +191,7 @@ ATLAS-AI-Travel_Assistant/
 │   │   │   └── api.js
 │   │   │
 │   │   ├── utils/
-│   │   │   ├── formatMessage.jsx
-│   │   │   └── toolIcons.js
+│   │   │   └── formatMessage.jsx
 │   │   │
 │   │   ├── App.jsx
 │   │   ├── main.jsx
@@ -331,17 +327,27 @@ GROQ_MODEL=llama-3.3-70b-versatile
 PINECONE_API_KEY=your_pinecone_api_key
 
 # Rate limiting
+ENFORCE_DEVELOPMENT_LIMITS=false
 RATE_LIMIT_WINDOW_MS=900000
 RATE_LIMIT_MAX_REQUESTS=100
 
 # Travel APIs
-GOOGLE_API_KEY=your_google_maps_or_places_key
-GOOGLE_MAPS_API_KEY=your_google_maps_or_places_key
-GOOGLE_PLACES_API_KEY=your_google_places_key
+GOOGLE_MAPS_SERVER_API_KEY=your_google_maps_platform_server_key
 OPEN_WEATHER_KEY=your_openweather_key
 NEWS_API_KEY=your_newsapi_key
 YELP_API_KEY=your_yelp_key
 ```
+
+Google Maps Platform endpoint mapping:
+
+- Backend geocoding uses `https://maps.googleapis.com/maps/api/geocode/json`.
+- Backend live venue discovery uses Places API (New) at `https://places.googleapis.com/v1/places:searchText`.
+- Backend route planning uses Routes API v2 at `https://routes.googleapis.com/directions/v2:computeRoutes`.
+- Backend local-time context uses `https://maps.googleapis.com/maps/api/timezone/json`.
+- Browser maps, if enabled, must use `VITE_GOOGLE_MAPS_API_KEY` only.
+- Do not expose `GOOGLE_MAPS_SERVER_API_KEY` through Vite or browser code.
+
+In `NODE_ENV=development`, ATLAS bypasses HTTP rate limits and daily chat/provider/LLM usage budgets by default so local testing can continue without exhausting app-level counters. Set `ENFORCE_DEVELOPMENT_LIMITS=true` if you want to test production-like throttling locally. Production keeps limits enabled.
 
 Create a `.env` file inside the `frontend/` directory.
 
