@@ -53,6 +53,17 @@ const tools = [
           location_name: { type: "string", description: "Human-readable location name" },
           budget_category: { type: "string", description: "Budget category, e.g. budget, cheap, mid-range, luxury" },
           stay_type: { type: "string", description: "Type of stay, e.g. hotel, hostel, guesthouse" },
+          preferred_area: { type: "string", description: "Requested area such as central or old town" },
+          check_in: { type: "string", description: "Check-in date in YYYY-MM-DD" },
+          check_out: { type: "string", description: "Check-out date in YYYY-MM-DD" },
+          adults: { type: ["number", "null"], description: "Number of adults" },
+          child_ages: { type: "array", items: { type: "number" }, description: "Child ages" },
+          room_quantity: { type: ["number", "null"], description: "Number of rooms" },
+          breakfast_preferred: { type: "boolean", description: "Whether breakfast is preferred" },
+          max_total_budget: { type: ["number", "null"], description: "Maximum full-stay budget" },
+          currency: { type: "string", description: "ISO currency code" },
+          accessible: { type: "boolean", description: "Whether step-free access is required" },
+          amenities: { type: "array", items: { type: "string" }, description: "Preferred amenities such as pool, gym or parking" },
         },
         required: ["lat", "lon", "location_name"],
       },
@@ -118,6 +129,9 @@ const tools = [
           origin: { type: "string", description: "Starting point or address" },
           destination: { type: "string", description: "Destination place or address" },
           mode: { type: "string", description: "Preferred mode: transit, walking, driving, bicycling" },
+          departure_time: { type: "string", description: "Requested local departure time in HH:mm" },
+          target_date: { type: "string", description: "Requested departure date in YYYY-MM-DD" },
+          date_label: { type: "string", description: "Original human-readable date phrase" },
         },
         required: ["origin", "destination"],
       },
@@ -407,6 +421,8 @@ function compactPlace(place = {}, locationName = "") {
     latitude: place.location?.latitude ?? place.geometry?.location?.lat ?? null,
     longitude: place.location?.longitude ?? place.geometry?.location?.lng ?? null,
     location_context: locationName,
+    accessibility: place.accessibilityOptions || null,
+    serves_vegetarian_food: typeof place.servesVegetarianFood === "boolean" ? place.servesVegetarianFood : null,
   };
 }
 
@@ -526,6 +542,7 @@ const SPORTS_ACTIVITY_PATTERNS = {
   bowling: /\b(bowling|keila)\b/,
   skating: /\b(skating|skate|rink|luistelu|jäähalli|jaahalli)\b/,
   running: /\b(running|jogging|track|athletics|urheilukentta|urheilukenttä)\b/,
+  sauna: /\b(sauna|saunas|saunakeskus|saunamaailma|löyly|loyly)\b/,
   sports: /\b(sport|sports|liikunta|urheilu|athletic|fitness|gym|hall|court|field|pitch|centre|center)\b/,
 };
 
@@ -609,6 +626,8 @@ const GOOGLE_PLACES_NEW_FIELD_MASK = [
   "places.businessStatus",
   "places.nationalPhoneNumber",
   "places.websiteUri",
+  "places.accessibilityOptions",
+  "places.servesVegetarianFood",
 ].join(",");
 
 function readablePlaceType(type = "") {
@@ -884,6 +903,12 @@ const ACTIVITY_SEARCH_CONFIG = {
     nearby: [{ type: "park", keyword: "running track" }, { type: "point_of_interest", keyword: "athletics track" }],
     yelp: { term: "running track", categories: "active" },
   },
+  sauna: {
+    display: "sauna",
+    terms: ["sauna", "indoor sauna", "public sauna", "private sauna", "quiet sauna"],
+    nearby: [{ type: "spa", keyword: "sauna" }, { type: "point_of_interest", keyword: "sauna" }],
+    yelp: { term: "sauna", categories: "saunas,spas" },
+  },
   sports: {
     display: "sports",
     terms: ["sports centre", "sports center", "sports hall", "public sports facilities", "municipal sports facilities"],
@@ -894,7 +919,7 @@ const ACTIVITY_SEARCH_CONFIG = {
 
 function activityKeyFromText(text = "") {
   const value = normalize(text);
-  const ordered = ["tennis", "badminton", "football", "basketball", "volleyball", "swimming", "gym", "padel", "pickleball", "squash", "golf", "climbing", "bowling", "skating", "running"];
+  const ordered = ["tennis", "badminton", "football", "basketball", "volleyball", "swimming", "gym", "padel", "pickleball", "squash", "golf", "climbing", "bowling", "skating", "running", "sauna"];
   for (const key of ordered) {
     if (key === "football" && /\b(football|soccer|futsal|pitch|soccer field)\b/.test(value)) return key;
     if (key === "swimming" && /\b(swimming|swim|pool|aquatic)\b/.test(value)) return key;
@@ -902,6 +927,7 @@ function activityKeyFromText(text = "") {
     if (key === "climbing" && /\b(climbing|bouldering)\b/.test(value)) return key;
     if (key === "skating" && /\b(skating|skate|ice skating|rink)\b/.test(value)) return key;
     if (key === "running" && /\b(running|jogging|track)\b/.test(value)) return key;
+    if (key === "sauna" && /\b(sauna|saunas|löyly|loyly)\b/.test(value)) return key;
     if (new RegExp(`\\b${key}\\b`).test(value)) return key;
   }
   if (/\b(court|courts)\b/.test(value)) return "tennis";
@@ -919,6 +945,7 @@ function localizedActivityTerms(activityKey, locationName = "") {
     if (activityKey === "badminton") add(["sulkapallokenttä", "sulkapallohalli", "liikuntahalli sulkapallo"]);
     if (activityKey === "football") add(["jalkapallokenttä", "futsal", "urheilukenttä"]);
     if (activityKey === "sports") add(["liikuntahalli", "urheilukeskus", "urheilupuisto", "liikuntapalvelut"]);
+    if (activityKey === "sauna") add(["sauna", "yleinen sauna", "sisäsauna", "saunakeskus"]);
   }
   if (/sweden|stockholm|gothenburg|goteborg|malmo/.test(loc)) {
     if (activityKey === "tennis") add(["tennisbana", "tennishall", "tennisklubb"]);
@@ -1002,7 +1029,21 @@ function activityPlan(interestType = "attractions", locationName = "", plannerQu
     return plan;
   }
 
-  if (/baby|family|child|kid|indoor|rain|stroller/.test(text)) {
+  for (const query of plannerQueries.filter(Boolean).slice(0, 5)) {
+    add({ mode: "text", query: /\bin\s+/i.test(query) ? query : `${query} in ${locationName}`, radius: 16000 });
+  }
+
+  if (/\b(accessible|accessibility|wheelchair|senior|minimal walking|limited walking)\b/.test(text)
+    || (/\b(indoor|rain)\b/.test(text) && /\b(museum|library|cultural|attraction)\b/.test(text))) {
+    add({ mode: "text", query: `accessible indoor museums in ${locationName}` });
+    add({ mode: "text", query: `accessible cultural attractions in ${locationName}` });
+    add({ mode: "text", query: `libraries in ${locationName}` });
+    add({ mode: "nearby", type: "museum" });
+    add({ mode: "nearby", type: "library" });
+    return plan;
+  }
+
+  if (/baby|family|child|kid|indoor playground|stroller/.test(text)) {
     add({ mode: "text", query: `indoor playground in ${locationName}` });
     add({ mode: "text", query: `family activities in ${locationName}` });
     add({ mode: "nearby", type: "museum" });
@@ -1021,6 +1062,14 @@ function activityPlan(interestType = "attractions", locationName = "", plannerQu
     add({ mode: "nearby", type: "zoo" });
     add({ mode: "text", query: `hiking trails near ${locationName}` });
     add({ mode: "text", query: `nature attractions near ${locationName}` });
+    return plan;
+  }
+
+  if (/\b(old town|historic centre|historic center)\b/.test(text)) {
+    add({ mode: "text", query: `old town landmarks in ${locationName}` });
+    add({ mode: "text", query: `museums in ${locationName}` });
+    add({ mode: "text", query: `historic attractions in ${locationName}` });
+    add({ mode: "nearby", type: "tourist_attraction", keyword: "historic old town" });
     return plan;
   }
 
@@ -1080,6 +1129,24 @@ function restaurantPlan(cuisine = "local traditional", locationName = "") {
     return plan;
   }
 
+  if (/street food|food stall|night market|cheap|budget/.test(text)) {
+    pushText(`street food in ${locationName}`);
+    pushText(`food markets in ${locationName}`);
+    pushText(`cheap local food in ${locationName}`);
+    plan.push({ mode: "yelp", term: `street food ${locationName}`, categories: "streetvendors,foodstands,foodtrucks" });
+    return plan;
+  }
+
+  if (/vegetarian|vegan|plant based|halal|kosher|gluten free|gluten-free/.test(text)) {
+    pushText(`${cuisine} restaurants in ${locationName}`);
+    if (/vegetarian|vegan|plant based/.test(text)) pushText(`vegetarian vegan restaurants in ${locationName}`);
+    if (/halal/.test(text)) pushText(`halal certified restaurants in ${locationName}`);
+    if (/kosher/.test(text)) pushText(`kosher restaurants in ${locationName}`);
+    if (/gluten free|gluten-free/.test(text)) pushText(`gluten free restaurants in ${locationName}`);
+    plan.push({ mode: "yelp", term: `${cuisine} restaurants ${locationName}`, categories: "vegetarian,vegan,restaurants" });
+    return plan;
+  }
+
   const keyword = text.includes("local") || text.includes("traditional") ? "traditional local" : cuisine;
   pushText(`${keyword} restaurants in ${locationName}`);
   pushNearby("restaurant", keyword);
@@ -1092,11 +1159,29 @@ function restaurantPlan(cuisine = "local traditional", locationName = "") {
   return plan;
 }
 
-function accommodationPlan(budget = "budget", stayType = "hotel", locationName = "") {
+function accommodationPlan(budget = "budget", stayType = "hotel", locationName = "", preferences = {}) {
   const text = normalize(`${budget} ${stayType}`);
   const plan = [];
   const pushText = (query) => plan.push({ mode: "text", query });
   const pushLodging = (keyword = "") => plan.push({ mode: "nearby", type: "lodging", keyword });
+  const area = normalize(preferences.preferred_area || "");
+  const areaPhrase = area ? `${preferences.preferred_area} ` : "";
+  const family = Number(preferences.adults || 0) > 0 && Array.isArray(preferences.child_ages) && preferences.child_ages.length > 0;
+  const preferenceTerms = [
+    preferences.accessible ? "wheelchair accessible step-free" : "",
+    ...(Array.isArray(preferences.amenities) ? preferences.amenities : []),
+  ].filter(Boolean).join(" ");
+
+  if (family) {
+    if (preferenceTerms) pushText(`${areaPhrase}family hotels ${preferenceTerms} in ${locationName}`);
+    pushText(`${areaPhrase}family hotels in ${locationName}`);
+    pushText(`${areaPhrase}hotels with family rooms in ${locationName}`);
+    pushText(`${areaPhrase}aparthotels in ${locationName}`);
+    if (preferences.breakfast_preferred) pushText(`${areaPhrase}family hotels with breakfast in ${locationName}`);
+    if (/cheap|budget|affordable|low cost|low-cost|\$/.test(text)) pushText(`${areaPhrase}budget family hotels in ${locationName}`);
+    pushLodging("family hotel");
+    return plan;
+  }
 
   if (/hostel|backpacker/.test(text)) {
     pushText(`hostels in ${locationName}`);
@@ -1135,6 +1220,16 @@ function accommodationPlan(budget = "budget", stayType = "hotel", locationName =
 
   pushLodging();
   return plan;
+}
+
+function distanceKm(lat1, lon1, lat2, lon2) {
+  const values = [lat1, lon1, lat2, lon2].map(Number);
+  if (values.some((value) => !Number.isFinite(value))) return null;
+  const [aLat, aLon, bLat, bLon] = values.map((value) => value * Math.PI / 180);
+  const dLat = bLat - aLat;
+  const dLon = bLon - aLon;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(aLat) * Math.cos(bLat) * Math.sin(dLon / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
 }
 
 function highEndHotelName(name = "") {
@@ -1374,6 +1469,18 @@ async function restaurantTool({ lat, lon, location_name, cuisine_preference = "l
   let restaurants = raw;
   const budget = normalize(budget_level);
   const cuisineText = normalize(cuisine_preference);
+  if (/\bvegetarian\b/.test(cuisineText)) {
+    restaurants = restaurants.filter((place) => (
+      place.servesVegetarianFood === true
+      || /\b(vegetarian|vegan|plant based|plant-based)\b/i.test(placeName(place))
+    ));
+  } else if (/\bvegan\b/.test(cuisineText)) {
+    restaurants = restaurants.filter((place) => /\b(vegan|plant based|plant-based)\b/i.test(placeName(place)));
+  } else if (/\bhalal\b/.test(cuisineText)) {
+    restaurants = restaurants.filter((place) => /\bhalal\b/i.test(placeName(place)));
+  } else if (/\bkosher\b/.test(cuisineText)) {
+    restaurants = restaurants.filter((place) => /\bkosher\b/i.test(placeName(place)));
+  }
   if (!/cafe|coffee|nightlife|bar|pub|club/.test(cuisineText)) {
     restaurants = restaurants.filter((place) => {
       const types = new Set((place.types || []).map(normalize));
@@ -1402,10 +1509,40 @@ async function restaurantTool({ lat, lon, location_name, cuisine_preference = "l
   };
 }
 
-async function accommodationTool({ lat, lon, location_name, budget_category = "budget", stay_type = "hotel" }) {
+async function accommodationTool({
+  lat,
+  lon,
+  location_name,
+  budget_category = "budget",
+  stay_type = "hotel",
+  preferred_area = "",
+  check_in = "",
+  check_out = "",
+  adults = null,
+  child_ages = [],
+  room_quantity = null,
+  breakfast_preferred = false,
+  max_total_budget = null,
+  currency = "",
+  accessible = false,
+  amenities = [],
+}) {
   const latitude = toNumber(lat, "lat");
   const longitude = toNumber(lon, "lon");
-  const plan = accommodationPlan(budget_category, stay_type, location_name);
+  const preferences = {
+    preferred_area,
+    check_in,
+    check_out,
+    adults,
+    child_ages: Array.isArray(child_ages) ? child_ages : [],
+    room_quantity,
+    breakfast_preferred,
+    max_total_budget,
+    currency,
+    accessible: Boolean(accessible),
+    amenities: Array.isArray(amenities) ? amenities : [],
+  };
+  const plan = accommodationPlan(budget_category, stay_type, location_name, preferences);
   const { raw, used_queries, errors } = await runPlaceSearchPlan(plan, latitude, longitude, location_name, 6);
 
   if (!raw.length) {
@@ -1423,18 +1560,39 @@ async function accommodationTool({ lat, lon, location_name, budget_category = "b
     };
   }
 
-  const ranked = filterAndRankAccommodation(raw, budget_category);
+  const centralFocus = /\b(central|city centre|city center|historic centre|historic center|old town)\b/i.test(preferred_area);
+  const maxDistanceKm = centralFocus ? 5 : 25;
+  const spatiallyRelevant = raw.filter((place) => {
+    const placeLat = place.location?.latitude ?? place.geometry?.location?.lat;
+    const placeLon = place.location?.longitude ?? place.geometry?.location?.lng;
+    const distance = distanceKm(latitude, longitude, placeLat, placeLon);
+    return distance == null || distance <= maxDistanceKm;
+  });
+  const ranked = filterAndRankAccommodation(spatiallyRelevant, budget_category);
   return {
     location: location_name,
     accommodation_type: stay_type,
     budget_range: budget_category,
     properties: ranked.map((place) => compactPlace(place, location_name)),
-    search_actions: accommodationPlan(budget_category, stay_type, location_name)
+    search_actions: accommodationPlan(budget_category, stay_type, location_name, preferences)
       .filter((step) => step.mode === "text")
       .slice(0, 5)
       .map((step) => mapsSearchAction(conciseSearchLabel(step.query.replace(new RegExp(`\\s+in\\s+${location_name.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}$`, "i"), "")), step.query, "stay")),
     booking_insights: "ATLAS can verify property discovery details, but not guaranteed live booking prices. Confirm exact nightly rates, taxes and availability on booking platforms or property websites.",
     data_quality: dataNote("verified", "ATLAS verified accommodation names and ratings; live room prices and availability were not available.", { source: "google_places_new", live_prices_available: false }),
+    request_scope: {
+      check_in: check_in || null,
+      check_out: check_out || null,
+      adults: Number(adults) || null,
+      child_ages: preferences.child_ages,
+      room_quantity: Number(room_quantity) || null,
+      breakfast_preferred: Boolean(breakfast_preferred),
+      max_total_budget: Number(max_total_budget) || null,
+      currency: currency || null,
+      preferred_area: preferred_area || null,
+      accessible: Boolean(accessible),
+      amenities: preferences.amenities,
+    },
     search_metadata: { total_found: ranked.length, used_queries, source: "google_places_new" },
   };
 }
@@ -1454,8 +1612,24 @@ async function attractionsTool({ lat, lon, location_name, interest_type = "attra
     };
   }
 
-  const isSportsRequest = /tennis|court|sports|badminton|football|soccer|basketball|volleyball|swimming|gym|fitness|padel|pickleball|squash|golf|climbing|bowling|skating|running/.test(normalize(interest_type));
-  const rankedPlaces = isSportsRequest ? rankSportsPlaces(raw, interest_type) : rankAttractionPlaces(raw);
+  const normalizedInterest = normalize(interest_type);
+  const isSportsRequest = /tennis|court|sports|badminton|football|soccer|basketball|volleyball|swimming|gym|fitness|padel|pickleball|squash|golf|climbing|bowling|skating|running|sauna/.test(normalizedInterest);
+  const needsIndoorEvidence = /\bindoor\b/.test(normalizedInterest);
+  const needsCompactArea = /\b(minimal walking|limited walking|compact)\b/.test(normalizedInterest);
+  const compactCandidates = needsCompactArea
+    ? raw.filter((place) => {
+        const placeLat = place.location?.latitude ?? place.geometry?.location?.lat;
+        const placeLon = place.location?.longitude ?? place.geometry?.location?.lng;
+        const distance = distanceKm(latitude, longitude, placeLat, placeLon);
+        return distance == null || distance <= 1.75;
+      })
+    : raw;
+  const spatialPool = compactCandidates.length ? compactCandidates : raw;
+  const indoorCandidates = needsIndoorEvidence
+    ? spatialPool.filter((place) => /\b(museum|library|art gallery|art_gallery|shopping mall|shopping_mall)\b/.test(placeSearchText(place)))
+    : [];
+  const rankingPool = indoorCandidates.length ? indoorCandidates : spatialPool;
+  const rankedPlaces = isSportsRequest ? rankSportsPlaces(rankingPool, interest_type) : rankAttractionPlaces(rankingPool);
   if (!rankedPlaces.length && isSportsRequest) {
     const suggestions = planner_map_searches.length ? planner_map_searches : activitySpecificSuggestions(interest_type, location_name);
     return {
@@ -1537,6 +1711,10 @@ function compactRouteLeg(route = {}, origin = "", destination = "") {
       is_transit: Boolean(step.transitDetails || step.travelMode === "TRANSIT"),
     };
   }).filter((step) => step.instruction);
+  const transitStepCount = steps.filter((step) => step.is_transit).length;
+  const walkingMeters = (leg.steps || [])
+    .filter((step) => step.travelMode === "WALK")
+    .reduce((sum, step) => sum + Number(step.distanceMeters || 0), 0);
 
   return {
     summary: route.description || "Suggested route",
@@ -1545,11 +1723,105 @@ function compactRouteLeg(route = {}, origin = "", destination = "") {
     start_address: origin,
     end_address: destination,
     steps: steps.slice(0, 12),
-    transit_step_count: steps.filter((step) => step.is_transit).length,
+    transit_step_count: transitStepCount,
+    transfer_count: Math.max(0, transitStepCount - 1),
+    walking_distance: walkingMeters ? distanceText(walkingMeters) : "",
   };
 }
 
-async function routeTool({ origin, destination, mode = "transit" }) {
+function stripHtml(value = "") {
+  return String(value || "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function compactLegacyRoute(route = {}, origin = "", destination = "") {
+  const leg = route.legs?.[0] || {};
+  const steps = (leg.steps || []).map((step) => {
+    const transit = step.transit_details || null;
+    const line = transit?.line?.short_name || transit?.line?.name || "";
+    const headsign = transit?.headsign ? ` toward ${transit.headsign}` : "";
+    const instruction = transit
+      ? `Take ${line || transit.line?.vehicle?.name || "transit"}${headsign} from ${transit.departure_stop?.name || "the departure stop"} to ${transit.arrival_stop?.name || "the arrival stop"}`
+      : stripHtml(step.html_instructions);
+    return {
+      instruction,
+      distance: step.distance?.text || distanceText(step.distance?.value),
+      duration: step.duration?.text || durationText(`${Number(step.duration?.value || 0)}s`),
+      travel_mode: step.travel_mode || "",
+      transit_line: line,
+      is_transit: Boolean(transit || step.travel_mode === "TRANSIT"),
+    };
+  }).filter((step) => step.instruction);
+  const transitStepCount = steps.filter((step) => step.is_transit).length;
+  const walkingMeters = (leg.steps || [])
+    .filter((step) => step.travel_mode === "WALKING")
+    .reduce((sum, step) => sum + Number(step.distance?.value || 0), 0);
+  return {
+    summary: route.summary || "Suggested public-transport route",
+    distance: leg.distance?.text || "distance unavailable",
+    duration: leg.duration?.text || "duration unavailable",
+    start_address: leg.start_address || origin,
+    end_address: leg.end_address || destination,
+    departure_time: leg.departure_time?.text || "",
+    arrival_time: leg.arrival_time?.text || "",
+    fare: route.fare?.text || "",
+    walking_distance: walkingMeters ? distanceText(walkingMeters) : "",
+    transfer_count: Math.max(0, transitStepCount - 1),
+    steps: steps.slice(0, 12),
+    transit_step_count: transitStepCount,
+  };
+}
+
+async function routeDepartureEpoch(origin = "", targetDate = "", departureTime = "") {
+  if (!targetDate) return null;
+  const time = /^\d{2}:\d{2}$/.test(departureTime) ? departureTime : "12:00";
+  const naiveUtc = Math.floor(new Date(`${targetDate}T${time}:00Z`).getTime() / 1000);
+  if (!Number.isFinite(naiveUtc)) return null;
+  try {
+    const location = await getLocationData(origin);
+    const timezone = await googleTimeZone({ lat: location.lat, lon: location.lon, timestampSeconds: naiveUtc });
+    const offset = Number(timezone?.raw_offset_seconds || 0) + Number(timezone?.dst_offset_seconds || 0);
+    return naiveUtc - offset;
+  } catch (error) {
+    logger.debug("Route departure timezone fallback", { reason: error.message });
+    return naiveUtc;
+  }
+}
+
+async function legacyDirectionsRoute({ from, to, travelMode, departureEpoch, key }) {
+  const params = {
+    origin: from,
+    destination: to,
+    mode: travelMode,
+    alternatives: true,
+    language: "en",
+    units: "metric",
+    key,
+  };
+  if (departureEpoch && ["transit", "driving"].includes(travelMode)) params.departure_time = departureEpoch;
+  const data = await withRetry(
+    () => httpGet("https://maps.googleapis.com/maps/api/directions/json", params, "directions"),
+    "directions",
+  );
+  if (data?.status !== "OK") return { routes: [], status: data?.status || "UNKNOWN_ERROR" };
+  return {
+    routes: (data.routes || []).slice(0, 3).map((route) => compactLegacyRoute(route, from, to)),
+    status: "OK",
+  };
+}
+
+async function routeTool({
+  origin,
+  destination,
+  mode = "transit",
+  departure_time = "",
+  target_date = "",
+  date_label = "",
+}) {
   const from = String(origin || "").trim();
   const to = String(destination || "").trim();
   if (!from || !to) {
@@ -1568,6 +1840,7 @@ async function routeTool({ origin, destination, mode = "transit" }) {
   const displayMode = /train/.test(requestedMode) ? "train" : travelMode;
   const mapUrl = mapsDirectionsUrl(from, to, travelMode);
   const key = googlePlacesKey();
+  const departureEpoch = await routeDepartureEpoch(from, target_date, departure_time);
 
   if (!key) {
     return {
@@ -1601,34 +1874,72 @@ async function routeTool({ origin, destination, mode = "transit" }) {
       "routes.legs.steps.transitDetails.localizedValues.arrivalTime.time.text",
       "routes.legs.steps.transitDetails.localizedValues.departureTime.time.text",
     ].join(",");
+    const routeBody = {
+      origin: { address: from },
+      destination: { address: to },
+      travelMode: routeMode,
+      computeAlternativeRoutes: routeMode !== "TRANSIT",
+      languageCode: "en-US",
+      units: "METRIC",
+    };
+    if (departureEpoch && ["TRANSIT", "DRIVE"].includes(routeMode)) {
+      routeBody.departureTime = new Date(departureEpoch * 1000).toISOString();
+    }
     const data = await withRetry(
       () => httpPost(
         "https://routes.googleapis.com/directions/v2:computeRoutes",
-        {
-          origin: { address: from },
-          destination: { address: to },
-          travelMode: routeMode,
-          computeAlternativeRoutes: routeMode !== "TRANSIT",
-          languageCode: "en-US",
-          units: "METRIC",
-        },
+        routeBody,
         { "Content-Type": "application/json", "X-Goog-Api-Key": key, "X-Goog-FieldMask": fieldMask },
         "directions",
       ),
       "directions"
     );
 
-    const routes = (data.routes || []).slice(0, 3).map((route) => compactRouteLeg(route, from, to));
+    let routes = (data.routes || []).slice(0, 3).map((route) => compactRouteLeg(route, from, to));
+    let routeSource = "google_routes_api_v2";
+    if (!routes.length && travelMode === "transit") {
+      const legacy = await legacyDirectionsRoute({ from, to, travelMode, departureEpoch, key });
+      routes = legacy.routes;
+      if (routes.length) routeSource = "google_directions_api_legacy_fallback";
+    }
     return {
       origin: from,
       destination: to,
       mode: displayMode,
+      requested_departure: {
+        date: target_date || null,
+        time: departure_time || null,
+        label: date_label || null,
+      },
       routes,
       search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${from} → ${to}`, url: mapUrl, is_search: true }],
-      data_quality: dataNote(routes.length ? "verified" : "limited", routes.length ? "ATLAS verified route distance and duration. Exact live traffic and disruptions should still be checked before leaving." : "ATLAS could not verify a route for this request; use the Maps link and adjust origin, destination or mode.", { source: "google_routes_api_v2" }),
+      data_quality: dataNote(routes.length ? "verified" : "limited", routes.length ? "ATLAS verified route distance and duration. Exact live traffic and disruptions should still be checked before leaving." : "ATLAS could not verify a route for this request; use the Maps link and adjust origin, destination or mode.", { source: routeSource }),
       practical_tips: ["Check live traffic, transit disruptions and last departure times before leaving.", "For tourist trips, save the route offline or screenshot key steps."],
     };
   } catch (error) {
+    if (travelMode === "transit") {
+      try {
+        const legacy = await legacyDirectionsRoute({ from, to, travelMode, departureEpoch, key });
+        if (legacy.routes.length) {
+          return {
+            origin: from,
+            destination: to,
+            mode: displayMode,
+            requested_departure: {
+              date: target_date || null,
+              time: departure_time || null,
+              label: date_label || null,
+            },
+            routes: legacy.routes,
+            search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${from} → ${to}`, url: mapUrl, is_search: true }],
+            data_quality: dataNote("verified", "ATLAS verified this transit route using the enabled Google Directions service after the primary route service returned no usable result.", { source: "google_directions_api_legacy_fallback" }),
+            practical_tips: ["Check live departures, disruptions and platform information before leaving.", "For airport travel, keep extra time for immigration, baggage and finding the correct platform."],
+          };
+        }
+      } catch (legacyError) {
+        logger.debug("Legacy transit route fallback failed", { reason: legacyError.message });
+      }
+    }
     return {
       origin: from,
       destination: to,
@@ -2137,5 +2448,20 @@ export const toolService = {
     }
   },
 
-  _test: { yelpHeaders, newsCoverageFromArticles, calculateSafetyCaution, isRelevantNewsArticle, officialAdvisoryLinks, fetchGovUkTravelAdvisory, compactRouteLeg, isLowValueAttractionPlace, shouldRecordProviderFailure, assertCircuitClosed, recordProviderFailure, recordProviderSuccess },
+  _test: {
+    yelpHeaders,
+    newsCoverageFromArticles,
+    calculateSafetyCaution,
+    isRelevantNewsArticle,
+    officialAdvisoryLinks,
+    fetchGovUkTravelAdvisory,
+    compactRouteLeg,
+    isLowValueAttractionPlace,
+    shouldRecordProviderFailure,
+    assertCircuitClosed,
+    recordProviderFailure,
+    recordProviderSuccess,
+    restaurantPlan,
+    activityPlan,
+  },
 };

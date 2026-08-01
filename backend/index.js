@@ -13,6 +13,7 @@ import { closeDatabase, connectDatabase } from "./db/mongoose.js";
 import { closeCache, initializeCache } from "./services/cacheService.js";
 import { closeRateLimitStore } from "./config/rateLimiter.js";
 import { logger } from "./utils/logger.js";
+import { initializeAtlasGraph } from "./agents/atlasGraph.js";
 
 const PORT = process.env.PORT || 4000;
 let server;
@@ -45,6 +46,7 @@ process.on("unhandledRejection", (reason) => {
 
 assertProductionEnvironment();
 await connectDatabase();
+await initializeAtlasGraph();
 await initializeCache();
 
 server = app.listen(PORT, () => {

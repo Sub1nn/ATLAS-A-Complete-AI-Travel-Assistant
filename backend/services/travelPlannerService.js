@@ -1,6 +1,9 @@
 import axios from "axios";
+import { ChatGroq } from "@langchain/groq";
+import { z } from "zod";
 import { contextService } from "./contextService.js";
 import { logger } from "../utils/logger.js";
+import { runWithoutAutomaticTracing } from "../agents/monitoring/atlasTracing.js";
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const MODEL = process.env.GROQ_PLANNER_MODEL || process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
@@ -18,8 +21,31 @@ const ALLOWED_INTENTS = new Set([
   "document_chat",
 ]);
 
+const TravelPlanSchema = z.object({
+  intent: z.enum([...ALLOWED_INTENTS]),
+  confidence: z.number().min(0).max(1),
+  destination: z.string().default(""),
+  location_scope: z.enum(["city", "country", "region", "unknown"]).default("unknown"),
+  activity: z.string().default(""),
+  date_text: z.string().default(""),
+  target_date: z.string().default(""),
+  route: z.object({
+    origin: z.string().default(""),
+    destination: z.string().default(""),
+    mode: z.string().default("transit"),
+  }).nullable().default(null),
+  required_tools: z.array(z.string()).max(7).default([]),
+  place_search_queries: z.array(z.string()).max(10).default([]),
+  map_searches: z.array(z.string()).max(8).default([]),
+  answer_style: z.string().default("destination_overview"),
+});
+
 function plannerEnabled() {
   return Boolean(process.env.GROQ_API_KEY) && process.env.ATLAS_LLM_PLANNER_ENABLED !== "false";
+}
+
+function langChainPlannerEnabled() {
+  return process.env.ATLAS_LANGCHAIN_PLANNER_ENABLED === "true";
 }
 
 function cleanString(value = "", max = 120) {
@@ -78,7 +104,7 @@ export async function createTravelPlan({ message = "", memory = {}, previousMess
   const history = previousMessages.slice(-6).map((m) => ({ role: m.role, content: String(m.content || "").slice(0, 420) }));
   const today = new Date().toISOString().slice(0, 10);
 
-  const system = `You are ATLAS's travel intent planner. Return only compact JSON. Your job is not to answer the user. Extract intent, location, activity, date, budget, place category and tool needs for a travel assistant. Resolve relative dates using today's UTC date ${today}. Never invent venue names. Use place_search_queries for Google Places/Maps searches whenever the user asks for venues, sports, attractions, restaurants, cafes, bars, nightlife, hotels, motels, lodges, hostels, routes or local activities. Safety-sensitive travel plans should request news plus official-advisory style caution, but never mark a place as 100% safe just because news is quiet.`;
+  const system = `You are ATLAS's travel intent planner. Return only compact JSON. Your job is not to answer the user. Extract intent, location, activity, date, budget, place category and tool needs for a travel assistant. Resolve relative dates using today's UTC date ${today}. Never invent venue names. Treat exclusions and negative preferences such as "do not", "without", "avoid" and "dislike" as constraints, never as requested tools or interests. Clock ranges such as "from 10:30 to 18:00" are itinerary times, not route endpoints. A pool, gym or spa mentioned in a hotel request is an amenity and must not replace accommodation_search. Multi-day trips, day plans and requests for several bases remain destination_planning even when they mention food, hotels or activities. Use place_search_queries for Google Places/Maps searches whenever the user asks for venues, sports, attractions, restaurants, cafes, bars, nightlife, hotels, motels, lodges, hostels, routes or local activities. Safety-sensitive travel plans should request news plus official-advisory style caution, but never mark a place as 100% safe just because news is quiet.`;
   const user = JSON.stringify({
     message,
     memory: {
@@ -107,6 +133,34 @@ export async function createTravelPlan({ message = "", memory = {}, previousMess
   });
 
   try {
+    if (langChainPlannerEnabled()) {
+      const model = new ChatGroq({
+        apiKey: process.env.GROQ_API_KEY,
+        model: MODEL,
+        temperature: 0,
+        maxTokens: 650,
+        maxRetries: 0,
+        timeout: 7000,
+      });
+      const structuredPlanner = model.withStructuredOutput(
+        TravelPlanSchema,
+        { name: "atlas_travel_plan", method: "functionCalling" },
+      );
+      const plan = await runWithoutAutomaticTracing(() => structuredPlanner.invoke(
+        [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        {
+          signal,
+          callbacks: [],
+          tags: ["atlas", "planner", "langchain"],
+          metadata: { operation: "travel_planning", graphVersion: "travel-orchestrator-v2" },
+        },
+      ));
+      return sanitizePlan(plan);
+    }
+
     const response = await axios.post(
       GROQ_URL,
       {
@@ -148,8 +202,23 @@ export function applyTravelPlan(resolved = {}, plan = null) {
     && /\b(budget|cheap|affordable|low[-\s]?cost|vegetarian|vegan|halal|kosher|gluten[-\s]?free|dietary|no meat|plant[-\s]?based)\b/i.test(String(resolved.enrichedUserMessage || ""));
   const keepItineraryDestinationIntent = resolved.intent?.type === "destination_planning"
     && Boolean(resolved.destination || resolved.memory?.destination)
-    && /\b(plan|itinerary|one[-\s]?day|1[-\s]?day|day plan|morning|lunch|afternoon|stay base|base area)\b/i.test(String(resolved.enrichedUserMessage || ""));
-  const keepDestinationIntent = keepLocationOnlyDestinationIntent || keepRefinementDestinationIntent || keepItineraryDestinationIntent;
+    && /\b(plan|itinerary|one[-\s]?day|1[-\s]?day|day plan|whole day|same requirements|morning|lunch|afternoon|evening|start after|replace|focus (?:on|around)|stay base|base area)\b/i.test(String(resolved.enrichedUserMessage || ""));
+  const keepHighConfidenceDeterministicIntent = Number(resolved.intent?.confidence || 0) >= 0.9
+    && [
+      "route_planning",
+      "weather_inquiry",
+      "accommodation_search",
+      "dining_recommendations",
+      "safety_inquiry",
+      "activity_recommendations",
+      "travel_logistics",
+    ].includes(resolved.intent?.type);
+  const keepDestinationIntent = keepLocationOnlyDestinationIntent
+    || keepRefinementDestinationIntent
+    || keepItineraryDestinationIntent
+    || keepHighConfidenceDeterministicIntent;
+  const keepExplicitDestination = Boolean(resolved.destination && resolved.locations?.length)
+    && !contextSwitchPrompt;
 
   const next = {
     ...resolved,
@@ -162,8 +231,15 @@ export function applyTravelPlan(resolved = {}, plan = null) {
     next.intent = { ...next.intent, type: plan.intent, plannerConfidence: plan.confidence };
   }
 
-  if (plan.destination && !keepLocationOnlyDestinationIntent) {
-    const cleanedDestination = cleanDestination(plan.destination);
+  const cleanedPlanDestination = plan.destination ? cleanDestination(plan.destination) : "";
+  const plannerConfirmsExplicitDestination = cleanedPlanDestination
+    && contextService.normalize(cleanedPlanDestination) === contextService.normalize(resolved.destination || "");
+  if (
+    plan.destination
+    && !keepLocationOnlyDestinationIntent
+    && (!keepExplicitDestination || plannerConfirmsExplicitDestination)
+  ) {
+    const cleanedDestination = cleanedPlanDestination;
     next.destination = contextService.canonicalDestination(cleanedDestination || plan.destination);
     next.locationScope = plan.location_scope === "country" ? "country" : plan.location_scope === "region" ? "region" : "city";
     const contextSwitch = contextSwitchPrompt || next.locationScope === "country";
@@ -202,8 +278,7 @@ export function applyTravelPlan(resolved = {}, plan = null) {
     const route = deterministicRoute?.origin && deterministicRoute?.destination
       ? {
           ...plan.route,
-          origin: deterministicRoute.origin,
-          destination: deterministicRoute.destination,
+          ...deterministicRoute,
           mode: deterministicRoute.mode || plan.route.mode || "transit",
         }
       : plan.route;
@@ -214,4 +289,9 @@ export function applyTravelPlan(resolved = {}, plan = null) {
   return next;
 }
 
-export const travelPlannerService = { createTravelPlan, applyTravelPlan, isEnabled: plannerEnabled };
+export const travelPlannerService = {
+  createTravelPlan,
+  applyTravelPlan,
+  isEnabled: plannerEnabled,
+  isLangChainEnabled: langChainPlannerEnabled,
+};

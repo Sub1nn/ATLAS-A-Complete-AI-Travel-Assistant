@@ -9,6 +9,7 @@ import { User } from "../models/User.js";
 import { documentDeletionService } from "../services/documentDeletionService.js";
 import { assertProductionEnvironment } from "../utils/security.js";
 import { storageUsageService } from "../services/storageUsageService.js";
+import { deleteAtlasUserThreads } from "../agents/atlasGraph.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
@@ -51,6 +52,8 @@ try {
     const activeIds = conversationStats.map((item) => item._id);
     const emptyConversationFilter = { userId: user._id, updatedAt: { $lt: cutoff } };
     if (activeIds.length) emptyConversationFilter._id = { $nin: activeIds };
+    const expiringConversations = await Conversation.find(emptyConversationFilter).select("_id").lean();
+    await deleteAtlasUserThreads(user._id, expiringConversations.map((conversation) => conversation._id));
     const deletedConversations = await Conversation.deleteMany(emptyConversationFilter);
     summary.conversations += deletedConversations.deletedCount || 0;
     await storageUsageService.reconcile(user._id);

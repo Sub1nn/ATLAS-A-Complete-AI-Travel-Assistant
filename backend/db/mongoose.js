@@ -42,7 +42,7 @@ export async function connectDatabase() {
 }
 
 export function databaseReady() {
-  return isConnected && mongoose.connection.readyState === 1;
+  return mongoose.connection.readyState === 1;
 }
 
 export async function closeDatabase() {

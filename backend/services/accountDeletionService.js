@@ -16,6 +16,7 @@ import { vectorStore } from "./vectorStore.js";
 import { logger } from "../utils/logger.js";
 import { emailService } from "./emailService.js";
 import { reportOperationalError } from "./errorReporter.js";
+import { deleteAtlasUserThreads } from "../agents/atlasGraph.js";
 
 const leaseMs = () => Math.max(60000, Number(process.env.ACCOUNT_DELETION_LEASE_MS || 10 * 60 * 1000));
 const maxAttempts = () => Math.max(1, Number(process.env.ACCOUNT_DELETION_MAX_ATTEMPTS || 20));
@@ -123,6 +124,10 @@ async function processNext() {
       { userId: job.userId },
       { $unset: { processingLeaseUntil: "", processingOwner: "" } },
     );
+
+    const conversations = await Conversation.find({ userId: job.userId }).select("_id").lean();
+    const graphDeletion = await deleteAtlasUserThreads(job.userId, conversations.map((conversation) => conversation._id));
+    if (!graphDeletion.deleted) throw new Error(`Agent checkpoint deletion failed: ${graphDeletion.reason || "unknown error"}`);
 
     if (vectorStore.isConfigured()) {
       const remote = await vectorStore.deleteUserNamespace(job.userId);
