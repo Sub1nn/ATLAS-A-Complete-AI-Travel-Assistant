@@ -322,6 +322,20 @@ TERMS_VERSION=2026-06-22
 # LLM provider
 GROQ_API_KEY=your_groq_api_key
 GROQ_MODEL=llama-3.3-70b-versatile
+ATLAS_LANGCHAIN_PLANNER_ENABLED=false
+ATLAS_LANGCHAIN_RESPONSE_ENABLED=false
+
+# Agent workflow rollout and sanitized tracing
+ATLAS_AGENT_SHADOW_MODE=false
+ATLAS_AGENT_GRAPH_ENABLED=false
+ATLAS_AGENT_CANARY_PERCENT=0
+ATLAS_AGENT_FALLBACK_ENABLED=true
+ATLAS_AGENT_REQUEST_TIMEOUT_MS=60000
+LANGSMITH_TRACING=false
+LANGSMITH_API_KEY=
+LANGSMITH_PROJECT=atlas-travel-assistant
+LANGSMITH_WORKSPACE_ID=
+LANGSMITH_TRACING_SAMPLING_RATE=0.1
 
 # Optional vector database placeholder
 PINECONE_API_KEY=your_pinecone_api_key
@@ -348,6 +362,31 @@ Google Maps Platform endpoint mapping:
 - Do not expose `GOOGLE_MAPS_SERVER_API_KEY` through Vite or browser code.
 
 In `NODE_ENV=development`, ATLAS bypasses HTTP rate limits and daily chat/provider/LLM usage budgets by default so local testing can continue without exhausting app-level counters. Set `ENFORCE_DEVELOPMENT_LIMITS=true` if you want to test production-like throttling locally. Production keeps limits enabled.
+
+### Agent workflow rollout
+
+ATLAS has two LangGraph workflows:
+
+- `ATLAS_AGENT_SHADOW_MODE=true` runs a compact context graph beside the legacy pipeline. It evaluates destination switches and multi-destination handling without changing the answer.
+- `ATLAS_AGENT_GRAPH_ENABLED=true` enables the authoritative travel orchestrator. It owns context resolution, structured planning, document retrieval, bounded tool routing, evidence collection, response composition, verification, quality assessment and one bounded repair pass.
+
+Use `ATLAS_AGENT_CANARY_PERCENT` to assign a deterministic percentage of users to the authoritative graph. Keep `ATLAS_AGENT_FALLBACK_ENABLED=true` during rollout so any graph timeout or failure returns through the proven legacy pipeline. A production canary must use a percentage above zero and cannot disable fallback.
+
+LangGraph checkpoints use MongoDB and expire after `ATLAS_AGENT_CHECKPOINT_TTL_SECONDS`. Conversation reset, conversation deletion, retention and account deletion also remove matching checkpoints. Development and tests can fall back to in-memory checkpoints if MongoDB is unavailable; production cannot.
+
+Only the compact shadow graph is checkpointed. The authoritative graph is deliberately transient so provider responses, Places content, document excerpts and guest inputs are not copied into graph storage.
+
+LangSmith tracing is optional. Enable it with `LANGSMITH_TRACING=true` and store `LANGSMITH_API_KEY` in the deployment secret manager. Set `LANGSMITH_WORKSPACE_ID` when the LangSmith account uses multiple workspaces. ATLAS checks the credentials once, disables tracing if they are rejected, and continues serving chat. The application turns off LangChain's automatic raw-run tracing and emits only its own sanitized structural metrics; prompts, answers, documents and credentials are excluded. Use a low production sampling rate and configure retention according to the privacy policy.
+
+`ATLAS_LANGCHAIN_PLANNER_ENABLED` selects the LangChain `ChatGroq` structured planner. `ATLAS_LANGCHAIN_RESPONSE_ENABLED` enables schema-controlled composition for complex or document-focused requests. Exact live-data renderers remain deterministic. Complex itineraries use a stricter evidence contract: model-selected venues are checked against the current request's live evidence before rendering.
+
+Recommended rollout:
+
+1. Run shadow mode and compare context-switch metrics.
+2. Enable both LangChain flags for internal development evaluation.
+3. Start the authoritative graph at a small production canary percentage.
+4. Compare intent accuracy, fallback rate, quality score, latency and provider cost in LangSmith.
+5. Increase the canary only after multi-turn and provider-failure acceptance scenarios pass.
 
 Create a `.env` file inside the `frontend/` directory.
 
@@ -652,6 +691,9 @@ Before deploying this application publicly, review the following:
 - Alert when `/health/ready` reports missing workers, old queues, or deletion dead letters
 - Use the metrics-token-protected `/internal/deletion-dead-letters` endpoint and retry endpoints to recover exhausted account or document deletions
 - Configure global provider/LLM budgets and billing alerts in the provider consoles
+- Run LangGraph in shadow mode before enabling authoritative orchestration
+- Store `LANGSMITH_API_KEY` in the deployment secret manager and sample production traces
+- Review LangSmith retention and deletion settings as part of the privacy assessment
 - Use a MongoDB replica set with `MONGODB_TRANSACTIONS=true`
 - Terminate HTTPS at the hosting load balancer or reverse proxy
 
