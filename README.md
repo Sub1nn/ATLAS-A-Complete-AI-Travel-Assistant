@@ -310,7 +310,7 @@ PORT=4000
 CORS_ORIGIN=http://localhost:5173
 
 # Database
-MONGODB_URI=mongodb://localhost:27017/atlas_travel
+MONGODB_URI=mongodb://127.0.0.1:27017/atlas_travel?replicaSet=rs0&directConnection=true
 
 # Authentication
 JWT_SECRET=change_this_to_a_long_random_secret
@@ -524,7 +524,7 @@ http://localhost:4000
 MongoDB:
 
 ```text
-mongodb://localhost:27017/atlas_travel
+mongodb://127.0.0.1:27017/atlas_travel?replicaSet=rs0&directConnection=true
 ```
 
 ### Stop containers
