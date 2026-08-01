@@ -22,9 +22,9 @@ const MessageList = ({
       onScroll={onScroll}
       className="h-full overflow-y-auto scroll-smooth"
     >
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-5 py-8 pb-32 sm:px-6 lg:px-8">
+      <div className="mx-auto flex w-full max-w-4xl flex-col gap-7 px-4 py-8 pb-24 sm:gap-9 sm:px-8 sm:py-10">
         {hasOlderMessages && (
-          <button type="button" onClick={onLoadOlderMessages} className="mx-auto rounded-xl border border-slate-700 px-4 py-2 text-sm text-sky-300 hover:bg-slate-900">
+          <button type="button" onClick={onLoadOlderMessages} className="mx-auto rounded-lg border border-[#3a3c3a] bg-[#202220] px-4 py-2 text-xs text-[#a9d0ba] hover:bg-[#292b29]">
             Load older messages
           </button>
         )}

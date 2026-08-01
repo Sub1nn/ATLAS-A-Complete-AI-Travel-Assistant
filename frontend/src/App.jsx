@@ -24,10 +24,10 @@ function App() {
 
   if (isCheckingAuth) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-300">
-        <div className="rounded-3xl border border-slate-800 bg-slate-900/70 px-6 py-5 shadow-2xl shadow-black/30">
-          <p className="text-sm font-medium text-slate-200">Loading ATLAS...</p>
-          <p className="mt-1 text-xs text-slate-500">Checking your session</p>
+      <div className="flex min-h-screen items-center justify-center bg-[#171817] text-[#bfc1bb]">
+        <div className="rounded-xl border border-[#3a3c3a] bg-[#222422] px-6 py-5 shadow-lg shadow-black/20">
+          <p className="text-sm font-medium text-[#e4e5e0]">Loading ATLAS...</p>
+          <p className="mt-1 text-xs text-[#7f817c]">Checking your session</p>
         </div>
       </div>
     );

@@ -164,64 +164,64 @@ const AuthPage = ({
             : "Use your account to access saved history and continue previous trip plans.";
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen bg-[#171817] text-[#f2f2ee]">
       <div className="mx-auto grid min-h-screen max-w-6xl items-center gap-10 px-5 py-10 lg:grid-cols-[1.05fr_0.95fr]">
         <section>
-          <div className="mb-6 flex items-center gap-4">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-sky-400/20 bg-sky-500/10">
-              <Globe2 className="h-7 w-7 text-sky-300" />
+          <div className="mb-8 flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#3a3c3a] bg-[#242624]">
+              <Globe2 className="h-[18px] w-[18px] text-[#b9ddc8]" />
             </div>
             <div>
-              <p className="text-2xl font-semibold tracking-[0.18em] text-white">
+              <p className="text-base font-semibold tracking-[0.16em] text-[#f2f2ee]">
                 ATLAS
               </p>
-              <p className="text-sm text-slate-400">Travel Intelligence</p>
+              <p className="text-xs text-[#7f817c]">Travel Intelligence</p>
             </div>
           </div>
 
-          <p className="text-sm font-semibold uppercase tracking-[0.22em] text-sky-300">
-            Account required for the planning workspace
+          <p className="text-xs font-medium uppercase tracking-[0.18em] text-[#8e908b]">
+            Your personal travel workspace
           </p>
-          <h1 className="mt-5 max-w-3xl text-4xl font-semibold tracking-tight text-white sm:text-6xl">
-            Plan trips with memory, history and document-aware guidance.
+          <h1 className="mt-5 max-w-3xl text-4xl font-semibold leading-[1.08] tracking-[-0.04em] text-[#f3f3ef] sm:text-6xl">
+            Plan with context that stays with you.
           </h1>
-          <p className="mt-5 max-w-2xl text-lg leading-8 text-slate-400">
+          <p className="mt-5 max-w-2xl text-lg leading-8 text-[#a1a39d]">
             Sign in to use ATLAS with persistent chat history, follow-up memory
             and document upload support. This keeps your travel context
             available across sessions.
           </p>
 
-          <div className="mt-8 grid gap-3 sm:grid-cols-3 lg:grid-cols-1 xl:grid-cols-3">
+          <div className="mt-9 grid border-y border-[#303230] sm:grid-cols-3 lg:grid-cols-1 xl:grid-cols-3">
             {benefits.map(({ icon: Icon, title: itemTitle, text }) => (
               <div
                 key={itemTitle}
-                className="rounded-2xl border border-slate-800 bg-slate-900/55 p-4"
+                className="border-b border-[#303230] px-1 py-5 last:border-b-0 sm:border-b-0 sm:border-r sm:px-4 sm:first:pl-0 sm:last:border-r-0 lg:border-b lg:border-r-0 lg:px-1 lg:last:border-b-0 xl:border-b-0 xl:border-r xl:px-4"
               >
-                <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-xl border border-sky-400/20 bg-sky-400/10">
-                  <Icon className="h-4 w-4 text-sky-300" />
+                <div className="mb-3 flex h-8 w-8 items-center justify-center rounded-md bg-[#242624]">
+                  <Icon className="h-4 w-4 text-[#9fc8b2]" />
                 </div>
-                <h3 className="text-sm font-semibold text-slate-100">
+                <h3 className="text-sm font-medium text-[#e4e5e0]">
                   {itemTitle}
                 </h3>
-                <p className="mt-2 text-sm leading-6 text-slate-500">{text}</p>
+                <p className="mt-2 text-sm leading-6 text-[#7f817c]">{text}</p>
               </div>
             ))}
           </div>
         </section>
 
-        <section className="rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-2xl shadow-black/30 sm:p-8">
+        <section className="rounded-2xl border border-[#3a3c3a] bg-[#222422] p-6 shadow-[0_18px_60px_rgba(0,0,0,0.22)] sm:p-8">
           <div className="mb-6">
-            <h2 className="text-2xl font-semibold text-white">{title}</h2>
-            <p className="mt-2 text-sm leading-6 text-slate-400">{subtitle}</p>
+            <h2 className="text-2xl font-semibold tracking-[-0.02em] text-[#f2f2ee]">{title}</h2>
+            <p className="mt-2 text-sm leading-6 text-[#999b95]">{subtitle}</p>
           </div>
 
           {mode !== "verify" && (
             <form onSubmit={submit} className="space-y-4">
               {mode === "signup" && (
                 <label className="block">
-                  <span className="text-sm text-slate-300">Name</span>
+                  <span className="text-sm text-[#bfc1bb]">Name</span>
                   <input
-                    className="mt-2 w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-sky-400"
+                    className="mt-2 w-full rounded-xl border border-[#414441] bg-[#1b1c1b] px-4 py-3 text-[#f0f0ec] outline-none transition placeholder:text-[#666863] focus:border-[#698474]"
                     value={form.name}
                     onChange={(e) => setForm({ ...form, name: e.target.value })}
                     autoComplete="name"
@@ -232,10 +232,10 @@ const AuthPage = ({
 
               {mode !== "reset" && (
                 <label className="block">
-                  <span className="text-sm text-slate-300">Email</span>
+                  <span className="text-sm text-[#bfc1bb]">Email</span>
                   <input
                     type="email"
-                    className="mt-2 w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-sky-400"
+                    className="mt-2 w-full rounded-xl border border-[#414441] bg-[#1b1c1b] px-4 py-3 text-[#f0f0ec] outline-none transition placeholder:text-[#666863] focus:border-[#698474]"
                     value={form.email}
                     onChange={(e) =>
                       setForm({ ...form, email: e.target.value })
@@ -248,10 +248,10 @@ const AuthPage = ({
 
               {mode !== "forgot" && (
                 <label className="block">
-                  <span className="text-sm text-slate-300">Password</span>
+                  <span className="text-sm text-[#bfc1bb]">Password</span>
                   <input
                     type="password"
-                    className="mt-2 w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-sky-400"
+                    className="mt-2 w-full rounded-xl border border-[#414441] bg-[#1b1c1b] px-4 py-3 text-[#f0f0ec] outline-none transition placeholder:text-[#666863] focus:border-[#698474]"
                     value={form.password}
                     onChange={(e) =>
                       setForm({ ...form, password: e.target.value })
@@ -268,16 +268,16 @@ const AuthPage = ({
               )}
 
               {mode === "signup" && (
-                <label className="flex items-start gap-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-sm leading-6 text-slate-400">
+                <label className="flex items-start gap-3 rounded-lg border border-[#3a3c3a] bg-[#1b1c1b] p-3 text-sm leading-6 text-[#999b95]">
                   <input
                     type="checkbox"
                     checked={form.privacyAccepted}
                     onChange={(event) => setForm({ ...form, privacyAccepted: event.target.checked })}
-                    className="mt-1 h-4 w-4 accent-sky-500"
+                    className="mt-1 h-4 w-4 accent-[#8ab79d]"
                     required
                   />
                   <span>
-                    I accept the <a href="/privacy.html" target="_blank" rel="noreferrer" className="text-sky-300 underline">privacy policy</a> and <a href="/terms.html" target="_blank" rel="noreferrer" className="text-sky-300 underline">terms</a>.
+                    I accept the <a href="/privacy.html" target="_blank" rel="noreferrer" className="text-[#b9ddc8] underline">privacy policy</a> and <a href="/terms.html" target="_blank" rel="noreferrer" className="text-[#b9ddc8] underline">terms</a>.
                   </span>
                 </label>
               )}
@@ -296,7 +296,7 @@ const AuthPage = ({
               <button
                 type="submit"
                 disabled={loading}
-                className="flex w-full items-center justify-center gap-2 rounded-2xl bg-sky-500 px-4 py-3 font-semibold text-white transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
+                className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#e7e8e3] px-4 py-3 font-semibold text-[#202220] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {loading && <Loader2 className="h-4 w-4 animate-spin" />}
                 {mode === "signup"
@@ -313,7 +313,7 @@ const AuthPage = ({
           {mode === "verify" && (
             <div className="space-y-4">
               {loading && (
-                <p className="flex items-center gap-2 text-sm text-slate-300">
+                <p className="flex items-center gap-2 text-sm text-[#bfc1bb]">
                   <Loader2 className="h-4 w-4 animate-spin" /> Verifying
                   email...
                 </p>
@@ -331,12 +331,12 @@ const AuthPage = ({
             </div>
           )}
 
-          <div className="mt-5 flex flex-wrap gap-4 text-sm font-medium text-sky-300">
+          <div className="mt-5 flex flex-wrap gap-4 text-sm font-medium text-[#b9ddc8]">
             {mode !== "login" && (
               <button
                 type="button"
                 onClick={() => switchMode("login")}
-                className="hover:text-sky-200"
+                className="hover:text-[#d1eadc]"
               >
                 Back to sign in
               </button>
@@ -345,7 +345,7 @@ const AuthPage = ({
               <button
                 type="button"
                 onClick={() => switchMode("signup")}
-                className="hover:text-sky-200"
+                className="hover:text-[#d1eadc]"
               >
                 New to ATLAS? Create an account
               </button>
@@ -354,7 +354,7 @@ const AuthPage = ({
               <button
                 type="button"
                 onClick={() => switchMode("login")}
-                className="hover:text-sky-200"
+                className="hover:text-[#d1eadc]"
               >
                 Already have an account? Sign in
               </button>
@@ -363,7 +363,7 @@ const AuthPage = ({
               <button
                 type="button"
                 onClick={() => switchMode("forgot")}
-                className="hover:text-sky-200"
+                className="hover:text-[#d1eadc]"
               >
                 Forgot password?
               </button>
