@@ -1,14 +1,23 @@
 import crypto from "crypto";
 import { logger } from "../utils/logger.js";
 
-const DEFAULT_TTL_SECONDS = Number(process.env.CACHE_DEFAULT_TTL_SECONDS || 300);
-const MEMORY_MAX_ITEMS = Number(process.env.CACHE_MEMORY_MAX_ITEMS || 1000);
-const REDIS_URL = process.env.REDIS_URL || "";
 const memoryCache = new Map();
 const inFlight = new Map();
 let redisClientPromise = null;
 let redisUnavailableLogged = false;
 let redisConnected = false;
+
+function redisUrl() {
+  return process.env.REDIS_URL || "";
+}
+
+function defaultTtlSeconds() {
+  return Number(process.env.CACHE_DEFAULT_TTL_SECONDS || 300);
+}
+
+function memoryMaxItems() {
+  return Number(process.env.CACHE_MEMORY_MAX_ITEMS || 1000);
+}
 
 function shouldUseMemoryFallback() {
   return process.env.NODE_ENV !== "production" && process.env.CACHE_DISABLE_MEMORY !== "true";
@@ -29,19 +38,20 @@ function memoryPrune() {
   for (const [key, entry] of memoryCache.entries()) {
     if (entry.expiresAt <= now) memoryCache.delete(key);
   }
-  while (memoryCache.size > MEMORY_MAX_ITEMS) {
+  while (memoryCache.size > memoryMaxItems()) {
     const firstKey = memoryCache.keys().next().value;
     memoryCache.delete(firstKey);
   }
 }
 
 async function getRedisClient() {
-  if (!REDIS_URL) return null;
+  const url = redisUrl();
+  if (!url) return null;
   if (redisClientPromise) return redisClientPromise;
 
   redisClientPromise = import("redis")
     .then(async ({ createClient }) => {
-      const client = createClient({ url: REDIS_URL });
+      const client = createClient({ url });
       client.on("error", (error) => {
         redisConnected = false;
         if (!redisUnavailableLogged) {
@@ -94,7 +104,7 @@ export async function getCache(key) {
   return (await readCache(key)).value;
 }
 
-export async function setCache(key, value, ttlSeconds = DEFAULT_TTL_SECONDS) {
+export async function setCache(key, value, ttlSeconds = defaultTtlSeconds()) {
   if (!ttlSeconds || ttlSeconds <= 0) return;
   const redis = await getRedisClient();
   if (redis) {
@@ -126,7 +136,7 @@ export async function getOrSetCache(key, ttlSeconds, producer) {
 
 export function cacheStatus() {
   return {
-    redisConfigured: Boolean(REDIS_URL),
+    redisConfigured: Boolean(redisUrl()),
     redisConnected,
     memoryFallback: shouldUseMemoryFallback(),
     memoryEntries: memoryCache.size,

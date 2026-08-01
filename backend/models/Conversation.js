@@ -16,6 +16,33 @@ const RouteMemorySchema = new mongoose.Schema(
     origin: { type: String, default: "" },
     destination: { type: String, default: "" },
     mode: { type: String, default: "transit" },
+    departureTime: { type: String, default: "" },
+    dateLabel: { type: String, default: "" },
+    targetDate: { type: String, default: "" },
+  },
+  { _id: false },
+);
+
+const RequestConstraintsSchema = new mongoose.Schema(
+  {
+    accessible: Boolean,
+    senior: Boolean,
+    minimalWalking: Boolean,
+    indoorAlternative: Boolean,
+    rainAlternative: Boolean,
+    dietary: { type: [String], default: undefined },
+    maxBudget: Number,
+    dayCount: Number,
+    currency: String,
+    startTime: String,
+    checkIn: String,
+    checkOut: String,
+    adults: Number,
+    childAges: { type: [Number], default: undefined },
+    roomQuantity: Number,
+    breakfastPreferred: Boolean,
+    focus: String,
+    exclusions: { type: [String], default: undefined },
   },
   { _id: false },
 );
@@ -38,6 +65,7 @@ const ConversationMemorySchema = new mongoose.Schema(
     locationScope: { type: String, enum: ["city", "country", "region", "unknown"] },
     locations: { type: [String], default: [] },
     travelDates: { type: [String], default: [] },
+    targetDate: String,
     budget: String,
     interests: { type: [String], default: [] },
     groupType: String,
@@ -49,13 +77,14 @@ const ConversationMemorySchema = new mongoose.Schema(
     lastAcceptedOffer: String,
     route: { type: RouteMemorySchema, default: undefined },
     pendingActivitySearch: { type: PendingActivitySchema, default: undefined },
+    constraints: { type: RequestConstraintsSchema, default: undefined },
   },
   { _id: false },
 );
 
 const MEMORY_SCALAR_FIELDS = [
   "destination", "country", "locationScope", "budget", "groupType", "lastIntent",
-  "lastTopic", "area", "stayType", "diningStyle", "lastAcceptedOffer",
+  "lastTopic", "area", "stayType", "diningStyle", "lastAcceptedOffer", "targetDate",
 ];
 
 export function normalizeConversationMemory(memory = {}) {
@@ -77,6 +106,9 @@ export function normalizeConversationMemory(memory = {}) {
       origin: String(source.route.origin),
       destination: String(source.route.destination),
       mode: String(source.route.mode || "transit"),
+      departureTime: String(source.route.departureTime || ""),
+      dateLabel: String(source.route.dateLabel || ""),
+      targetDate: String(source.route.targetDate || ""),
     };
   }
 
@@ -88,6 +120,31 @@ export function normalizeConversationMemory(memory = {}) {
       date: String(source.pendingActivitySearch.date || ""),
       targetDate: String(source.pendingActivitySearch.targetDate || ""),
     };
+  }
+
+  if (source.constraints && typeof source.constraints === "object") {
+    const constraints = {};
+    const booleanFields = ["accessible", "senior", "minimalWalking", "indoorAlternative", "rainAlternative", "breakfastPreferred"];
+    for (const field of booleanFields) {
+      if (typeof source.constraints[field] === "boolean") constraints[field] = source.constraints[field];
+    }
+    for (const field of ["maxBudget", "dayCount", "adults", "roomQuantity"]) {
+      const value = Number(source.constraints[field]);
+      if (Number.isFinite(value) && value >= 0) constraints[field] = value;
+    }
+    for (const field of ["currency", "startTime", "checkIn", "checkOut", "focus"]) {
+      if (source.constraints[field]) constraints[field] = String(source.constraints[field]).slice(0, 120);
+    }
+    constraints.dietary = Array.isArray(source.constraints.dietary)
+      ? source.constraints.dietary.filter(Boolean).map(String).slice(0, 8)
+      : [];
+    constraints.childAges = Array.isArray(source.constraints.childAges)
+      ? source.constraints.childAges.map(Number).filter((value) => Number.isFinite(value) && value >= 0 && value <= 17).slice(0, 8)
+      : [];
+    constraints.exclusions = Array.isArray(source.constraints.exclusions)
+      ? source.constraints.exclusions.filter(Boolean).map(String).slice(0, 8)
+      : [];
+    normalized.constraints = constraints;
   }
 
   return normalized;

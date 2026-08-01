@@ -14,16 +14,24 @@ const cleanMessage = (content = "") =>
 
 const renderInlineBold = (text) => {
   const source = String(text);
-  const parts = source.split(/(\[[^\]]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s]+|\*\*[^*]+\*\*)/g);
+  const parts = source.split(/(\[[^\]]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s]+|\*\*[^*]+\*\*|_[^_\n]+_)/g);
 
   return parts.map((part, index) => {
     if (!part) return null;
 
     if (part.startsWith("**") && part.endsWith("**")) {
       return (
-        <strong key={index} className="font-semibold text-slate-100">
+        <strong key={index} className="font-semibold text-[#f0f0ec]">
           {part.slice(2, -2)}
         </strong>
+      );
+    }
+
+    if (part.startsWith("_") && part.endsWith("_")) {
+      return (
+        <em key={index} className="text-[#a1a39d]">
+          {part.slice(1, -1)}
+        </em>
       );
     }
 
@@ -35,7 +43,7 @@ const renderInlineBold = (text) => {
           href={markdownLink[2]}
           target="_blank"
           rel="noreferrer"
-          className="font-medium text-sky-300 underline decoration-sky-500/40 underline-offset-4 hover:text-sky-200"
+          className="font-medium text-[#b9ddc8] underline decoration-[#668474] underline-offset-4 hover:text-[#d1eadc]"
         >
           {markdownLink[1]}
         </a>
@@ -51,7 +59,7 @@ const renderInlineBold = (text) => {
             href={cleanUrl}
             target="_blank"
             rel="noreferrer"
-            className="font-medium text-sky-300 underline decoration-sky-500/40 underline-offset-4 hover:text-sky-200"
+            className="font-medium text-[#b9ddc8] underline decoration-[#668474] underline-offset-4 hover:text-[#d1eadc]"
           >
             source
           </a>
@@ -88,9 +96,8 @@ const isCompactSubheading = (text) =>
   );
 
 const NoteBlock = ({ children }) => (
-  <div className="my-4 rounded-2xl border border-sky-400/15 bg-sky-400/[0.04] px-4 py-3">
-
-    <p className="m-0 text-sm leading-6 text-slate-300">{children}</p>
+  <div className="my-4 rounded-lg border-l-2 border-[#688474] bg-[#202320] px-4 py-3">
+    <p className="m-0 text-sm leading-6 text-[#bfc1bb]">{children}</p>
   </div>
 );
 
@@ -99,7 +106,7 @@ export const formatMessage = (content) => {
 
   if (!cleanContent) {
     return (
-      <p className="text-slate-300">
+      <p className="text-[#bfc1bb]">
         I could not prepare a readable answer for this request.
       </p>
     );
@@ -121,12 +128,12 @@ export const formatMessage = (content) => {
         {currentList.map((item, index) => (
           <li
             key={index}
-            className="flex gap-3 text-[15px] leading-7 text-slate-300"
+            className="flex gap-3 text-[15px] leading-7 text-[#c8c9c3]"
           >
             {currentListType === "ordered" ? (
-              <span className="mt-0.5 w-6 shrink-0 text-right font-semibold text-sky-300">{index + 1}.</span>
+              <span className="mt-0.5 w-6 shrink-0 text-right font-medium text-[#9fc8b2]">{index + 1}.</span>
             ) : (
-              <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-sky-300" />
+              <span className="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-[#9fc8b2]" />
             )}
             <span>{renderInlineBold(item)}</span>
           </li>
@@ -188,20 +195,20 @@ export const formatMessage = (content) => {
           }
         >
           {isFirstHeading ? (
-            <h2 className="text-xl font-semibold tracking-tight text-slate-50 sm:text-2xl">
+            <h2 className="text-xl font-semibold tracking-[-0.02em] text-[#f2f2ee] sm:text-2xl">
               {text}
             </h2>
           ) : compactSubheading ? (
-            <h4 className="text-sm font-semibold text-slate-100">
+            <h4 className="text-sm font-semibold text-[#e7e8e3]">
               {text}
             </h4>
           ) : (
-            <h3 className="text-[15px] font-semibold tracking-tight text-sky-200 sm:text-base">
+            <h3 className="text-[15px] font-semibold tracking-tight text-[#e4e5e0] sm:text-base">
               {text}
             </h3>
           )}
           {!isFirstHeading && !compactSubheading && (
-            <div className="mt-3 h-px w-full bg-gradient-to-r from-sky-400/35 via-slate-700/50 to-transparent" />
+            <div className="mt-3 h-px w-full bg-[#303230]" />
           )}
         </div>,
       );
@@ -220,7 +227,7 @@ export const formatMessage = (content) => {
     blocks.push(
       <p
         key={`p-${index}`}
-        className="my-3 text-[15px] leading-7 text-slate-300 sm:text-base"
+        className="my-3 text-[15px] leading-7 text-[#c8c9c3] sm:text-base"
       >
         {renderInlineBold(line)}
       </p>,

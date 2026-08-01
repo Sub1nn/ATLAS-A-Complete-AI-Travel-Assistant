@@ -1,8 +1,3 @@
-const UNSUPPORTED_PRICE_PATTERNS = [
-  /(?:€|\$|£)\s?\d+[\d,.]*(?:\s*[–-]\s*(?:€|\$|£)?\s?\d+[\d,.]*)?(?:\s?(?:per|\/|a)\s?(?:night|person|day|meal|ticket))?/i,
-  /\b\d+[\d,.]*\s?(?:EUR|USD|GBP)\b/i,
-];
-
 const GUARANTEE_PATTERNS = [
   /\bguaranteed\b/gi,
   /\bdefinitely available\b/gi,
@@ -64,17 +59,21 @@ function softenGuarantees(answer) {
   return output;
 }
 
-function containsUnsupportedPrice(answer = "", evidence = "") {
-  return UNSUPPORTED_PRICE_PATTERNS.some((pattern) => pattern.test(answer) && !pattern.test(evidence));
-}
-
 function containsUnsupportedAvailability(answer = "", evidence = "") {
   return AVAILABILITY_PATTERNS.some((pattern) => pattern.test(answer) && !pattern.test(evidence));
 }
 
-function redactUnsupportedPrices(answer = "") {
+function redactUnsupportedPrices(answer = "", evidence = "", requestConstraints = {}) {
+  const allowedBudget = Number(requestConstraints?.maxBudget);
   return UNSUPPORTED_PRICE_REDACTIONS.reduce(
-    (output, pattern) => output.replace(pattern, "an unverified price estimate"),
+    (output, pattern) => output.replace(pattern, (match) => {
+      const numericAmount = Number(String(match).replace(/[^\d.]/g, ""));
+      const isUserBudget = Number.isFinite(allowedBudget)
+        && allowedBudget > 0
+        && numericAmount === allowedBudget;
+      const supportedByEvidence = evidence.includes(String(match).toLowerCase());
+      return isUserBudget || supportedByEvidence ? match : "an unverified price estimate";
+    }),
     answer,
   );
 }
@@ -98,7 +97,14 @@ function findVenueLikeLines(answer = "", evidence = "") {
   });
 }
 
-export function verifyResponse({ answer = "", toolResults = [], documentMatches = [], documentFocused = false } = {}) {
+export function verifyResponse({
+  answer = "",
+  toolResults = [],
+  documentMatches = [],
+  documentFocused = false,
+  requestConstraints = {},
+  allowAuthoritativeAmounts = false,
+} = {}) {
   if (!answer.trim()) return { answer, verification: { modified: false, notes: [] } };
 
   const notes = [];
@@ -106,8 +112,11 @@ export function verifyResponse({ answer = "", toolResults = [], documentMatches 
   const hasLiveEvidence = toolHasVerifiedLiveData(toolResults);
   let revised = softenGuarantees(answer);
 
-  if (containsUnsupportedPrice(revised, evidence)) {
-    revised = redactUnsupportedPrices(revised);
+  const priceChecked = allowAuthoritativeAmounts
+    ? revised
+    : redactUnsupportedPrices(revised, evidence, requestConstraints);
+  if (priceChecked !== revised) {
+    revised = priceChecked;
     notes.push("Unsupported exact prices were removed. Confirm current costs directly before booking.");
   }
 

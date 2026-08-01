@@ -49,12 +49,16 @@ const LOCATION_COUNTRY_HINTS = new Map(Object.entries({
   osaka: "japan",
   kyoto: "japan",
   helsinki: "finland",
+  tallinn: "estonia",
+  riga: "latvia",
+  vilnius: "lithuania",
   turku: "finland",
   tampere: "finland",
   rovaniemi: "finland",
   paris: "france",
   lyon: "france",
   nice: "france",
+  doha: "qatar",
 }));
 
 const INTENT_RULES = [
@@ -72,7 +76,8 @@ const INTENT_RULES = [
 const INTEREST_WORDS = [
   "hiking", "trekking", "wildlife", "food", "culture", "business", "family", "baby", "baby-friendly", "budget",
   "cheap", "luxury", "nature", "shopping", "nightlife", "indoor", "outdoor", "museum", "park", "tennis", "sports",
-  "court", "courts", "badminton", "football", "soccer", "basketball", "volleyball", "swimming", "pool", "gym", "fitness", "padel", "pickleball", "squash", "golf", "climbing", "bowling", "skating", "ice skating", "yoga", "meditation", "mindfulness", "wellness", "spa", "massage", "retreat", "free", "public", "municipal", "stroller", "kid", "child", "children", "restaurant", "cafe", "coffee", "bar", "pub", "nightlife", "club", "hostel", "motel", "lodge", "guesthouse", "library", "tourist", "safety", "route", "directions"
+  "museums", "architecture", "architectural", "landmark", "landmarks",
+  "court", "courts", "badminton", "football", "soccer", "basketball", "volleyball", "swimming", "pool", "gym", "fitness", "padel", "pickleball", "squash", "golf", "climbing", "bowling", "skating", "ice skating", "yoga", "meditation", "mindfulness", "wellness", "spa", "massage", "retreat", "sauna", "free", "public", "municipal", "stroller", "kid", "child", "children", "restaurant", "cafe", "coffee", "bar", "pub", "nightlife", "club", "hostel", "motel", "lodge", "guesthouse", "library", "tourist", "safety", "route", "directions"
 ];
 
 const ACTIVITY_DEFINITIONS = [
@@ -95,6 +100,7 @@ const ACTIVITY_DEFINITIONS = [
   { key: "yoga", words: ["yoga", "yoga studio", "yoga class", "yoga classes"] },
   { key: "meditation", words: ["meditation", "mindfulness", "mindfulness class", "meditation center", "meditation centre"] },
   { key: "wellness", words: ["wellness", "spa", "massage", "retreat", "wellness retreat", "mindfulness retreat"] },
+  { key: "sauna", words: ["sauna", "saunas", "public sauna", "private sauna", "sauna centre", "sauna center"] },
   { key: "sports", words: ["sports", "sport", "sports centre", "sports center", "sport hall", "play"] },
 ];
 
@@ -110,7 +116,7 @@ const LOCATION_ONLY_BLOCKING_WORDS = /\b(weather|forecast|hourly|rain|temperatur
 const TRANSIENT_VENUE_INTERESTS = new Set([
   "tennis", "sports", "sport", "court", "courts", "badminton", "football", "soccer", "basketball", "volleyball",
   "swimming", "pool", "gym", "fitness", "padel", "pickleball", "squash", "golf", "climbing", "bowling", "skating",
-  "ice skating", "free", "public", "municipal",
+  "ice skating", "sauna", "free", "public", "municipal",
 ]);
 const BAD_LOCATION_PHRASES = new Set([
   "some", "there", "here", "nearby", "same place", "same area", "same city", "be sure", "just to", "to be", "to be sure", "today", "tomorrow", "this weekend", "next week", "this week",
@@ -126,12 +132,13 @@ const NON_LOCATION_WORDS = new Set([
   "check", "then", "find", "search", "suggest", "recommend", "need", "want", "wants", "know", "like", "thinking", "go", "going", "visit", "visiting", "travel", "traveling",
   "travelling", "tourist", "trip", "play", "playing", "tennis", "court", "courts", "badminton", "football", "soccer", "basketball", "volleyball", "swimming", "gym", "fitness", "yoga", "meditation", "mindfulness", "wellness", "spa", "massage", "retreat", "sport", "sports", "forecast", "hourly", "hourely",
   "hourley", "some", "there", "here", "nearby", "weather", "rain", "temperature", "today", "tomorrow", "weekend", "sure", "just", "best", "experience",
-  "baby", "child", "kid", "family", "hotel", "hotels", "restaurant", "restaurants", "price", "prices", "yes", "ok", "okay", "more", "live"
+  "baby", "child", "kid", "family", "hotel", "hotels", "restaurant", "restaurants", "street", "food", "dining", "cuisine", "breakfast", "lunch", "dinner", "price", "prices", "yes", "ok", "okay", "more", "live"
 ]);
 for (const word of TEMPORAL_LOCATION_WORDS) NON_LOCATION_WORDS.add(word);
 
 const TRAILING_CONTEXT_WORDS = [
-  "today", "tomorrow", "tonight", "this", "next", "with", "for", "from", "to", "and", "or", "but", "as",
+  "today", "tomorrow", "tonight", "this", "next", "with", "for", "from", "to", "near", "around", "and", "or", "but", "as",
+  "focus", "focused", "focussed", "featuring", "including", "centered", "centred",
   "weather", "forecast", "hourly", "hourely", "hotels", "hotel", "restaurants", "restaurant", "prices", "price",
   "tennis", "court", "courts", "badminton", "football", "soccer", "basketball", "volleyball", "swimming", "gym", "fitness", "yoga", "meditation", "mindfulness", "wellness", "spa", "massage", "retreat", "baby", "child", "children", "kid", "family", "tourist", "trip"
 ];
@@ -183,6 +190,20 @@ function containsTerm(text = "", term = "") {
   return new RegExp(`(^|\\b)${escapeRegex(key)}(\\b|$)`, "i").test(value);
 }
 
+function isTermNegated(text = "", term = "") {
+  const value = normalize(text).replace(/\bgo\/no\s+go\b/g, "decision");
+  const key = normalize(term);
+  if (!value || !key) return false;
+  return new RegExp(
+    `\\b(?:do\\s+not|don['’]?t|dont|no|without|avoid|skip|exclude|excluding|dislike|not\\s+interested\\s+in)\\b[^.!?;]{0,48}\\b${escapeRegex(key)}\\b`,
+    "i",
+  ).test(value);
+}
+
+function containsPositiveTerm(text = "", term = "") {
+  return containsTerm(text, term) && !isTermNegated(text, term);
+}
+
 function extractPrimaryActivity(message = "", memory = {}, options = {}) {
   const currentText = normalize(message);
   const memoryInterests = Array.isArray(memory?.interests) ? memory.interests.join(" ") : "";
@@ -194,8 +215,19 @@ function extractPrimaryActivity(message = "", memory = {}, options = {}) {
   if (!currentText) return "";
 
   for (const activity of ACTIVITY_DEFINITIONS) {
-    const matchedCurrent = activity.words.some((word) => containsTerm(currentText, word));
+    const matchedCurrent = activity.words.some((word) => containsPositiveTerm(currentText, word));
     if (!matchedCurrent) continue;
+    const explicitlyExcluded = activity.words.some((word) => isTermNegated(currentText, word));
+    if (explicitlyExcluded) continue;
+    const accommodationContext = /\b(hotel|hotels|hostel|hostels|resort|resorts|accommodation|stay|stays|room|rooms|property|properties)\b/.test(currentText);
+    if (
+      accommodationContext
+      && activity.key === "swimming"
+      && /\bpools?\b/.test(currentText)
+      && !/\b(swim|swimming|aquatic)\b/.test(currentText)
+    ) {
+      continue;
+    }
 
     // Generic words such as “court”, “courts”, “sports” or “play” should only inherit
     // a previous activity in short follow-ups. They must not make a new destination
@@ -371,7 +403,150 @@ function extractLocations(message = "") {
       seen.add(key);
     }
   }
-  return unique;
+  return unique.sort((a, b) => {
+    const aIndex = text.indexOf(normalize(a));
+    const bIndex = text.indexOf(normalize(b));
+    if (aIndex < 0 && bIndex < 0) return 0;
+    if (aIndex < 0) return 1;
+    if (bIndex < 0) return -1;
+    return aIndex - bIndex;
+  });
+}
+
+function cleanTravelRole(value = "") {
+  return stripLocationCandidate(
+    String(value || "")
+      .replace(/\b(?:tomorrow|today|tonight|on\s+\w+|at\s+\d{1,2}(?::\d{2})?|with|carrying|for|via)\b[\s\S]*$/i, "")
+      .replace(/[?.!,;:]+$/g, "")
+      .trim(),
+  );
+}
+
+function extractTravelRoles(message = "") {
+  const raw = String(message || "").trim();
+  if (!raw) return { origin: "", destination: "", transit: [] };
+
+  const flightLike = raw.match(
+    /\b(?:fly(?:ing)?|travel(?:ing|ling)?|go(?:ing)?)?\s*from\s+([^?.,;]+?)\s+to\s+([^?.,;]+?)(?=\s+via\b|\s+with\b|\s+carrying\b|\s+and\s+(?:bring|carry|pack|take)\b|[?.,;]|$)(?:\s+via\s+([^?.,;]+?)(?=\s+with\b|\s+carrying\b|\s+and\s+(?:bring|carry|pack|take)\b|[?.,;]|$))?/i,
+  );
+  if (!flightLike) return { origin: "", destination: "", transit: [] };
+
+  const origin = cleanTravelRole(flightLike[1]);
+  const destination = cleanTravelRole(flightLike[2]);
+  const transit = String(flightLike[3] || "")
+    .split(/\s*(?:,|and)\s*/i)
+    .map(cleanTravelRole)
+    .filter(Boolean)
+    .slice(0, 4);
+  return { origin, destination, transit };
+}
+
+function extractRequestConstraints(message = "", previous = {}) {
+  const raw = String(message || "");
+  const text = normalize(raw);
+  const constraints = { ...(previous || {}) };
+  const setTrue = (key, pattern) => {
+    if (pattern.test(text)) constraints[key] = true;
+  };
+
+  setTrue("accessible", /\b(accessible|accessibility|wheelchair|step[-\s]?free|mobility)\b/);
+  setTrue("senior", /\b(senior|elderly|older (?:adult|parent|mother|father)|\d{2,3}[-\s]?year[-\s]?old)\b/);
+  setTrue("minimalWalking", /\b(minimal|little|less|limited|avoid)\s+walking\b|\bwalking\s+(?:as little as possible|limit|minimal|limited)\b/);
+  setTrue("minimalWalking", /\b(knee|ankle|hip|leg)\s+(?:injury|pain|problem)|\b(?:moderate|gentle)\s+walking\b|\bfrequent\s+(?:rest|seating)|\brest\s+stops?\b/);
+  setTrue("minimalTransfers", /\b(minimal|few|fewer|avoid)\s+transfers?\b|\btransfers?\s+(?:as little as possible|minimal|limited)\b/);
+  setTrue("indoorAlternative", /\b(indoor|covered)\s+(?:alternative|option|backup)s?\b/);
+  setTrue("rainAlternative", /\b(if it rains|rainy\s+day|rain(?:y)?\s+(?:alternative|option|backup)|wet[-\s]?weather)\b/);
+  setTrue("breakfastPreferred", /\b(breakfast (?:preferred|included)|include breakfast|with breakfast|breakfast)\b/);
+  const amenities = [
+    ["pool", /\b(pool|swimming pool)\b/],
+    ["gym", /\b(gym|fitness centre|fitness center)\b/],
+    ["spa", /\bspa\b/],
+    ["parking", /\bparking\b/],
+  ].filter(([, pattern]) => pattern.test(text)).map(([name]) => name);
+  if (amenities.length) constraints.amenities = [...new Set([...(constraints.amenities || []), ...amenities])];
+
+  const dietary = [
+    ["vegetarian", /\bvegetarian\b/],
+    ["vegan", /\bvegan|plant[-\s]?based\b/],
+    ["halal", /\bhalal\b/],
+    ["kosher", /\bkosher\b/],
+    ["gluten-free", /\bgluten[-\s]?free\b/],
+  ].filter(([, pattern]) => pattern.test(text)).map(([name]) => name);
+  if (dietary.length) constraints.dietary = [...new Set([...(constraints.dietary || []), ...dietary])];
+
+  const budgetMatch = raw.match(/\b(?:under|below|maximum|max(?:imum)?|up to|budget(?:\s+of)?)\s*([€$£¥]|EUR|USD|GBP|JPY)?\s*([\d,.]+)/i)
+    || raw.match(/([€$£¥])\s*([\d,.]+)\s*(?:total|altogether|for both|for all)?/i);
+  if (budgetMatch) {
+    const currencyToken = String(budgetMatch[1] || "").toUpperCase();
+    const currency = { "€": "EUR", "$": "USD", "£": "GBP", "¥": "JPY" }[currencyToken] || currencyToken;
+    const amount = Number(String(budgetMatch[2] || "").replace(/,/g, ""));
+    if (Number.isFinite(amount) && amount > 0) constraints.maxBudget = amount;
+    if (currency) constraints.currency = currency;
+  }
+
+  const startMatch = raw.match(/\b(?:(?:start|starting)\s+)?(?:after|from)\s+(\d{1,2}(?::\d{2})?)\b/i)
+    || raw.match(/\b(?:start|starting)\s+at\s+(\d{1,2}(?::\d{2})?)\b/i);
+  if (startMatch) constraints.startTime = startMatch[1].includes(":") ? startMatch[1] : `${startMatch[1]}:00`;
+  const endMatch = raw.match(/\b(?:until|to|before)\s+(\d{1,2}(?::\d{2})?)\b/i);
+  if (endMatch) constraints.endTime = endMatch[1].includes(":") ? endMatch[1] : `${endMatch[1]}:00`;
+
+  const dayCountMatch = raw.match(/\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fourteen)[-\s]?days?\b/i);
+  if (dayCountMatch) {
+    const dayWords = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fourteen: 14 };
+    const days = dayWords[normalize(dayCountMatch[1])] || Number(dayCountMatch[1]);
+    if (Number.isFinite(days) && days > 0 && days <= 31) constraints.dayCount = days;
+  }
+  if (
+    /\b(?:half[-\s]?day|morning|afternoon|evening)\s+(?:plan|itinerary)\b|\b(?:plan|itinerary|build|create)\b[\s\S]{0,48}\b(?:morning|afternoon|evening)\b|\b(?:just|only|one)\b[\s\S]{0,32}\b(?:morning|afternoon|evening)\b/i.test(raw)
+  ) {
+    constraints.dayCount = 1;
+  }
+  const stopLimitMatch = raw.match(/\b(?:no more than|up to|maximum|max)\s+(\d+|one|two|three|four|five)\s+stops?\b/i);
+  if (stopLimitMatch) {
+    const words = { one: 1, two: 2, three: 3, four: 4, five: 5 };
+    constraints.maxStops = words[normalize(stopLimitMatch[1])] || Number(stopLimitMatch[1]);
+  }
+
+  const stayRange = raw.match(/\b(\d{1,2})\s*[–—-]\s*(\d{1,2})\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{4})\b/i);
+  if (stayRange) {
+    const months = {
+      jan: 0, january: 0, feb: 1, february: 1, mar: 2, march: 2, apr: 3, april: 3,
+      may: 4, jun: 5, june: 5, jul: 6, july: 6, aug: 7, august: 7,
+      sep: 8, sept: 8, september: 8, oct: 9, october: 9, nov: 10, november: 10, dec: 11, december: 11,
+    };
+    const month = months[normalize(stayRange[3])];
+    const year = Number(stayRange[4]);
+    const checkIn = new Date(Date.UTC(year, month, Number(stayRange[1])));
+    const checkOut = new Date(Date.UTC(year, month, Number(stayRange[2])));
+    if (Number.isFinite(checkIn.getTime()) && Number.isFinite(checkOut.getTime()) && checkOut > checkIn) {
+      constraints.checkIn = checkIn.toISOString().slice(0, 10);
+      constraints.checkOut = checkOut.toISOString().slice(0, 10);
+    }
+  }
+
+  const adultsMatch = raw.match(/\b(\d+)\s+adults?\b/i);
+  if (adultsMatch) constraints.adults = Number(adultsMatch[1]);
+  const childAges = [...raw.matchAll(/\b(?:child|children|kid|kids)(?:\s+aged?|\s+ages?)?\s+(\d{1,2})(?:\s*(?:,|and)\s*(\d{1,2}))?/gi)]
+    .flatMap((match) => [match[1], match[2]])
+    .filter(Boolean)
+    .map(Number)
+    .filter((age) => age >= 0 && age <= 17);
+  if (childAges.length) constraints.childAges = [...new Set(childAges)];
+  const roomMatch = raw.match(/\b(\d+|one|two|three|four)\s+rooms?\b/i);
+  if (roomMatch) {
+    const words = { one: 1, two: 2, three: 3, four: 4 };
+    constraints.roomQuantity = words[normalize(roomMatch[1])] || Number(roomMatch[1]);
+  }
+  if (/\b(old town|historic centre|historic center|city centre|city center|central)\b/i.test(raw)) {
+    constraints.focus = raw.match(/\b(old town|historic centre|historic center|city centre|city center|central)\b/i)?.[1] || "";
+  }
+
+  const exclusions = [...raw.matchAll(/\b(?:do\s+not|don['’]?t|dont|dislike|not\s+interested\s+in|skip|exclude|excluding|avoid|without|no(?!\s+more\s+than))\s+(?:the\s+)?([a-z][a-z -]{1,36}?)(?=\s+(?:and|but|while|with|for|to|focus|just)\b|[,.!?;]|$)/gi)]
+    .map((match) => normalize(match[1]))
+    .filter(Boolean);
+  if (exclusions.length) constraints.exclusions = [...new Set([...(constraints.exclusions || []), ...exclusions])].slice(-8);
+
+  return constraints;
 }
 
 function inferStandaloneLocation(message = "", memory = {}) {
@@ -546,8 +721,12 @@ function inferAcceptedOffer(message = "", previousMessages = [], memory = {}) {
 
 function cleanRouteEndpoint(value = "") {
   return String(value || "")
+    .replace(/^(?:a|the)?\s*(?:hotel|accommodation|stay)\s+(?:near|around|in)\s+/i, "")
     .replace(/\s+by\s+(?:walk(?:ing)?|drive|driving|car|bus|train|metro|subway|transit|public transport|cycle|cycling|bike|biking)(?:\s+(?:today|tomorrow|tonight|this\s+(?:morning|afternoon|evening|weekend)|on\s+\w+))?\s*$/i, "")
     .replace(/\s+(?:today|tomorrow|tonight|this\s+(?:morning|afternoon|evening|weekend))\s*$/i, "")
+    .replace(/\s+(?:today|tomorrow|tonight|on\s+\w+)(?:\s+at\s+\d{1,2}(?::\d{2})?)?[\s\S]*$/i, "")
+    .replace(/\s+at\s+\d{1,2}(?::\d{2})?[\s\S]*$/i, "")
+    .replace(/\s+by\s+(?:walk(?:ing)?|drive|driving|car|bus|train|metro|subway|transit|public transport|cycle|cycling|bike|biking)\s*$/i, "")
     .replace(/[?!.]+$/g, "")
     .trim();
 }
@@ -571,6 +750,7 @@ function extractRouteRequest(message = "") {
     : "transit";
 
   const patterns = [
+    /\bfrom\s+([^?.,;]+?)\s+(?:to|towards?)\s+([^?.,;]+?)(?:[?!.]|$)/i,
     /\b(?:route|directions?|navigate|how\s+(?:do\s+)?i\s+get|how\s+to\s+get|go|get|travel|drive|walk|bus|train|metro)\s+(?:from\s+)([^?.,;]+?)\s+(?:to|towards?)\s+([^?.,;]+?)[?!.]*$/i,
     /\bfrom\s+([^?.,;]+?)\s+(?:to|towards?)\s+([^?.,;]+?)[?!.]*$/i,
     /\b(?:to|towards?)\s+([^?.,;]+?)\s+(?:from\s+)([^?.,;]+?)[?!.]*$/i,
@@ -588,7 +768,21 @@ function extractRouteRequest(message = "") {
       origin = stripLocationCandidate(cleanRouteEndpoint(match[1]));
       destination = stripLocationCandidate(cleanRouteEndpoint(match[2]));
     }
-    if (origin && destination) return { origin, destination, mode };
+    const startsLikeClock = (value = "") => /^\d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?(?:\s|$)/i.test(String(value).trim());
+    if (origin && destination && !startsLikeClock(origin) && !startsLikeClock(destination)) {
+      const departureClock = raw.match(/\b(?:at|after|from)\s+(\d{1,2})(?::(\d{2}))?\b/i);
+      const dateContext = resolveDateContext(raw);
+      return {
+        origin,
+        destination,
+        mode,
+        departureTime: departureClock
+          ? `${String(Number(departureClock[1])).padStart(2, "0")}:${String(Number(departureClock[2] || 0)).padStart(2, "0")}`
+          : "",
+        dateLabel: dateContext?.label || "",
+        targetDate: dateContext?.iso || "",
+      };
+    }
   }
 
   return null;
@@ -602,35 +796,68 @@ function detectIntent(message = "", memory = {}, previousMessages = []) {
   const locations = locationsForMessage(message, memory);
   const hasStoredLocation = Boolean(memory?.destination || memory?.locations?.length);
   const hasDate = /\b(today|tomorrow|tonight|weekend|afternoon|evening|now)\b/.test(text);
-  const hasWeather = /\b(weather|forecast|hourly|rain|temperature|wind|cloud|sunny|raining)\b/.test(text);
+  const hasWeather = ["weather", "forecast", "hourly", "rain", "temperature", "wind", "cloud", "sunny", "raining"]
+    .some((term) => containsPositiveTerm(text, term));
   const primaryActivity = extractPrimaryActivity(message, memory);
-  const outdoorPlan = Boolean(primaryActivity) || /\b(run|running|walk|walking|hiking|picnic|outdoor|outside|park|beach|play)\b/.test(text);
+  const outdoorPlan = Boolean(primaryActivity) || ["run", "running", "walk", "walking", "hiking", "picnic", "outdoor", "outside", "park", "beach", "play"]
+    .some((term) => containsPositiveTerm(text, term));
   const broadTravel = /\b(travel|travelling|traveling|trip|tourist|tourism|visit|visiting|going to|go to|planning|weekend|one week)\b/.test(text);
-  const explicitAccommodation = /\b(hotel|hotels|hostel|hostels|motel|motels|lodge|lodges|guesthouse|guesthouses|guest house|resort|resorts|apartment|apartments|homestay|accommodation|stay|room|rooms|lodging|booking)\b/.test(text);
-  const explicitDining = /\b(restaurant|restaurants|food|dining|eat|cafe|cafes|coffee|breakfast|lunch|dinner|cuisine|bar|bars|pub|pubs|nightclub|nightclubs|night club|night clubs|nightlife)\b/.test(text);
-  const explicitActivity = Boolean(primaryActivity) || /\b(museum|museums|park|parks|attraction|attractions|activity|activities|things to do|wildlife|indoor|outdoor)\b/.test(text);
+  const explicitAccommodation = ["hotel", "hotels", "hostel", "hostels", "motel", "motels", "lodge", "lodges", "guesthouse", "guesthouses", "guest house", "resort", "resorts", "apartment", "apartments", "homestay", "accommodation", "stay", "room", "rooms", "lodging", "booking"]
+    .some((term) => containsPositiveTerm(text, term));
+  const explicitDining = ["restaurant", "restaurants", "food", "dining", "eat", "cafe", "cafes", "coffee", "breakfast", "lunch", "dinner", "cuisine", "bar", "bars", "pub", "pubs", "nightclub", "nightclubs", "night club", "night clubs", "nightlife"]
+    .some((term) => containsPositiveTerm(text, term));
+  const explicitActivity = Boolean(primaryActivity) || ["museum", "museums", "park", "parks", "attraction", "attractions", "activity", "activities", "things to do", "wildlife", "indoor", "outdoor"]
+    .some((term) => containsPositiveTerm(text, term));
+  const explicitSafety = ["safe", "safety", "risk", "danger", "security", "advisory", "war", "conflict", "unrest"]
+    .some((term) => containsPositiveTerm(text, term));
   const mixedPlanningCategoryCount = [explicitAccommodation, explicitDining, explicitActivity].filter(Boolean).length;
-  const planningPhrase = /\b(plan|itinerary|one[-\s]?day|day plan|weekend|visit|travel|trip)\b/.test(text);
+  const planningPhrase = /\b(plan|build|create|itinerary|one[-\s]?day|day plan|weekend|visit|travel|trip)\b/.test(text);
+  const explicitDayPlan = /\b(?:one|1)(?:\s+\w+){0,3}\s+day\b|\bday[-\s]?plan\b|\bitinerary\b/.test(text);
+  const explicitMultiDayPlan = /\b(?:\d{1,2}|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fourteen)[-\s]+days?\b/.test(text);
+  const explicitHalfDayPlan = /\b(?:plan|build|create)\b[\s\S]{0,48}\b(?:morning|afternoon|evening)\b|\b(?:just|only|one)\b[\s\S]{0,32}\b(?:morning|afternoon|evening)\b/.test(text);
+  const timedPlan = /\b(?:plan|itinerary)\b[\s\S]{0,180}\b(?:from|between)\s+\d{1,2}(?::\d{2})?\b/.test(text);
+  const basePlan = /\b(?:recommend|choose|suggest)\b[\s\S]{0,140}\b(?:base|bases|nights?)\b/.test(text);
   const routeRequest = extractRouteRequest(message);
   const hasRoute = Boolean(routeRequest) || /\b(route|directions?|navigation|navigate|how to get|how do i get|go from|get from|distance|duration)\b/.test(text);
   const locationOnlyFollowUp = isLocationOnlyFollowUp(message, memory, locations);
+  const customsQuestion = /\b(customs?|declare|declaration|restricted|prohibited|allowed|bring|carry|pack|import|border)\b/.test(text)
+    && /\b(medicine|medication|prescription|insulin|food|meat|dairy|cash|money|power bank|battery|lithium|drone|alcohol|tobacco|weapon|spray)\b/.test(text);
+  const itineraryContinuation = hasStoredLocation
+    && (memory.lastIntent === "destination_planning" || /\b(?:day|itinerary|plan|trip)\b/.test(normalize(memory.lastTopic || "")))
+    && /\b(make it|replace|change|keep (?:the )?(?:same|whole)|whole day|same (?:requirements|plan|trip)|focus (?:on|around)|start (?:after|at|from)|under\s*[€$£¥]?\s*\d+)\b/.test(text);
+  const selectionFollowUp = hasStoredLocation
+    && /\b(which of those|which of these|those options|these options|rank (?:the|those|these)|best (?:one|two|three|1|2|3))\b/.test(text);
+
+  if (customsQuestion) {
+    return { type: "travel_logistics", confidence: 0.98, isFollowUp: false, customsQuestion: true };
+  }
 
   if (hasRoute) {
     return { type: "route_planning", confidence: routeRequest ? 0.96 : 0.78, isFollowUp: !routeRequest && hasStoredLocation, routeRequest };
+  }
+
+  if (selectionFollowUp && memory.lastIntent) {
+    return { type: memory.lastIntent, confidence: 0.94, isFollowUp: true, selectionFollowUp: true };
+  }
+
+  if (explicitSafety && (locations.length || hasStoredLocation)) {
+    return { type: "safety_inquiry", confidence: 0.95, isFollowUp: !locations.length && hasStoredLocation };
+  }
+
+  if (itineraryContinuation) {
+    return { type: "destination_planning", confidence: 0.96, isFollowUp: true, itineraryContinuation: true };
   }
 
   if (locationOnlyFollowUp) {
     return { type: "destination_planning", confidence: 0.88, isFollowUp: true, locationOnlyFollowUp: true };
   }
 
-  if (mixedPlanningCategoryCount >= 2 && planningPhrase && (locations.length || hasStoredLocation)) {
+  if (
+    planningPhrase
+    && (locations.length || hasStoredLocation)
+    && (mixedPlanningCategoryCount >= 2 || explicitDayPlan || explicitMultiDayPlan || explicitHalfDayPlan || timedPlan || basePlan)
+  ) {
     return { type: "destination_planning", confidence: 0.91, isFollowUp: !locations.length && hasStoredLocation };
-  }
-
-  // Sport and activity requests should trigger venue discovery immediately. Weather is
-  // added later as supporting context instead of replacing the venue search.
-  if (explicitActivity && (locations.length || hasStoredLocation || /\b(nearby|near me|around here|here|there)\b/.test(text))) {
-    return { type: "activity_recommendations", confidence: primaryActivity ? 0.94 : 0.86, isFollowUp: !locations.length && hasStoredLocation, primaryActivity };
   }
 
   if (explicitAccommodation && locations.length) {
@@ -641,6 +868,11 @@ function detectIntent(message = "", memory = {}, previousMessages = []) {
   }
   if (explicitAccommodation && hasStoredLocation && !locations.length) {
     return { type: "accommodation_search", confidence: 0.92, isFollowUp: true };
+  }
+  // Sport and activity requests should trigger venue discovery immediately. Weather is
+  // added later as supporting context instead of replacing the venue search.
+  if (explicitActivity && (locations.length || hasStoredLocation || /\b(nearby|near me|around here|here|there)\b/.test(text))) {
+    return { type: "activity_recommendations", confidence: primaryActivity ? 0.94 : 0.86, isFollowUp: !locations.length && hasStoredLocation, primaryActivity };
   }
   if (explicitDining && hasStoredLocation && !locations.length) {
     return { type: "dining_recommendations", confidence: 0.9, isFollowUp: true };
@@ -661,7 +893,7 @@ function detectIntent(message = "", memory = {}, previousMessages = []) {
 
   let best = { type: "destination_planning", score: 0 };
   for (const rule of INTENT_RULES) {
-    const score = rule.words.reduce((sum, word) => sum + (containsTerm(text, word) ? 1 : 0), 0);
+    const score = rule.words.reduce((sum, word) => sum + (containsPositiveTerm(text, word) ? 1 : 0), 0);
     if (score > best.score) best = { type: rule.type, score };
   }
 
@@ -677,27 +909,55 @@ function updateMemory(memory = {}, message = "", intent = {}) {
   const dates = extractDates(message);
   const dateContext = resolveDateContext(message);
   const acceptedOffer = intent.acceptedOffer || null;
-  const routeRequest = intent.routeRequest || extractRouteRequest(message);
+  const routeRequest = intent.type === "route_planning" ? (intent.routeRequest || extractRouteRequest(message)) : null;
   const primaryActivity = intent.primaryActivity || extractPrimaryActivity(message, memory) || extractPrimaryActivity(acceptedOffer?.topic || "");
-  const interests = [...INTEREST_WORDS.filter((word) => containsTerm(text, word)), ...(primaryActivity ? [primaryActivity] : []), ...(acceptedOffer?.interests || [])];
+  const interests = [...INTEREST_WORDS.filter((word) => containsPositiveTerm(text, word)), ...(primaryActivity ? [primaryActivity] : []), ...(acceptedOffer?.interests || [])];
   const locationOnlyDestinationFollowUp = intent.locationOnlyFollowUp && intent.type === "destination_planning";
   const itineraryDestinationFollowUp = intent.type === "destination_planning"
     && /\b(plan|itinerary|one[-\s]?day|1[-\s]?day|day plan|morning|lunch|afternoon|stay base)\b/.test(text);
   const previousInterests = locationOnlyDestinationFollowUp
     ? (memory.interests || []).filter((item) => !TRANSIENT_VENUE_INTERESTS.has(normalize(item)))
     : (memory.interests || []);
+  const previousCountry = inferredCountry(memory.destination || "");
+  const nextCountry = inferredCountry(locations[0] || "");
+  const switchedCountry = Boolean(previousCountry && nextCountry && previousCountry !== nextCountry);
+  const explicitlyKeepsRequirements = /\b(same (?:requirements|constraints|preferences)|keep (?:the )?(?:same|requirements|constraints|preferences))\b/.test(text);
+  const constraintBase = switchedCountry && !explicitlyKeepsRequirements ? {} : (memory.constraints || {});
+  const requestConstraints = intent.customsQuestion ? {} : extractRequestConstraints(message, constraintBase);
+  const exclusions = new Set((requestConstraints.exclusions || []).map(normalize));
+  const interestBase = switchedCountry && !explicitlyKeepsRequirements ? [] : previousInterests;
+  const retainedInterests = interestBase.filter((item) => ![...exclusions].some((excluded) => containsTerm(item, excluded) || containsTerm(excluded, item)));
+  const incomingInterests = interests.filter((item) => ![...exclusions].some((excluded) => containsTerm(item, excluded) || containsTerm(excluded, item)));
 
   const updated = {
     ...memory,
     locations: [...new Set([...(memory.locations || []), ...locations])].slice(-8),
     travelDates: [...new Set([...(memory.travelDates || []), ...dates])].slice(-6),
-    interests: [...new Set([...previousInterests, ...interests])].slice(-12),
+    interests: [...new Set([...retainedInterests, ...incomingInterests])].slice(-12),
     lastIntent: intent.type,
     lastTopic: acceptedOffer?.topic || message.slice(0, 180),
     lastAcceptedOffer: acceptedOffer?.topic || memory.lastAcceptedOffer,
+    constraints: requestConstraints,
   };
+  if (dateContext?.iso) updated.targetDate = dateContext.iso;
+
+  if (switchedCountry && !explicitlyKeepsRequirements) {
+    delete updated.area;
+    delete updated.stayType;
+    delete updated.diningStyle;
+    delete updated.route;
+    delete updated.pendingActivitySearch;
+    delete updated.targetDate;
+    if (!/\b(budget|cheap|affordable|luxury|premium)\b/.test(text)) delete updated.budget;
+  }
 
   if (locationOnlyDestinationFollowUp || itineraryDestinationFollowUp) delete updated.pendingActivitySearch;
+  if (requestConstraints.exclusions?.length && updated.pendingActivitySearch) {
+    const pending = normalize(updated.pendingActivitySearch.activity);
+    if (requestConstraints.exclusions.some((item) => containsTerm(item, pending) || containsTerm(pending, item))) {
+      delete updated.pendingActivitySearch;
+    }
+  }
 
   if (locations.length) {
     updated.destination = locations[0];
@@ -724,8 +984,8 @@ function updateMemory(memory = {}, message = "", intent = {}) {
   else if (/\bguesthouse|guest house|guesthouses\b/.test(text)) updated.stayType = "guesthouse";
   else if (/\bresort|resorts\b/.test(text)) updated.stayType = "resort";
   else if (/\bapartment|apartments\b/.test(text)) updated.stayType = "apartment";
-  if (/\bbar|bars|pub|pubs|nightclub|nightclubs|night club|night clubs|nightlife|clubs\b/.test(text)) updated.diningStyle = "nightlife";
-  else if (/\bcafe|cafes|coffee\b/.test(text)) updated.diningStyle = "cafes";
+  if (["bar", "bars", "pub", "pubs", "nightclub", "nightclubs", "night club", "night clubs", "nightlife", "club", "clubs"].some((term) => containsPositiveTerm(text, term))) updated.diningStyle = "nightlife";
+  else if (["cafe", "cafes", "coffee"].some((term) => containsPositiveTerm(text, term))) updated.diningStyle = "cafes";
   if (text.includes("family") || text.includes("kids") || text.includes("children") || text.includes("child") || text.includes("baby") || acceptedOffer?.interests?.includes("family") || acceptedOffer?.interests?.includes("baby-friendly")) updated.groupType = "family";
   if (text.includes("business") || text.includes("meeting") || text.includes("work")) updated.groupType = "business";
   if (intent.type === "activity_recommendations" && primaryActivity) {
@@ -744,39 +1004,95 @@ function updateMemory(memory = {}, message = "", intent = {}) {
 function resolveContext(message = "", memory = {}, previousMessages = []) {
   const intent = detectIntent(message, memory, previousMessages);
   const locations = locationsForMessage(message, memory);
+  const travelRoles = extractTravelRoles(message);
   const dates = extractDates(message);
   const dateContext = resolveDateContext(message);
   const currentActivity = extractPrimaryActivity(message, memory);
   const offeredActivity = extractPrimaryActivity(intent.acceptedOffer?.topic || "");
-  const carryPendingActivity = intent.type === "activity_recommendations" && intent.isFollowUp && !locations.length;
+  const carryPendingActivity = intent.type === "activity_recommendations"
+    && intent.isFollowUp
+    && (intent.selectionFollowUp || !locations.length);
   const primaryActivity = intent.primaryActivity || currentActivity || offeredActivity || (carryPendingActivity ? memory.pendingActivitySearch?.activity : "") || "";
-  const destination = locations[0] || memory.destination || (memory.locations || []).at?.(-1) || "";
-  const resolvedLocations = locations.length ? locations : [destination, ...(memory.locations || []).filter((loc) => normalize(loc) !== normalize(destination))].filter(Boolean).slice(0, 3);
+  const roleDestination = intent.customsQuestion ? travelRoles.destination : "";
+  const destination = roleDestination || locations[0] || memory.destination || (memory.locations || []).at?.(-1) || "";
+  const currentLocations = roleDestination
+    ? [roleDestination, ...travelRoles.transit, travelRoles.origin, ...locations].filter(Boolean)
+    : locations;
+  const uniqueLocations = (values = []) => {
+    const seen = new Set();
+    return values.filter((value) => {
+      const key = normalize(value);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+  const resolvedLocations = currentLocations.length
+    ? uniqueLocations(currentLocations)
+    : uniqueLocations([destination, ...(memory.locations || []).filter((loc) => normalize(loc) !== normalize(destination))]).slice(0, 3);
   const updatedMemory = updateMemory(memory, message, intent);
-  const locationScope = locations.length ? (isCountryLike(locations[0]) ? "country" : "city") : (memory.locationScope || (isCountryLike(destination) ? "country" : "city"));
+  const retainedDateContext = intent.isFollowUp && updatedMemory.targetDate
+    ? {
+        raw: updatedMemory.travelDates?.at?.(-1) || updatedMemory.targetDate,
+        label: updatedMemory.travelDates?.at?.(-1) || updatedMemory.targetDate,
+        iso: updatedMemory.targetDate,
+        kind: "single_day",
+      }
+    : null;
+  if (roleDestination) {
+    updatedMemory.destination = roleDestination;
+    updatedMemory.locations = resolvedLocations.slice(0, 8);
+    updatedMemory.locationScope = isCountryLike(roleDestination) ? "country" : "city";
+  }
+  const locationScope = roleDestination
+    ? (isCountryLike(roleDestination) ? "country" : "city")
+    : locations.length
+    ? (isCountryLike(locations[0]) ? "country" : "city")
+    : (memory.locationScope || (isCountryLike(destination) ? "country" : "city"));
 
   const previousSummary = previousMessages.slice(-6).map((m) => `${m.role}: ${String(m.content).slice(0, 360)}`).join("\n");
 
   let enrichedUserMessage = message;
   if (intent.acceptedOffer) {
-    enrichedUserMessage = `The user accepted the previous assistant offer. Answer that offer directly and do not repeat the previous answer.\nPrevious destination: ${titleCase(destination)}\nAccepted request: ${intent.acceptedOffer.topic}\nKnown area: ${memory.area || "not specified"}\nKnown interests: ${[...(memory.interests || []), ...(intent.acceptedOffer.interests || [])].filter(Boolean).join(", ") || "not specified"}\nKnown dates: ${(memory.travelDates || dates).join(", ") || "not specified"}\nCurrent user message: ${message}`;
+    enrichedUserMessage = `The user accepted the previous assistant offer. Answer that offer directly and do not repeat the previous answer.\nPrevious destination: ${titleCase(destination)}\nAccepted request: ${intent.acceptedOffer.topic}\nKnown area: ${memory.area || "not specified"}\nKnown interests: ${[...(memory.interests || []), ...(intent.acceptedOffer.interests || [])].filter(Boolean).join(", ") || "not specified"}\nKnown dates: ${(memory.travelDates || dates).join(", ") || "not specified"}\nKnown constraints: ${JSON.stringify(updatedMemory.constraints || {})}\nCurrent user message: ${message}`;
   } else if (intent.isFollowUp || (!locations.length && destination)) {
-    enrichedUserMessage = `The user is continuing a previous travel conversation. Keep the answer grounded in this context.\nPrevious destination: ${titleCase(destination)}\nKnown area: ${memory.area || "not specified"}\nKnown interests: ${(memory.interests || []).join(", ") || "not specified"}\nKnown dates: ${(memory.travelDates || dates).join(", ") || "not specified"}\nPrevious topic: ${memory.lastTopic || "not specified"}\nCurrent user message: ${message}`;
+    enrichedUserMessage = `The user is continuing a previous travel conversation. Keep the answer grounded in this context.\nPrevious destination: ${titleCase(destination)}\nKnown area: ${memory.area || "not specified"}\nKnown interests: ${(memory.interests || []).join(", ") || "not specified"}\nKnown dates: ${(memory.travelDates || dates).join(", ") || "not specified"}\nKnown constraints: ${JSON.stringify(updatedMemory.constraints || {})}\nPrevious topic: ${memory.lastTopic || "not specified"}\nCurrent user message: ${message}`;
   }
 
   const activityRequest = primaryActivity ? {
     activity: primaryActivity,
     activityLabel: activityDisplayName(primaryActivity),
     location: locations[0] || destination,
-    date: dateContext?.raw || dates[0] || memory.pendingActivitySearch?.date || memory.travelDates?.at?.(-1) || "",
-    targetDate: dateContext?.iso || memory.pendingActivitySearch?.targetDate || "",
+    date: dateContext?.raw || retainedDateContext?.raw || dates[0] || memory.pendingActivitySearch?.date || memory.travelDates?.at?.(-1) || "",
+    targetDate: dateContext?.iso || retainedDateContext?.iso || memory.pendingActivitySearch?.targetDate || "",
   } : null;
 
   const previousActivityDateContext = intent.type === "activity_recommendations" && memory.pendingActivitySearch?.targetDate
     ? { raw: memory.pendingActivitySearch.date || "previous date", label: memory.pendingActivitySearch.date || "previous date", iso: memory.pendingActivitySearch.targetDate, kind: "single_day" }
     : null;
 
-  return { intent, locations: resolvedLocations, dates: dates.length ? dates : (memory.travelDates || []), dateContext: dateContext || previousActivityDateContext, destination, locationScope, routeRequest: intent.routeRequest || updatedMemory.route || null, activityRequest, memory: { ...updatedMemory, locationScope }, previousSummary, enrichedUserMessage };
+  return {
+    intent,
+    currentUserMessage: message,
+    locations: resolvedLocations,
+    explicitLocations: locations,
+    previousDestination: memory.destination || "",
+    dates: dates.length ? dates : (memory.travelDates || []),
+    dateContext: dateContext || retainedDateContext || previousActivityDateContext,
+    destination,
+    locationScope,
+    routeRequest: intent.type === "route_planning" ? (intent.routeRequest || updatedMemory.route || null) : null,
+    activityRequest,
+    travelRoles,
+    requestProfile: {
+      customs: Boolean(intent.customsQuestion),
+      itineraryContinuation: Boolean(intent.itineraryContinuation),
+      constraints: updatedMemory.constraints || {},
+    },
+    memory: { ...updatedMemory, locationScope },
+    previousSummary,
+    enrichedUserMessage,
+  };
 }
 
 function contextLabel(memory = {}) {
@@ -794,4 +1110,25 @@ function contextLabel(memory = {}) {
   return parts.join("; ");
 }
 
-export const contextService = { extractLocations, extractDates, resolveDateContext, extractRouteRequest, extractPrimaryActivity, activityDisplayName, detectIntent, updateMemory, resolveContext, contextLabel, titleCase, canonicalDestination, normalize, stripLocationCandidate, isCountryLike, isLocationOnlyFollowUp };
+export const contextService = {
+  extractLocations,
+  extractDates,
+  resolveDateContext,
+  extractRouteRequest,
+  extractTravelRoles,
+  extractRequestConstraints,
+  extractPrimaryActivity,
+  activityDisplayName,
+  detectIntent,
+  updateMemory,
+  resolveContext,
+  contextLabel,
+  titleCase,
+  canonicalDestination,
+  normalize,
+  containsPositiveTerm,
+  isTermNegated,
+  stripLocationCandidate,
+  isCountryLike,
+  isLocationOnlyFollowUp,
+};

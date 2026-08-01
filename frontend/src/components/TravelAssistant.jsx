@@ -145,10 +145,19 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
     latestUserMessage?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [visibleMessages.length, hasStartedChat]);
 
-  const goHome = () => {
-    if (hasStartedChat) startNewChat();
-
+  const resetWorkspace = () => {
+    startNewChat();
     setInputMessage("");
+    setShowScrollButton(false);
+  };
+
+  const goHome = () => {
+    if (hasStartedChat) {
+      resetWorkspace();
+    } else {
+      setInputMessage("");
+      setShowScrollButton(false);
+    }
 
     requestAnimationFrame(() => {
       landingContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
@@ -197,7 +206,7 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
   };
 
   return (
-    <div className="h-screen bg-slate-950 text-slate-100 antialiased">
+    <div className="h-screen bg-[#171817] text-[#f2f2ee] antialiased">
       <div className="flex h-full">
         <HistorySidebar
           user={user}
@@ -205,7 +214,7 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
           hasMoreConversations={Boolean(nextConversationCursor)}
           onLoadMoreConversations={loadMoreConversations}
           activeConversationId={activeConversationId}
-          onNewChat={startNewChat}
+          onNewChat={resetWorkspace}
           onLoadConversation={loadConversation}
           onDeleteConversation={deleteConversation}
           onClearHistory={clearHistory}
@@ -214,13 +223,13 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
           onClose={() => setIsHistoryOpen(false)}
         />
 
-        <div className="flex min-w-0 flex-1 flex-col">
-          <header className="shrink-0 border-b border-slate-800 bg-slate-950/95">
-            <div className="mx-auto flex h-20 w-full max-w-7xl items-center justify-between px-5 sm:px-6 lg:px-8">
+        <div className="flex min-w-0 flex-1 flex-col bg-[#171817]">
+          <header className="shrink-0 border-b border-[#303230] bg-[#1a1b1a]">
+            <div className="flex h-16 w-full items-center justify-between px-4 sm:px-6">
               <button
                 type="button"
                 onClick={() => setIsHistoryOpen(true)}
-                className="mr-2 rounded-2xl border border-slate-700 bg-slate-900 p-3 text-slate-300 transition hover:border-sky-400/40 hover:text-sky-200 lg:hidden"
+                className="mr-2 rounded-lg p-2 text-[#a5a7a1] transition hover:bg-[#292b29] hover:text-[#f2f2ee] lg:hidden"
                 aria-label="Open chat history"
               >
                 <Menu className="h-5 w-5" />
@@ -229,32 +238,32 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
               <button
                 type="button"
                 onClick={goHome}
-                className="group flex items-center gap-4 text-left transition"
+                className="group flex min-w-0 items-center gap-3 text-left"
                 aria-label="Return to ATLAS home"
               >
-                <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-sky-400/20 bg-sky-500/10 transition group-hover:border-sky-400/40 group-hover:bg-sky-500/15">
-                  <Globe2 className="h-6 w-6 text-sky-300" />
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#3a3c3a] bg-[#252725] transition group-hover:border-[#575a56]">
+                  <Globe2 className="h-4 w-4 text-[#b9ddc8]" />
                 </div>
 
-                <div>
-                  <div className="flex items-center gap-3">
-                    <h1 className="text-xl font-semibold tracking-[0.18em] text-white transition group-hover:text-sky-300 sm:text-2xl">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2.5">
+                    <h1 className="text-[15px] font-semibold tracking-[0.16em] text-[#f2f2ee]">
                       ATLAS
                     </h1>
-                    <span className="hidden rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-300 sm:inline-flex">
+                    <span className="hidden text-xs text-[#777a75] sm:inline">
                       Travel Intelligence
                     </span>
                   </div>
 
-                  <p className="mt-1 text-sm text-slate-400 transition group-hover:text-slate-300">
-                    Plan safer, clearer and better-informed trips.
+                  <p className="mt-0.5 truncate text-xs text-[#8e908b]">
+                    Travel planning workspace
                   </p>
                 </div>
               </button>
 
-              <div className="hidden items-center gap-3 md:flex">
-                <div className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm font-medium ${serviceStatus === "online" ? "border-emerald-400/20 bg-emerald-400/10 text-emerald-300" : serviceStatus === "checking" ? "border-slate-700 bg-slate-900 text-slate-400" : "border-amber-400/20 bg-amber-400/10 text-amber-200"}`}>
-                  <span className={`h-2 w-2 rounded-full ${serviceStatus === "online" ? "bg-emerald-400" : serviceStatus === "checking" ? "bg-slate-500" : "bg-amber-400"}`} />
+              <div className="hidden items-center gap-2 md:flex">
+                <div className={`flex items-center gap-2 px-2 py-1 text-xs ${serviceStatus === "online" ? "text-[#9fc8b2]" : serviceStatus === "checking" ? "text-[#858782]" : "text-[#d2b680]"}`}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${serviceStatus === "online" ? "bg-[#77b894]" : serviceStatus === "checking" ? "bg-[#747672]" : "bg-[#c49a55]"}`} />
                   {serviceStatus === "online" ? "Online" : serviceStatus === "checking" ? "Checking" : "Degraded"}
                 </div>
 
@@ -262,10 +271,10 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
                   type="button"
                   onClick={exportCurrentChat}
                   disabled={visibleMessages.length === 0}
-                  className="flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm font-medium text-slate-300 transition hover:border-sky-400/40 hover:text-sky-200 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex items-center gap-2 rounded-lg border border-[#343634] bg-[#222422] px-3 py-2 text-xs font-medium text-[#b3b5af] transition hover:bg-[#2a2c2a] hover:text-[#f2f2ee] disabled:cursor-not-allowed disabled:opacity-40"
                   title="Export current chat"
                 >
-                  <Download className="h-4 w-4 text-sky-300" />
+                  <Download className="h-3.5 w-3.5" />
                   Export
                 </button>
               </div>
@@ -273,26 +282,26 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
           </header>
 
           {!user?.emailVerified && (
-            <div className="border-b border-amber-400/20 bg-amber-500/10 px-5 py-3 text-sm text-amber-100 sm:px-6 lg:px-8">
-              <div className="mx-auto flex max-w-7xl flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="border-b border-[#54462f] bg-[#28231b] px-5 py-3 text-sm text-[#e3cfaa] sm:px-6 lg:px-8">
+              <div className="mx-auto flex max-w-4xl flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <span>Please verify your email to keep your ATLAS account production-ready.</span>
                 <button
                   type="button"
                   onClick={handleResendVerification}
-                  className="w-fit rounded-full border border-amber-300/30 px-3 py-1 text-xs font-semibold text-amber-100 transition hover:bg-amber-300/10"
+                  className="w-fit rounded-md border border-[#665538] px-3 py-1 text-xs font-medium text-[#ead9b8] transition hover:bg-[#332b20]"
                 >
                   Resend verification link
                 </button>
               </div>
-              {verificationNotice && <p className="mx-auto mt-2 max-w-7xl text-xs text-amber-200">{verificationNotice}</p>}
+              {verificationNotice && <p className="mx-auto mt-2 max-w-4xl text-xs text-[#cbb98f]">{verificationNotice}</p>}
             </div>
           )}
 
           {chatError && (
-            <div className="border-b border-rose-400/20 bg-rose-500/10 px-5 py-3 text-sm text-rose-100 sm:px-6 lg:px-8">
-              <div className="mx-auto flex max-w-7xl items-center justify-between gap-3">
+            <div className="border-b border-[#663d3d] bg-[#2b2020] px-5 py-3 text-sm text-[#e6bcbc] sm:px-6 lg:px-8">
+              <div className="mx-auto flex max-w-4xl items-center justify-between gap-3">
                 <span>{chatError}</span>
-                <button type="button" onClick={clearChatError} className="rounded-lg p-1 text-rose-200 hover:bg-rose-400/10" aria-label="Dismiss error"><X className="h-4 w-4" /></button>
+                <button type="button" onClick={clearChatError} className="rounded-md p-1 text-[#d9aaaa] hover:bg-[#3b2929]" aria-label="Dismiss error"><X className="h-4 w-4" /></button>
               </div>
             </div>
           )}
@@ -300,36 +309,39 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
           <main className="relative min-h-0 flex-1 overflow-hidden">
             {!hasStartedChat ? (
               <div ref={landingContainerRef} className="h-full overflow-y-auto">
-                <section className="mx-auto w-full max-w-7xl px-5 py-8 sm:px-6 lg:px-8">
-                  <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-2xl shadow-black/20 sm:p-10">
+                <section className="mx-auto w-full max-w-4xl px-5 pb-5 pt-14 sm:px-8 sm:pt-20">
+                  <div className="border-b border-[#303230] pb-10 sm:pb-12">
                     <div className="max-w-3xl">
-                      <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-sky-400/20 bg-sky-400/10 px-3 py-1 text-sm font-medium text-sky-300">
-                        <Sparkles className="h-4 w-4" />
-                        AI travel workspace
+                      <div className="mb-5 flex h-9 w-9 items-center justify-center rounded-lg border border-[#3c3e3c] bg-[#232523]">
+                        <Sparkles className="h-4 w-4 text-[#b9ddc8]" />
                       </div>
 
-                      <h2 className="text-3xl font-semibold tracking-tight text-white sm:text-5xl">
-                        Plan safer trips with live context, documents and clear travel guidance.
+                      <p className="mb-3 text-xs font-medium uppercase tracking-[0.18em] text-[#858782]">
+                        ATLAS travel workspace
+                      </p>
+                      <h2 className="max-w-2xl text-3xl font-semibold leading-[1.08] tracking-[-0.035em] text-[#f3f3ef] sm:text-5xl">
+                        Make every trip feel considered.
                       </h2>
 
-                      <p className="mt-5 max-w-2xl text-base leading-7 text-slate-400 sm:text-lg">
-                        Ask ATLAS about destinations, safety, weather, hotels, food,
-                        local experiences or your uploaded travel documents. It keeps
-                        follow-up questions grounded in the trip you are planning.
+                      <p className="mt-5 max-w-2xl text-base leading-7 text-[#a6a8a2] sm:text-lg">
+                        Research destinations, compare stays, check routes and shape
+                        a practical plan with live travel context in one conversation.
                       </p>
                     </div>
 
-                    <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    <div className="mt-10 grid border-y border-[#303230] sm:grid-cols-2">
                       {features.map(({ icon: Icon, title, text }) => (
                         <div
                           key={title}
-                          className="rounded-2xl border border-slate-800 bg-slate-950/50 p-5 transition hover:border-sky-400/30 hover:bg-slate-900"
+                          className="group flex gap-4 border-b border-[#303230] px-1 py-5 last:border-b-0 sm:[&:nth-child(odd)]:border-r sm:[&:nth-last-child(-n+2)]:border-b-0 sm:[&:nth-child(odd)]:pr-6 sm:[&:nth-child(even)]:pl-6"
                         >
-                          <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-xl border border-sky-400/20 bg-sky-400/10">
-                            <Icon className="h-5 w-5 text-sky-300" />
+                          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[#252725] text-[#9fc8b2] transition group-hover:bg-[#2b2e2b]">
+                            <Icon className="h-4 w-4" />
                           </div>
-                          <h3 className="font-semibold text-slate-100">{title}</h3>
-                          <p className="mt-2 text-sm leading-6 text-slate-400">{text}</p>
+                          <div>
+                            <h3 className="text-sm font-medium text-[#e4e5e0]">{title}</h3>
+                            <p className="mt-1.5 text-sm leading-6 text-[#858782]">{text}</p>
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -354,7 +366,7 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
               <button
                 type="button"
                 onClick={scrollToBottom}
-                className="fixed bottom-32 right-6 z-30 inline-flex h-11 w-11 items-center justify-center rounded-full border border-slate-700 bg-slate-900 text-slate-100 shadow-xl shadow-black/30 transition hover:border-sky-400/50 hover:bg-slate-800"
+                className="fixed bottom-28 right-4 z-30 inline-flex h-10 w-10 items-center justify-center rounded-full border border-[#414441] bg-[#292b29] text-[#d7d8d3] shadow-lg shadow-black/20 transition hover:bg-[#333633] hover:text-white sm:bottom-32 sm:right-6"
                 aria-label="Scroll to latest message"
               >
                 <ArrowDown className="h-5 w-5" />

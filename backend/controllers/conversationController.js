@@ -1,6 +1,7 @@
 import { Conversation } from "../models/Conversation.js";
 import { Message } from "../models/Message.js";
 import { titleSchema, validate } from "../utils/validation.js";
+import { deleteAtlasConversationThread, deleteAtlasUserThreads } from "../agents/atlasGraph.js";
 
 function pageLimit(value, fallback, max) {
   const parsed = Number(value);
@@ -103,6 +104,8 @@ export const conversationController = {
   },
 
   async clearAll(req, res) {
+    const conversations = await Conversation.find({ userId: req.user._id }).select("_id").lean();
+    await deleteAtlasUserThreads(req.user._id, conversations.map((conversation) => conversation._id));
     const [messagesResult, conversationsResult] = await Promise.all([
       Message.deleteMany({ userId: req.user._id }),
       Conversation.deleteMany({ userId: req.user._id }),
@@ -113,6 +116,7 @@ export const conversationController = {
   async remove(req, res) {
     const conversation = await Conversation.findOne({ _id: req.params.id, userId: req.user._id }).select("_id").lean();
     if (!conversation) return res.status(404).json({ message: "Conversation not found" });
+    await deleteAtlasConversationThread(req.user._id, conversation._id);
     await Promise.all([
       Message.deleteMany({ conversationId: conversation._id, userId: req.user._id }),
       Conversation.deleteOne({ _id: conversation._id, userId: req.user._id }),

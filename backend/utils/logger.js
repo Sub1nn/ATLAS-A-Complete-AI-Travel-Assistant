@@ -9,7 +9,8 @@ function redact(value = "") {
     .replace(/(api[_-]?key|token|secret|password|authorization)[\s:=]+[^\s,}]+/gi, "$1=[redacted]")
     .replace(/gsk_[A-Za-z0-9_\-]+/g, "[redacted-groq-key]")
     .replace(/pcsk_[A-Za-z0-9_\-]+/g, "[redacted-pinecone-key]")
-    .replace(/re_[A-Za-z0-9_\-]+/g, "[redacted-resend-key]");
+    .replace(/re_[A-Za-z0-9_\-]+/g, "[redacted-resend-key]")
+    .replace(/lsv2_[A-Za-z0-9_\-]+/g, "[redacted-langsmith-key]");
 }
 
 function safeMeta(meta = {}) {

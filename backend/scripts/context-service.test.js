@@ -59,6 +59,41 @@ test("detects route requests with origin and destination", () => {
   assert.equal(resolved.routeRequest.destination, "Helsinki airport");
 });
 
+test("does not mistake an itinerary time window for a route", () => {
+  const resolved = contextService.resolveContext(
+    "Plan a wheelchair-accessible rainy day in Kyoto tomorrow from 10:30 to 18:00 for two adults. We are vegetarian and want one temple and one cultural activity.",
+    {},
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "destination_planning");
+  assert.equal(resolved.routeRequest, null);
+  assert.equal(resolved.requestProfile.constraints.startTime, "10:30");
+  assert.equal(resolved.requestProfile.constraints.endTime, "18:00");
+  assert.equal(resolved.requestProfile.constraints.accessible, true);
+  assert.deepEqual(resolved.requestProfile.constraints.dietary, ["vegetarian"]);
+});
+
+test("preserves deterministic route timing when the LLM planner adds route data", () => {
+  const resolved = contextService.resolveContext(
+    "What is the best way for two adults with large suitcases to travel from JFK Terminal 4 to a hotel near Times Square tonight at 23:30? Compare public transport with a taxi.",
+    {},
+    [],
+  );
+  const planned = travelPlannerService.applyTravelPlan(resolved, {
+    intent: "route_planning",
+    confidence: 0.99,
+    destination: "Times Square",
+    location_scope: "city",
+    route: { origin: "JFK", destination: "Times Square", mode: "transit" },
+  });
+
+  assert.equal(planned.routeRequest.origin, "JFK Terminal 4");
+  assert.equal(planned.routeRequest.destination, "Times Square");
+  assert.equal(planned.routeRequest.departureTime, "23:30");
+  assert.ok(planned.routeRequest.targetDate);
+});
+
 test("detects non-tennis sports as activity requests", () => {
   const resolved = contextService.resolveContext("Where can I play badminton in Helsinki?", {}, []);
   assert.equal(resolved.intent.type, "activity_recommendations");
@@ -95,6 +130,96 @@ test("mixed city planning requests stay destination-scoped instead of activity-o
   assert.equal(resolved.destination, "Abuja");
   assert.equal(resolved.activityRequest, null);
   assert.ok(resolved.memory.interests.includes("food"));
+});
+
+test("keeps hotel amenities inside accommodation intent", () => {
+  const resolved = contextService.resolveContext(
+    "Compare family-friendly hotels in central Paris for 2 adults and two children. We need step-free access and would prefer a pool.",
+    {},
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "accommodation_search");
+  assert.equal(resolved.activityRequest, null);
+  assert.equal(resolved.memory.interests.includes("swimming"), false);
+});
+
+test("keeps multi-day travel plans broad and honors negative preferences", () => {
+  const resolved = contextService.resolveContext(
+    "I have 10 days in Japan for a first visit. I care about regional food, history and nature, dislike nightlife, and want exactly three bases.",
+    {},
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "destination_planning");
+  assert.equal(resolved.requestProfile.constraints.dayCount, 10);
+  assert.equal(resolved.memory.interests.includes("nightlife"), false);
+  assert.notEqual(resolved.memory.diningStyle, "nightlife");
+});
+
+test("keeps four-day city itineraries as destination planning", () => {
+  const resolved = contextService.resolveContext(
+    "Plan a four-day Lisbon trip for two adults with architecture, local food, viewpoints and a moderate budget.",
+    {},
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "destination_planning");
+  assert.equal(resolved.requestProfile.constraints.dayCount, 4);
+});
+
+test("ranking follow-ups retain activity context without repeating negated weather", () => {
+  const memory = {
+    destination: "Riihimäki",
+    locations: ["Riihimäki"],
+    interests: ["tennis", "indoor"],
+    lastIntent: "activity_recommendations",
+    pendingActivitySearch: { activity: "tennis", activityLabel: "tennis", location: "Riihimäki", date: "tomorrow" },
+  };
+  const resolved = contextService.resolveContext(
+    "Which of those options is most likely indoors? Do not repeat the weather; rank the best two.",
+    memory,
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "activity_recommendations");
+  assert.equal(resolved.intent.isFollowUp, true);
+  assert.equal(contextService.containsPositiveTerm(resolved.currentUserMessage, "weather"), false);
+  assert.equal(resolved.activityRequest.activity, "tennis");
+});
+
+test("a half-day follow-up overrides an inherited multi-day duration", () => {
+  const memory = {
+    destination: "Abu Dhabi",
+    locations: ["Abu Dhabi"],
+    interests: ["museum"],
+    lastIntent: "destination_planning",
+    constraints: { dayCount: 3 },
+  };
+  const resolved = contextService.resolveContext(
+    "Actually, just build one calm afternoon there, ending before 19:00, with no more than two stops.",
+    memory,
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "destination_planning");
+  assert.equal(resolved.requestProfile.constraints.dayCount, 1);
+  assert.equal(resolved.requestProfile.constraints.endTime, "19:00");
+  assert.equal(resolved.requestProfile.constraints.maxStops, 2);
+  assert.deepEqual(resolved.requestProfile.constraints.exclusions || [], []);
+});
+
+test("planning focus phrases are not extracted as extra destinations", () => {
+  const resolved = contextService.resolveContext(
+    "Plan a calm 3-day visit to Abu Dhabi focused on museums and architecture.",
+    { locations: [], interests: [], travelDates: [] },
+    [],
+  );
+
+  assert.deepEqual(resolved.locations.map(contextService.normalize), ["abu dhabi"]);
+  assert.equal(contextService.normalize(resolved.destination), "abu dhabi");
+  assert.equal(resolved.memory.interests.includes("museums"), true);
+  assert.equal(resolved.memory.interests.includes("architecture"), true);
 });
 
 test("itinerary follow-ups clear stale activity searches", () => {
