@@ -7,7 +7,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { verifyResponse } from "../services/responseVerifier.js";
-import { cacheKey, getOrSetCache } from "../services/cacheService.js";
+import { cacheKey, cacheStatus, getOrSetCache } from "../services/cacheService.js";
 import { hasAllowedSignature } from "../controllers/documentController.js";
 import { chatRateLimiter } from "../config/rateLimiter.js";
 import mongoose from "mongoose";
@@ -62,6 +62,31 @@ test("response verifier adds caution for unsupported prices and availability", (
   assert.doesNotMatch(answer, /€120/);
   assert.doesNotMatch(answer, /is available/i);
   assert.doesNotMatch(answer, /completely safe/i);
+});
+
+test("response verifier preserves an explicit user budget while removing invented prices", () => {
+  const { answer, verification } = verifyResponse({
+    answer: "Keep the total plan within €180. Reject any option above 180 EUR. A ticket should cost €47.",
+    toolResults: [],
+    documentMatches: [],
+    requestConstraints: { maxBudget: 180, currency: "EUR" },
+  });
+  assert.match(answer, /within €180/);
+  assert.match(answer, /above 180 EUR/);
+  assert.doesNotMatch(answer, /€47/);
+  assert.equal(verification.modified, true);
+});
+
+test("response verifier preserves deterministic customs thresholds and declared cash amounts", () => {
+  const { answer, verification } = verifyResponse({
+    answer: "Declare €12,000 because the official threshold is €10,000 or more.",
+    toolResults: [],
+    documentMatches: [],
+    allowAuthoritativeAmounts: true,
+  });
+  assert.match(answer, /€12,000/);
+  assert.match(answer, /€10,000/);
+  assert.equal(verification.modified, false);
 });
 
 test("attached documents do not hijack ordinary short travel questions", () => {
@@ -194,11 +219,29 @@ test("mixed city planning prioritizes requested food, stay and attraction tools"
   const tools = chatController._test.relevantToolNames(resolved.intent.type, resolved.locations, false, resolved);
   assert.equal(resolved.intent.type, "destination_planning");
   assert.deepEqual(tools.slice(0, 4), [
-    "comprehensive_safety_intelligence",
     "local_experiences_and_attractions",
     "intelligent_restaurant_discovery",
     "smart_accommodation_finder",
+    "comprehensive_weather_analysis",
   ]);
+  assert.equal(tools.includes("comprehensive_safety_intelligence"), false);
+});
+
+test("dietary needs in a new multi-interest trip do not collapse into a follow-up refinement", () => {
+  const initialResolved = {
+    intent: { type: "destination_planning", isFollowUp: false },
+    destination: "Kyoto",
+    locations: ["Kyoto"],
+    memory: { destination: "Kyoto", locations: ["Kyoto"] },
+  };
+  const followUpResolved = {
+    ...initialResolved,
+    intent: { type: "destination_planning", isFollowUp: true },
+  };
+  const message = "I’m visiting Kyoto for 3 days and care about quiet temples, vegetarian food and minimal backtracking.";
+
+  assert.equal(chatController._test.isBudgetDietRefinement(message, initialResolved), false);
+  assert.equal(chatController._test.isBudgetDietRefinement("Make the same trip vegetarian-friendly", followUpResolved), true);
 });
 
 test("one-day city planning answers with an actual day flow", () => {
@@ -240,11 +283,22 @@ test("one-day city planning answers with an actual day flow", () => {
       },
     },
   ]);
-  assert.match(answer, /\*\*Simple first-day flow\*\*/);
-  assert.match(answer, /Morning: start with Central Park/);
+  assert.match(answer, /\*\*Simple day flow\*\*/);
+  assert.match(answer, /Start: begin with Central Park/);
   assert.match(answer, /Lunch or early dinner: keep the meal close to your route at Nkoyo/);
   assert.match(answer, /Afternoon: add Millennium Park/);
   assert.doesNotMatch(answer, /turn this shortlist into a morning\/afternoon\/evening plan next/);
+});
+
+test("a one-day food-led request remains destination planning", () => {
+  const resolved = contextService.resolveContext(
+    "Plan one relaxed day in Osaka around street food and an easy evening. Keep it concise.",
+    {},
+    [],
+  );
+  assert.equal(resolved.intent.type, "destination_planning");
+  assert.equal(resolved.destination, "osaka");
+  assert.deepEqual(resolved.locations.map((location) => location.toLowerCase()), ["osaka"]);
 });
 
 test("concise destination answers trim secondary sections", () => {
@@ -505,13 +559,12 @@ test("city refinement stays city-scoped and avoids internal fallback wording", (
       },
     },
   ]);
-  assert.match(answer, /Kathmandu is Nepal’s main arrival hub/);
-  assert.match(answer, /\*\*Local planning\*\*/);
+  assert.match(answer, /Kathmandu is Nepal’s busy cultural and logistics hub/);
   assert.match(answer, /\*\*What to do\*\*/);
-  assert.match(answer, /\*\*Food to try\*\*/);
+  assert.doesNotMatch(answer, /\*\*Food to try\*\*/);
   assert.doesNotMatch(answer, /\*\*Food and stay notes\*\*/);
   assert.doesNotMatch(answer, /\*\*Food, stays and local experience\*\*/);
-  assert.match(answer, /Thamel: easiest for first-time tourists/);
+  assert.doesNotMatch(answer, /Thamel: easiest for first-time tourists/);
   assert.doesNotMatch(answer, /\*\*Planning fallback\*\*/);
   assert.doesNotMatch(answer, /Pokhara|Lakeside/);
 });
@@ -681,6 +734,25 @@ test("attraction discovery filters low-value transport utility places", () => {
   }), false);
 });
 
+test("accessible indoor activity searches prioritize museums and libraries over playgrounds", () => {
+  const plan = toolService._test.activityPlan(
+    "old town accessible indoor museums libraries cultural attractions",
+    "old town, Tallinn",
+  );
+  const queries = plan.map((step) => `${step.type || ""} ${step.query || ""}`).join("\n");
+  assert.match(queries, /accessible indoor museums/);
+  assert.match(queries, /library/);
+  assert.doesNotMatch(queries, /playground/);
+});
+
+test("street-food discovery avoids broad restaurant searches", () => {
+  const plan = toolService._test.restaurantPlan("street food", "Osaka");
+  const queries = plan.map((step) => step.query || step.term || "");
+  assert.ok(queries.some((query) => /street food in Osaka/i.test(query)));
+  assert.ok(queries.some((query) => /food markets in Osaka/i.test(query)));
+  assert.equal(plan.some((step) => step.mode === "nearby" && step.type === "restaurant"), false);
+});
+
 test("multi-city destination answers label one live weather check and balance city planning", () => {
   const weatherResult = {
     tool: "comprehensive_weather_analysis",
@@ -728,6 +800,19 @@ test("cache service stores and retrieves with development memory fallback", asyn
   assert.equal(second.cached, true);
   assert.equal(second.value.ok, true);
   assert.equal(calls, 1);
+});
+
+test("cache status reads Redis configuration after environment initialization", () => {
+  const previous = process.env.REDIS_URL;
+  try {
+    delete process.env.REDIS_URL;
+    assert.equal(cacheStatus().redisConfigured, false);
+    process.env.REDIS_URL = "redis://localhost:6379";
+    assert.equal(cacheStatus().redisConfigured, true);
+  } finally {
+    if (previous === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = previous;
+  }
 });
 
 test("document signature validation accepts PDF and rejects mismatched DOCX", () => {
@@ -848,6 +933,8 @@ test("security and conversation memory fields are persisted by the schemas", () 
   assert.ok(Conversation.schema.path("memory.locationScope"));
   assert.ok(Conversation.schema.path("memory.pendingActivitySearch.activity"));
   assert.ok(Conversation.schema.path("memory.route.origin"));
+  assert.ok(Conversation.schema.path("memory.targetDate"));
+  assert.ok(Conversation.schema.path("memory.constraints.dayCount"));
 });
 
 test("document chunks overlap without exceeding their maximum size", () => {

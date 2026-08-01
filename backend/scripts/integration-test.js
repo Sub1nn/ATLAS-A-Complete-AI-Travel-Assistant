@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 
 process.env.NODE_ENV = "test";
 process.env.JWT_SECRET ||= "integration-test-secret-that-is-longer-than-thirty-two-characters";
-process.env.MONGODB_URI ||= "mongodb://127.0.0.1:27017/atlas_integration";
+process.env.MONGODB_URI ||= "mongodb://127.0.0.1:27017/atlas_integration?replicaSet=rs0&directConnection=true";
 process.env.PRIVACY_POLICY_VERSION ||= "2026-06-22";
 process.env.TERMS_VERSION ||= "2026-06-22";
 process.env.PINECONE_ENABLED = "false";
@@ -35,6 +35,7 @@ const [{ Session }, { ChatRequest }, { DailyUsage }, { GlobalUsage }, { Document
   import("../services/storageUsageService.js"),
   import("../controllers/chatController.js"),
 ]);
+const { atlasThreadId, runAtlasShadowWorkflow } = await import("../agents/atlasGraph.js");
 
 const email = `integration-${Date.now()}@example.test`;
 const password = "IntegrationPassword123";
@@ -97,6 +98,18 @@ try {
   const completedChat = await ChatRequest.findOne({ clientRequestId: concurrentRequestId }).lean();
   assert.equal(completedChat.status, "completed");
   assert.equal(await Message.countDocuments({ conversationId: completedChat.response.conversationId }), 2);
+  process.env.ATLAS_AGENT_SHADOW_MODE = "true";
+  process.env.ATLAS_AGENT_CHECKPOINT_BACKEND = "mongodb";
+  const graphThreadId = atlasThreadId(refresh.body.user.id, completedChat.response.conversationId);
+  const shadowResult = await runAtlasShadowWorkflow({
+    message: "Plan a weekend in Helsinki",
+    memory: {},
+    previousMessages: [],
+    userId: refresh.body.user.id,
+    conversationId: completedChat.response.conversationId,
+  });
+  assert.equal(shadowResult.graphVersion, "context-shadow-v1");
+  assert.ok(await mongoose.connection.db.collection("atlas_agent_checkpoints").countDocuments({ thread_id: graphThreadId }));
   await Conversation.updateOne(
     { _id: completedChat.response.conversationId },
     { $set: { processingOwner: "other-tab", processingLeaseUntil: new Date(Date.now() + 60000) } },
@@ -227,6 +240,8 @@ try {
   assert.equal(deletionStatus.body.status, "completed");
   assert.equal(await StorageUsage.countDocuments({ userId: refresh.body.user.id }), 0);
   assert.equal(await Conversation.countDocuments({ userId: refresh.body.user.id }), 0);
+  assert.equal(await mongoose.connection.db.collection("atlas_agent_checkpoints").countDocuments({ thread_id: graphThreadId }), 0);
+  assert.equal(await mongoose.connection.db.collection("atlas_agent_checkpoint_writes").countDocuments({ thread_id: graphThreadId }), 0);
   console.log("ATLAS authenticated integration flow passed");
 } finally {
   await mongoose.connection.dropDatabase();
