@@ -28,6 +28,8 @@ const RequestConstraintsSchema = new mongoose.Schema(
     accessible: Boolean,
     senior: Boolean,
     minimalWalking: Boolean,
+    minimalTransfers: Boolean,
+    noCar: Boolean,
     indoorAlternative: Boolean,
     rainAlternative: Boolean,
     dietary: { type: [String], default: undefined },
@@ -42,6 +44,7 @@ const RequestConstraintsSchema = new mongoose.Schema(
     roomQuantity: Number,
     breakfastPreferred: Boolean,
     focus: String,
+    origin: String,
     exclusions: { type: [String], default: undefined },
   },
   { _id: false },
@@ -124,7 +127,7 @@ export function normalizeConversationMemory(memory = {}) {
 
   if (source.constraints && typeof source.constraints === "object") {
     const constraints = {};
-    const booleanFields = ["accessible", "senior", "minimalWalking", "indoorAlternative", "rainAlternative", "breakfastPreferred"];
+    const booleanFields = ["accessible", "senior", "minimalWalking", "minimalTransfers", "noCar", "indoorAlternative", "rainAlternative", "breakfastPreferred"];
     for (const field of booleanFields) {
       if (typeof source.constraints[field] === "boolean") constraints[field] = source.constraints[field];
     }
@@ -132,7 +135,7 @@ export function normalizeConversationMemory(memory = {}) {
       const value = Number(source.constraints[field]);
       if (Number.isFinite(value) && value >= 0) constraints[field] = value;
     }
-    for (const field of ["currency", "startTime", "checkIn", "checkOut", "focus"]) {
+    for (const field of ["currency", "startTime", "checkIn", "checkOut", "focus", "origin"]) {
       if (source.constraints[field]) constraints[field] = String(source.constraints[field]).slice(0, 120);
     }
     constraints.dietary = Array.isArray(source.constraints.dietary)

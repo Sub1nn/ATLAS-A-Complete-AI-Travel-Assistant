@@ -137,7 +137,7 @@ const NON_LOCATION_WORDS = new Set([
 for (const word of TEMPORAL_LOCATION_WORDS) NON_LOCATION_WORDS.add(word);
 
 const TRAILING_CONTEXT_WORDS = [
-  "today", "tomorrow", "tonight", "this", "next", "with", "for", "from", "to", "near", "around", "and", "or", "but", "as",
+  "today", "tomorrow", "tonight", "this", "next", "with", "without", "for", "from", "to", "near", "around", "and", "or", "but", "as",
   "focus", "focused", "focussed", "featuring", "including", "centered", "centred",
   "weather", "forecast", "hourly", "hourely", "hotels", "hotel", "restaurants", "restaurant", "prices", "price",
   "tennis", "court", "courts", "badminton", "football", "soccer", "basketball", "volleyball", "swimming", "gym", "fitness", "yoga", "meditation", "mindfulness", "wellness", "spa", "massage", "retreat", "baby", "child", "children", "kid", "family", "tourist", "trip"
@@ -413,6 +413,23 @@ function extractLocations(message = "") {
   });
 }
 
+function extractOriginHint(message = "") {
+  const match = String(message || "").match(
+    /\bfrom\s+([\p{L}\p{M}][\p{L}\p{M}'.-]*(?:\s+[\p{L}\p{M}][\p{L}\p{M}'.-]*){0,3})/iu,
+  );
+  const origin = stripLocationCandidate(match?.[1] || "");
+  return /^\d/.test(origin) ? "" : origin;
+}
+
+function destinationLocations(message = "", memory = {}, intent = {}) {
+  const locations = locationsForMessage(message, memory);
+  if (locations.length < 2 || intent.type === "route_planning" || intent.customsQuestion) return locations;
+  const origin = normalize(extractOriginHint(message));
+  if (!origin) return locations;
+  const withoutOrigin = locations.filter((location) => normalize(location) !== origin);
+  return withoutOrigin.length ? withoutOrigin : locations;
+}
+
 function cleanTravelRole(value = "") {
   return stripLocationCandidate(
     String(value || "")
@@ -454,6 +471,7 @@ function extractRequestConstraints(message = "", previous = {}) {
   setTrue("minimalWalking", /\b(minimal|little|less|limited|avoid)\s+walking\b|\bwalking\s+(?:as little as possible|limit|minimal|limited)\b/);
   setTrue("minimalWalking", /\b(knee|ankle|hip|leg)\s+(?:injury|pain|problem)|\b(?:moderate|gentle)\s+walking\b|\bfrequent\s+(?:rest|seating)|\brest\s+stops?\b/);
   setTrue("minimalTransfers", /\b(minimal|few|fewer|avoid)\s+transfers?\b|\btransfers?\s+(?:as little as possible|minimal|limited)\b/);
+  setTrue("noCar", /\b(?:without|no)\s+(?:a\s+)?car\b|\b(?:do\s+not|don['’]?t|cannot|can['’]?t)\s+drive\b|\bpublic\s+transport\s+only\b/);
   setTrue("indoorAlternative", /\b(indoor|covered)\s+(?:alternative|option|backup)s?\b/);
   setTrue("rainAlternative", /\b(if it rains|rainy\s+day|rain(?:y)?\s+(?:alternative|option|backup)|wet[-\s]?weather)\b/);
   setTrue("breakfastPreferred", /\b(breakfast (?:preferred|included)|include breakfast|with breakfast|breakfast)\b/);
@@ -495,6 +513,9 @@ function extractRequestConstraints(message = "", previous = {}) {
     const dayWords = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fourteen: 14 };
     const days = dayWords[normalize(dayCountMatch[1])] || Number(dayCountMatch[1]);
     if (Number.isFinite(days) && days > 0 && days <= 31) constraints.dayCount = days;
+  }
+  if (!dayCountMatch && /\b(?:plan|itinerary)\b[\s\S]{0,48}\b(?:a|one|single|relaxed|full)\s+day\b|\bday[-\s]+(?:trip|plan|itinerary)\b/i.test(raw)) {
+    constraints.dayCount = 1;
   }
   if (
     /\b(?:half[-\s]?day|morning|afternoon|evening)\s+(?:plan|itinerary)\b|\b(?:plan|itinerary|build|create)\b[\s\S]{0,48}\b(?:morning|afternoon|evening)\b|\b(?:just|only|one)\b[\s\S]{0,32}\b(?:morning|afternoon|evening)\b/i.test(raw)
@@ -539,6 +560,11 @@ function extractRequestConstraints(message = "", previous = {}) {
   }
   if (/\b(old town|historic centre|historic center|city centre|city center|central)\b/i.test(raw)) {
     constraints.focus = raw.match(/\b(old town|historic centre|historic center|city centre|city center|central)\b/i)?.[1] || "";
+  }
+
+  const origin = extractOriginHint(raw);
+  if (origin && /\b(?:plan|trip|travel|travelling|traveling|visit|visiting|route|directions?|get|go|journey)\b/i.test(raw)) {
+    constraints.origin = origin;
   }
 
   const exclusions = [...raw.matchAll(/\b(?:do\s+not|don['’]?t|dont|dislike|not\s+interested\s+in|skip|exclude|excluding|avoid|without|no(?!\s+more\s+than))\s+(?:the\s+)?([a-z][a-z -]{1,36}?)(?=\s+(?:and|but|while|with|for|to|focus|just)\b|[,.!?;]|$)/gi)]
@@ -824,7 +850,7 @@ function detectIntent(message = "", memory = {}, previousMessages = []) {
     && /\b(medicine|medication|prescription|insulin|food|meat|dairy|cash|money|power bank|battery|lithium|drone|alcohol|tobacco|weapon|spray)\b/.test(text);
   const itineraryContinuation = hasStoredLocation
     && (memory.lastIntent === "destination_planning" || /\b(?:day|itinerary|plan|trip)\b/.test(normalize(memory.lastTopic || "")))
-    && /\b(make it|replace|change|keep (?:the )?(?:same|whole)|whole day|same (?:requirements|plan|trip)|focus (?:on|around)|start (?:after|at|from)|under\s*[€$£¥]?\s*\d+)\b/.test(text);
+    && /\b(make it|make\b[\s\S]{0,80}\b(?:breakfast|lunch|dinner|meal|backup|stop|plan)|add\b[\s\S]{0,80}\b(?:backup|alternative|stop|meal)|replace|change|keep (?:the )?(?:same|whole)|whole day|same (?:requirements|plan|trip)|focus (?:on|around)|start (?:after|at|from)|under\s*[€$£¥]?\s*\d+)\b/.test(text);
   const selectionFollowUp = hasStoredLocation
     && /\b(which of those|which of these|those options|these options|rank (?:the|those|these)|best (?:one|two|three|1|2|3))\b/.test(text);
 
@@ -905,7 +931,7 @@ function detectIntent(message = "", memory = {}, previousMessages = []) {
 
 function updateMemory(memory = {}, message = "", intent = {}) {
   const text = normalize(message);
-  const locations = locationsForMessage(message, memory);
+  const locations = destinationLocations(message, memory, intent);
   const dates = extractDates(message);
   const dateContext = resolveDateContext(message);
   const acceptedOffer = intent.acceptedOffer || null;
@@ -1003,7 +1029,7 @@ function updateMemory(memory = {}, message = "", intent = {}) {
 
 function resolveContext(message = "", memory = {}, previousMessages = []) {
   const intent = detectIntent(message, memory, previousMessages);
-  const locations = locationsForMessage(message, memory);
+  const locations = destinationLocations(message, memory, intent);
   const travelRoles = extractTravelRoles(message);
   const dates = extractDates(message);
   const dateContext = resolveDateContext(message);
@@ -1071,6 +1097,19 @@ function resolveContext(message = "", memory = {}, previousMessages = []) {
     ? { raw: memory.pendingActivitySearch.date || "previous date", label: memory.pendingActivitySearch.date || "previous date", iso: memory.pendingActivitySearch.targetDate, kind: "single_day" }
     : null;
 
+  const journeyRequest = intent.type === "destination_planning"
+    && updatedMemory.constraints?.origin
+    && normalize(updatedMemory.constraints.origin) !== normalize(destination)
+    ? {
+        origin: updatedMemory.constraints.origin,
+        destination,
+        mode: "transit",
+        departureTime: "",
+        dateLabel: dateContext?.label || retainedDateContext?.label || "",
+        targetDate: dateContext?.iso || retainedDateContext?.iso || "",
+      }
+    : null;
+
   return {
     intent,
     currentUserMessage: message,
@@ -1082,6 +1121,7 @@ function resolveContext(message = "", memory = {}, previousMessages = []) {
     destination,
     locationScope,
     routeRequest: intent.type === "route_planning" ? (intent.routeRequest || updatedMemory.route || null) : null,
+    journeyRequest,
     activityRequest,
     travelRoles,
     requestProfile: {

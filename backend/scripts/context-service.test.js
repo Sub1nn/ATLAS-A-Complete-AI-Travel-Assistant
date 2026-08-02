@@ -74,6 +74,51 @@ test("does not mistake an itinerary time window for a route", () => {
   assert.deepEqual(resolved.requestProfile.constraints.dietary, ["vegetarian"]);
 });
 
+test("day trips keep the departure city as an origin and preserve no-car constraints", () => {
+  const resolved = contextService.resolveContext(
+    "Plan a relaxed day in Porvoo tomorrow for two adults travelling from Helsinki without a car.",
+    {},
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "destination_planning");
+  assert.deepEqual(resolved.locations, ["Porvoo"]);
+  assert.equal(resolved.destination, "Porvoo");
+  assert.equal(resolved.requestProfile.constraints.dayCount, 1);
+  assert.equal(resolved.requestProfile.constraints.noCar, true);
+  assert.equal(resolved.requestProfile.constraints.origin, "Helsinki");
+  assert.deepEqual(resolved.journeyRequest, {
+    origin: "Helsinki",
+    destination: "Porvoo",
+    mode: "transit",
+    departureTime: "",
+    dateLabel: "tomorrow",
+    targetDate: resolved.dateContext.iso,
+  });
+});
+
+test("mixed meal and rain-backup refinements remain itinerary updates", () => {
+  const first = contextService.resolveContext(
+    "Plan a relaxed day in Porvoo tomorrow for two adults travelling from Helsinki without a car.",
+    {},
+    [],
+  );
+  const followUp = contextService.resolveContext(
+    "Make lunch vegetarian and add an indoor backup if it rains.",
+    first.memory,
+    [],
+  );
+
+  assert.equal(followUp.intent.type, "destination_planning");
+  assert.equal(followUp.intent.itineraryContinuation, true);
+  assert.equal(followUp.destination, "Porvoo");
+  assert.deepEqual(followUp.requestProfile.constraints.dietary, ["vegetarian"]);
+  assert.equal(followUp.requestProfile.constraints.rainAlternative, true);
+  assert.equal(followUp.requestProfile.constraints.dayCount, 1);
+  assert.equal(followUp.requestProfile.constraints.noCar, true);
+  assert.equal(followUp.requestProfile.constraints.origin, "Helsinki");
+});
+
 test("preserves deterministic route timing when the LLM planner adds route data", () => {
   const resolved = contextService.resolveContext(
     "What is the best way for two adults with large suitcases to travel from JFK Terminal 4 to a hotel near Times Square tonight at 23:30? Compare public transport with a taxi.",
