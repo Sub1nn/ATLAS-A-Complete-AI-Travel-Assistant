@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { verifyResponse } from "../services/responseVerifier.js";
 import { cacheKey, cacheStatus, getOrSetCache } from "../services/cacheService.js";
 import { hasAllowedSignature } from "../controllers/documentController.js";
-import { chatRateLimiter } from "../config/rateLimiter.js";
+import { chatRateLimiter, purgeUserRateLimitState, rateLimiterTestUtils } from "../config/rateLimiter.js";
 import mongoose from "mongoose";
 import { Conversation, normalizeConversationMemory } from "../models/Conversation.js";
 import { chatController, isDocumentFocusedRequest } from "../controllers/chatController.js";
@@ -30,10 +30,17 @@ import { GlobalUsage } from "../models/GlobalUsage.js";
 import { sessionService } from "../services/sessionService.js";
 import { emailService } from "../services/emailService.js";
 import { usageService } from "../services/usageService.js";
+import { documentMayHaveRemoteVectors } from "../services/accountDeletionService.js";
 import { authSignupSchema, chatRequestSchema, validate } from "../utils/validation.js";
 
 process.env.NODE_ENV = "test";
 const execFileAsync = promisify(execFile);
+
+test("Pinecone missing namespaces are treated as an idempotent deletion result", () => {
+  assert.equal(vectorStore._test.isMissingNamespaceError({ status: 404 }), true);
+  assert.equal(vectorStore._test.isMissingNamespaceError(new Error("request returned HTTP status 404")), true);
+  assert.equal(vectorStore._test.isMissingNamespaceError({ status: 503 }), false);
+});
 
 test("document extraction runs in a bounded child process", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "atlas-extractor-test-"));
@@ -734,6 +741,15 @@ test("attraction discovery filters low-value transport utility places", () => {
   }), false);
 });
 
+test("city discovery removes far-away places when local results exist", () => {
+  const places = [
+    { id: "local", location: { latitude: 60.397, longitude: 25.66 } },
+    { id: "far", location: { latitude: 60.25, longitude: 24.95 } },
+  ];
+  const filtered = toolService._test.spatiallyRelevantPlaces(places, 60.397, 25.66, 20);
+  assert.deepEqual(filtered.map((place) => place.id), ["local"]);
+});
+
 test("accessible indoor activity searches prioritize museums and libraries over playgrounds", () => {
   const plan = toolService._test.activityPlan(
     "old town accessible indoor museums libraries cultural attractions",
@@ -899,12 +915,38 @@ test("privacy, idempotency, usage and processing fields are indexed", () => {
   assert.ok(Document.schema.path("leaseOwner"));
   assert.ok(User.schema.path("deletionPending"));
   assert.ok(AccountDeletion.schema.path("leaseOwner"));
+  const accountUserIndex = AccountDeletion.schema.indexes().find(([fields]) => fields.userId === 1);
+  assert.equal(accountUserIndex?.[1]?.unique, true);
+  assert.deepEqual(accountUserIndex?.[1]?.partialFilterExpression, { userId: { $type: "objectId" } });
   assert.ok(StorageUsage.schema.path("documentCount"));
   assert.ok(OperationLease.schema.path("expiresAt"));
   assert.ok(DocumentDeletion.schema.path("leaseOwner"));
   assert.ok(WorkerHeartbeat.schema.path("lastSeenAt"));
   assert.ok(GlobalUsage.schema.path("providerCalls"));
   assert.equal(usageService._test.dayKey(new Date("2026-06-22T12:00:00Z")), "2026-06-22");
+});
+
+test("account deletion purges every user-scoped in-memory rate-limit record", async () => {
+  const userId = "507f1f77bcf86cd799439011";
+  const keys = rateLimiterTestUtils.userScopedRateLimitKeys(userId);
+  keys.forEach((key) => rateLimiterTestUtils.seedFallback(key));
+  rateLimiterTestUtils.seedFallback("atlas:future-user-feature:user:507f1f77bcf86cd799439011");
+  rateLimiterTestUtils.seedFallback("atlas:chat:user:different-user");
+
+  const result = await purgeUserRateLimitState(userId);
+
+  assert.equal(result.memoryDeleted, keys.length + 1);
+  keys.forEach((key) => assert.equal(rateLimiterTestUtils.hasFallback(key), false));
+  assert.equal(rateLimiterTestUtils.hasFallback("atlas:future-user-feature:user:507f1f77bcf86cd799439011"), false);
+  assert.equal(rateLimiterTestUtils.hasFallback("atlas:chat:user:different-user"), true);
+});
+
+test("account deletion cannot skip Pinecone when document vector state exists", () => {
+  assert.equal(documentMayHaveRemoteVectors({ vectorStatus: "indexed" }), true);
+  assert.equal(documentMayHaveRemoteVectors({ vectorRecordCount: 2 }), true);
+  assert.equal(documentMayHaveRemoteVectors({ vectorIndexedAt: new Date() }), true);
+  assert.equal(documentMayHaveRemoteVectors({ vectorNamespace: "atlas-user-example" }), true);
+  assert.equal(documentMayHaveRemoteVectors({ vectorStatus: "skipped", vectorRecordCount: 0 }), false);
 });
 
 test("provider circuits ignore permanent client errors and local budget rejection", () => {
@@ -935,6 +977,8 @@ test("security and conversation memory fields are persisted by the schemas", () 
   assert.ok(Conversation.schema.path("memory.route.origin"));
   assert.ok(Conversation.schema.path("memory.targetDate"));
   assert.ok(Conversation.schema.path("memory.constraints.dayCount"));
+  assert.ok(Conversation.schema.path("memory.constraints.noCar"));
+  assert.ok(Conversation.schema.path("memory.constraints.origin"));
 });
 
 test("document chunks overlap without exceeding their maximum size", () => {
