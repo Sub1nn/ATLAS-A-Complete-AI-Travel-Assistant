@@ -1,12 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-labelledby="title description">
   <title id="title">ATLAS AI Travel Assistant</title>
   <desc id="description">Plan safer, clearer and better-informed trips.</desc>
-  <rect width="1200" height="630" fill="#020617"/>
-  <circle cx="930" cy="315" r="205" fill="#0c4a6e" opacity=".55"/>
-  <circle cx="930" cy="315" r="155" fill="none" stroke="#38bdf8" stroke-width="10"/>
-  <path d="M775 315h310M930 160c52 52 76 103 76 155s-24 103-76 155c-52-52-76-103-76-155s24-103 76-155Z" fill="none" stroke="#7dd3fc" stroke-width="7"/>
-  <path d="m980 245-31 91-91 37 37-91 85-37Z" fill="#38bdf8" stroke="#e0f2fe" stroke-width="5"/>
-  <text x="100" y="250" fill="#fff" font-family="Inter,Arial,sans-serif" font-size="112" font-weight="700" letter-spacing="18">ATLAS</text>
-  <text x="105" y="330" fill="#7dd3fc" font-family="Inter,Arial,sans-serif" font-size="38" font-weight="600">AI TRAVEL ASSISTANT</text>
-  <text x="105" y="410" fill="#94a3b8" font-family="Inter,Arial,sans-serif" font-size="34">Plan safer, clearer and better-informed trips.</text>
+  <rect width="1200" height="630" fill="#171817"/>
+  <circle cx="930" cy="315" r="205" fill="#242624"/>
+  <circle cx="930" cy="315" r="155" fill="none" stroke="#9fc8b2" stroke-width="10"/>
+  <path d="M775 315h310M930 160c52 52 76 103 76 155s-24 103-76 155c-52-52-76-103-76-155s24-103 76-155Z" fill="none" stroke="#c5d9cc" stroke-width="7"/>
+  <path d="m980 245-31 91-91 37 37-91 85-37Z" fill="#9fc8b2" stroke="#f2f2ee" stroke-width="5"/>
+  <text x="100" y="250" fill="#f2f2ee" font-family="Inter,Arial,sans-serif" font-size="112" font-weight="700" letter-spacing="18">ATLAS</text>
+  <text x="105" y="330" fill="#b9ddc8" font-family="Inter,Arial,sans-serif" font-size="38" font-weight="600">AI TRAVEL ASSISTANT</text>
+  <text x="105" y="410" fill="#a9aba5" font-family="Inter,Arial,sans-serif" font-size="34">Plan safer, clearer and better-informed trips.</text>
 </svg>
