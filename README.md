@@ -259,6 +259,10 @@ Express Backend API
 | POST   | `/api/auth/forgot-password` | Request a password reset |
 | POST   | `/api/auth/reset-password` | Reset a password with a token |
 | PATCH  | `/api/auth/preferences` | Update travel preferences |
+| GET    | `/api/auth/data-export` | Export the authenticated user's account data |
+| PATCH  | `/api/auth/privacy-settings` | Update account retention preferences |
+| DELETE | `/api/auth/account` | Confirm and enqueue permanent account deletion |
+| GET    | `/api/auth/account-deletion-status` | Check deletion progress using the one-time tracking token |
 
 ### Chat
 
@@ -306,6 +310,7 @@ Create a `.env` file inside the `backend/` directory.
 
 ```env
 NODE_ENV=development
+DEPLOYMENT_ENV=development
 PORT=4000
 CORS_ORIGIN=http://localhost:5173
 
@@ -350,6 +355,11 @@ GOOGLE_MAPS_SERVER_API_KEY=your_google_maps_platform_server_key
 OPEN_WEATHER_KEY=your_openweather_key
 NEWS_API_KEY=your_newsapi_key
 YELP_API_KEY=your_yelp_key
+
+# Production email delivery
+EMAIL_TRANSPORT=resend
+EMAIL_FROM=ATLAS <no-reply@yourdomain.com>
+RESEND_API_KEY=your_resend_api_key
 ```
 
 Google Maps Platform endpoint mapping:
@@ -362,6 +372,35 @@ Google Maps Platform endpoint mapping:
 - Do not expose `GOOGLE_MAPS_SERVER_API_KEY` through Vite or browser code.
 
 In `NODE_ENV=development`, ATLAS bypasses HTTP rate limits and daily chat/provider/LLM usage budgets by default so local testing can continue without exhausting app-level counters. Set `ENFORCE_DEVELOPMENT_LIMITS=true` if you want to test production-like throttling locally. Production keeps limits enabled.
+
+### Staging email capture
+
+Production uses Resend by default and requires a verified sending domain. An isolated staging deployment may capture verification and password-reset messages in Mailtrap Sandbox instead of delivering them to real inboxes:
+
+```env
+DEPLOYMENT_ENV=staging
+EMAIL_TRANSPORT=mailtrap_sandbox
+MAILTRAP_SMTP_HOST=sandbox.smtp.mailtrap.io
+MAILTRAP_SMTP_PORT=2525
+MAILTRAP_SMTP_SECURE=false
+MAILTRAP_SMTP_USER=your_mailtrap_sandbox_username
+MAILTRAP_SMTP_PASS=your_mailtrap_sandbox_password
+```
+
+Mailtrap Sandbox is rejected unless `DEPLOYMENT_ENV=staging`. Never use it as a production delivery fallback: messages are intentionally captured and do not reach recipient inboxes. Keep the credentials in an untracked environment file or deployment secret manager.
+
+### Public preview email verification
+
+Email verification remains required by default. A controlled development or staging preview can temporarily allow signed-in users to explore ATLAS without marking their email address as verified:
+
+```env
+DEPLOYMENT_ENV=staging
+EMAIL_VERIFICATION_MODE=optional
+PASSWORD_RECOVERY_ENABLED=false
+PUBLIC_PREVIEW_DATA_RETENTION_DAYS=30
+```
+
+Optional verification is rejected when `DEPLOYMENT_ENV=production`. During preview signup, ATLAS requires the submitted domain to publish a usable MX mail record; this filters non-mail domains but does not prove ownership of an individual mailbox. Mailbox ownership still requires real email verification or a trusted OAuth provider. The frontend displays a compact public-preview notice, labels unverified identities as preview accounts and hides verification and password-recovery actions that cannot reach visitors through Mailtrap Sandbox. New preview accounts default to 30-day chat and document retention. Restore `EMAIL_VERIFICATION_MODE=required` and `PASSWORD_RECOVERY_ENABLED=true` when real email delivery is configured.
 
 ### Agent workflow rollout
 

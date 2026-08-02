@@ -317,6 +317,8 @@ function relevantToolNames(intent, locations, documentFocused = false, resolved 
     || Boolean(constraints.rainAlternative);
   const wantsSafety = /\b(safe|safety|risk|danger|advisory|security|crime|conflict|war|protest)\b/.test(currentText);
   const wantsCulture = /\b(culture|cultural|custom|customs|etiquette|tradition|traditional|history|historical)\b/.test(currentText);
+  const wantsItinerary = Number(constraints.dayCount || 0) > 0
+    || /\b(?:day[-\s]?(?:trip|plan)|itinerary|plan\s+(?:a|one|the)\s+day)\b/.test(currentTurnText);
   const uniqueTools = (tools) => [...new Set(tools.filter(Boolean))];
   const interests = new Set([...(resolved.memory?.interests || [])].map((item) => contextService.normalize(item)));
   const interestText = [...interests].join(" ");
@@ -346,11 +348,12 @@ function relevantToolNames(intent, locations, documentFocused = false, resolved 
     if ([wantsFood, wantsStay, wantsPlaces, wantsWeather, wantsSafety, wantsCulture].some(Boolean)) {
       return uniqueTools([
         wantsSafety ? "comprehensive_safety_intelligence" : "",
-        wantsPlaces ? "local_experiences_and_attractions" : "",
-        wantsFood ? "intelligent_restaurant_discovery" : "",
+        wantsPlaces || wantsItinerary ? "local_experiences_and_attractions" : "",
+        wantsFood || wantsItinerary ? "intelligent_restaurant_discovery" : "",
         wantsStay ? "smart_accommodation_finder" : "",
         wantsWeather ? "comprehensive_weather_analysis" : "",
         wantsCulture ? "cultural_and_travel_insights" : "",
+        resolved.journeyRequest ? "route_and_transport_planner" : "",
       ]);
     }
     return [
@@ -425,7 +428,7 @@ async function buildToolArgs(toolName, resolved, signal, reserveProviderCall) {
   }
 
   if (toolName === "route_and_transport_planner") {
-    const route = resolved.routeRequest || resolved.memory?.route || null;
+    const route = resolved.routeRequest || resolved.journeyRequest || resolved.memory?.route || null;
     if (route?.origin && route?.destination) {
       return {
         origin: route.origin,
@@ -1069,7 +1072,7 @@ function destinationIntro(destination = "your destination", resolved = {}, toolR
     ? `${destination} is in ${country}`
     : `${destination} needs local, area-specific planning`;
   if (themes.length) {
-    return `${placeLabel}. ATLAS is seeing ${naturalJoin(themes)} in the live local results, so build the plan around one compact area first, then add food, stays and transport time around that base.`;
+    return `${placeLabel}. The current local shortlist centres on ${naturalJoin(themes)}; for a short visit, keep the day in one compact area and add food and transport around it.`;
   }
   return `${placeLabel}. Choose the base area first, then use live weather, map results and recent reviews to decide what is worth doing, where to eat and where to stay.`;
 }
@@ -1498,6 +1501,7 @@ function destinationConstraintLines(resolved = {}) {
     lines.push(`Prioritize ${naturalJoin(needs)}; confirm entrances, lifts, toilets and seating directly.`);
   }
   if (constraints.minimalTransfers) lines.push("Prefer direct transport or the fewest practical transfers; verify step-free interchanges before leaving.");
+  if (constraints.noCar) lines.push(`Use public transport and walking${constraints.origin ? ` from ${constraints.origin}` : ""}; this plan does not assume access to a car.`);
   if (constraints.rainAlternative || constraints.indoorAlternative) {
     lines.push("Keep an indoor or covered alternative for poor weather.");
   }
@@ -1523,6 +1527,7 @@ function composeDestinationPipelineAnswer(resolved, toolResults = []) {
   const activities = firstResult(toolResults, "local_experiences_and_attractions");
   const restaurants = firstResult(toolResults, "intelligent_restaurant_discovery");
   const stays = firstResult(toolResults, "smart_accommodation_finder");
+  const route = firstResult(toolResults, "route_and_transport_planner");
   const destinations = displayDestinations(resolved);
   const destination = naturalJoin(destinations.length ? destinations : [locationDisplay(resolved)]);
   const primaryDestination = destinations[0] || locationDisplay(resolved);
@@ -1532,7 +1537,7 @@ function composeDestinationPipelineAnswer(resolved, toolResults = []) {
   const showSafety = shouldShowSafetySection(resolved, safety, destinations);
   const concise = wantsConciseAnswer(resolved);
 
-  if (!safety && !culture && !weather && !activities && !restaurants && !stays) return "";
+  if (!safety && !culture && !weather && !activities && !restaurants && !stays && !route) return "";
 
   if (resolved.intent.type === "safety_inquiry") {
     const lines = [`**Safety check: ${destination}**`];
@@ -1541,7 +1546,7 @@ function composeDestinationPipelineAnswer(resolved, toolResults = []) {
       lines.push((wantsConciseAnswer(resolved) ? safetySummary.slice(0, 4) : safetySummary).join("\n\n"));
       const advisoryNote = compactAdvisoryNote(safety, destination);
       if (advisoryNote) {
-        lines.push(`\n**Official advisory**`);
+        lines.push(safety.official_advisory?.url ? `\n**Official advisory**` : `\n**International sources**`);
         lines.push(advisoryNote);
       }
       const cautionScore = Number(safety.safety_assessment?.caution_score || 0);
@@ -1563,7 +1568,7 @@ function composeDestinationPipelineAnswer(resolved, toolResults = []) {
   const lines = [`**${destination}**`];
   lines.push(destinationIntro(primaryDestination, resolved, toolResults));
 
-  if (!isLocationRefinement && !concise && profile.culture?.length) {
+  if (!isLocationRefinement && !concise && !profile.generic && profile.culture?.length) {
     lines.push(`\n**Vibe and local context**`);
     lines.push(profile.culture.slice(0, 3).map((item) => `• ${item}`).join("\n"));
   }
@@ -1591,6 +1596,17 @@ function composeDestinationPipelineAnswer(resolved, toolResults = []) {
   if (constraintLines.length) {
     lines.push(`\n**Plan requirements**`);
     lines.push(constraintLines.map((item) => `• ${item}`).join("\n"));
+  }
+
+  if (route && resolved.journeyRequest) {
+    const bestRoute = Array.isArray(route.routes) ? route.routes[0] : null;
+    const routeAction = Array.isArray(route.search_actions) ? route.search_actions.find((item) => item?.url) : null;
+    const routeDetails = bestRoute
+      ? [bestRoute.duration, bestRoute.distance, Number.isFinite(Number(bestRoute.transfer_count)) ? `${bestRoute.transfer_count} transfer${Number(bestRoute.transfer_count) === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ")
+      : "Live timetable details were not returned; check the route again before departure.";
+    lines.push(`\n**Getting there**`);
+    lines.push(`• ${route.origin || resolved.journeyRequest.origin} → ${route.destination || primaryDestination} by public transport: ${routeDetails}`);
+    if (routeAction?.url) lines.push(`• [Open live directions](${routeAction.url}) for current departures and service changes.`);
   }
 
   const requestedStopLimit = Number(resolved.requestProfile?.constraints?.maxStops || 0);
@@ -1706,13 +1722,13 @@ function composeDestinationPipelineAnswer(resolved, toolResults = []) {
         mini.push(`Day ${index + 1}: use ${compactPlaceNameFromLine(line)} as the main anchor and keep nearby additions optional.`);
       });
       if (restaurantLines[0]) mini.push(`Food: keep the meal close to the day’s main area at ${compactPlaceNameFromLine(restaurantLines[0])}.`);
-      mini.push("Leave buffer for traffic, weather, security checks and opening-hour changes.");
+      mini.push("Leave buffer for transport delays, weather and opening-hour changes.");
     } else if (oneDayPlan) {
       if (activityLines[0]) mini.push(`${afternoonOnly ? "Afternoon" : "Start"}: begin with ${compactPlaceNameFromLine(activityLines[0])}.`);
       if (restaurantLines[0]) mini.push(`Lunch or early dinner: keep the meal close to your route at ${compactPlaceNameFromLine(restaurantLines[0])}.`);
       if (activityLines[1]) mini.push(`${afternoonOnly ? "Then" : "Afternoon"}: add ${compactPlaceNameFromLine(activityLines[1])} only if transport time is reasonable.`);
       if (stayLines[0]) mini.push(`Stay base: use ${compactPlaceNameFromLine(stayLines[0])} or the nearby hotel area as the first comparison point, then confirm final price, reviews and safety context.`);
-      mini.push("Buffer: leave extra time for traffic, weather, security checks and opening-hour changes.");
+      mini.push("Buffer: leave extra time for transport delays, weather and opening-hour changes.");
     } else {
       if (activityLines[0]) mini.push(`Start with one nearby attraction or neighbourhood: ${activityLines[0].replace(/^•\s*/, "")}.`);
       if (restaurantLines[0]) mini.push(`Keep one meal close to your base: ${restaurantLines[0].replace(/^•\s*/, "")}.`);

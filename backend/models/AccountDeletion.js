@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 
 const AccountDeletionSchema = new mongoose.Schema(
   {
-    userId: { type: mongoose.Schema.Types.ObjectId, unique: true, sparse: true, index: true },
+    userId: { type: mongoose.Schema.Types.ObjectId },
     trackingTokenHash: { type: String, required: true, unique: true, select: false },
     notificationEmail: { type: String, select: false },
     status: { type: String, enum: ["queued", "processing", "failed", "dead_letter", "completed"], default: "queued", index: true },
@@ -17,6 +17,10 @@ const AccountDeletionSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+AccountDeletionSchema.index(
+  { userId: 1 },
+  { unique: true, partialFilterExpression: { userId: { $type: "objectId" } } },
+);
 AccountDeletionSchema.index({ status: 1, nextAttemptAt: 1, leaseUntil: 1 });
 AccountDeletionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 

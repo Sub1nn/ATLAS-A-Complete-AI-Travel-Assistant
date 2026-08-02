@@ -18,6 +18,7 @@ function App() {
     isCheckingAuth,
     authError,
     authNotice,
+    authConfig,
     clearAuthError,
     clearAuthNotice,
   } = useAuth();
@@ -55,6 +56,8 @@ function App() {
         initialNotice={authNotice}
         onClearInitialError={clearAuthError}
         onClearInitialNotice={clearAuthNotice}
+        publicPreview={authConfig.publicPreview}
+        passwordRecoveryEnabled={authConfig.passwordRecoveryEnabled}
       />
     );
   }

@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import { User } from "../models/User.js";
+import { isEmailVerificationRequired } from "../config/emailVerification.js";
 import { getJwtSecret } from "../utils/security.js";
 
 export async function requireAuth(req, res, next) {
@@ -35,6 +36,8 @@ export async function requireAuth(req, res, next) {
 }
 
 export function requireVerifiedEmail(req, res, next) {
+  if (!isEmailVerificationRequired()) return next();
+
   if (!req.user?.emailVerified) {
     return res.status(403).json({
       message: "Please verify your email before using chat or document features.",

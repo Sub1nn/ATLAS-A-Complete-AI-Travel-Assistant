@@ -68,6 +68,11 @@ function configurationIssue() {
   return "Pinecone is configured";
 }
 
+function isMissingNamespaceError(error) {
+  const status = Number(error?.status || error?.statusCode || error?.response?.status || 0);
+  return status === 404 || /HTTP status 404/i.test(String(error?.message || ""));
+}
+
 export function namespaceFor(userId) {
   const prefix = process.env.PINECONE_NAMESPACE_PREFIX || DEFAULT_NAMESPACE_PREFIX;
   const safeUserId = String(userId || "anonymous").replace(/[^a-zA-Z0-9_-]/g, "");
@@ -373,6 +378,11 @@ export const vectorStore = {
       await index.deleteAll({ namespace });
       return { deleted: true, provider: "pinecone", namespace };
     } catch (error) {
+      // Pinecone returns 404 when a namespace has no records. Deletion is
+      // idempotent, so an already-absent namespace satisfies the privacy job.
+      if (isMissingNamespaceError(error)) {
+        return { deleted: true, provider: "pinecone", namespace, alreadyAbsent: true };
+      }
       logger.warn("Pinecone user namespace delete failed", { reason: error.message });
       return { deleted: false, provider: "pinecone", namespace, reason: error.message };
     }
@@ -385,5 +395,6 @@ export const vectorStore = {
     chunkMetadata,
     configured,
     configurationIssue,
+    isMissingNamespaceError,
   },
 };

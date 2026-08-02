@@ -17,9 +17,17 @@ import { logger } from "../utils/logger.js";
 import { emailService } from "./emailService.js";
 import { reportOperationalError } from "./errorReporter.js";
 import { deleteAtlasUserThreads } from "../agents/atlasGraph.js";
+import { purgeUserRateLimitState } from "../config/rateLimiter.js";
 
 const leaseMs = () => Math.max(60000, Number(process.env.ACCOUNT_DELETION_LEASE_MS || 10 * 60 * 1000));
 const maxAttempts = () => Math.max(1, Number(process.env.ACCOUNT_DELETION_MAX_ATTEMPTS || 20));
+
+export function documentMayHaveRemoteVectors(document = {}) {
+  return document.vectorStatus === "indexed"
+    || Number(document.vectorRecordCount || 0) > 0
+    || Boolean(document.vectorIndexedAt)
+    || Boolean(String(document.vectorNamespace || "").trim());
+}
 
 async function enqueue(userId, { trackingTokenHash, notificationEmail } = {}, mongoSession = null) {
   try {
@@ -70,15 +78,6 @@ function startHeartbeat(job) {
 
 async function completeLocalRecords(job, session = null) {
   const options = session ? { session } : undefined;
-  const completed = await AccountDeletion.updateOne(
-    { _id: job._id, leaseOwner: job.leaseOwner, status: "processing" },
-    {
-      $set: { status: "completed", completedAt: new Date(), expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), lastError: "" },
-      $unset: { userId: "", notificationEmail: "", leaseOwner: "", leaseUntil: "", nextAttemptAt: "" },
-    },
-    options,
-  );
-  if (!completed.matchedCount) throw Object.assign(new Error("Account deletion lease ownership was lost before completion"), { code: "ACCOUNT_DELETION_LEASE_LOST" });
   await Message.deleteMany({ userId: job.userId }, options);
   await Conversation.deleteMany({ userId: job.userId }, options);
   await Document.deleteMany({ userId: job.userId }, options);
@@ -89,6 +88,15 @@ async function completeLocalRecords(job, session = null) {
   await OperationLease.deleteMany({ userId: job.userId }, options);
   await DocumentDeletion.deleteMany({ userId: job.userId }, options);
   await User.deleteOne({ _id: job.userId }, options);
+  const completed = await AccountDeletion.updateOne(
+    { _id: job._id, leaseOwner: job.leaseOwner, status: "processing" },
+    {
+      $set: { status: "completed", completedAt: new Date(), expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), lastError: "" },
+      $unset: { userId: "", notificationEmail: "", leaseOwner: "", leaseUntil: "", nextAttemptAt: "" },
+    },
+    options,
+  );
+  if (!completed.matchedCount) throw Object.assign(new Error("Account deletion lease ownership was lost before completion"), { code: "ACCOUNT_DELETION_LEASE_LOST" });
 }
 
 async function processNext() {
@@ -129,18 +137,25 @@ async function processNext() {
     const graphDeletion = await deleteAtlasUserThreads(job.userId, conversations.map((conversation) => conversation._id));
     if (!graphDeletion.deleted) throw new Error(`Agent checkpoint deletion failed: ${graphDeletion.reason || "unknown error"}`);
 
+    const documents = await Document.find({ userId: job.userId })
+      .select("_id +rawUploadId vectorStatus vectorNamespace vectorRecordCount vectorIndexedAt")
+      .lean();
+    const remoteVectorsMayExist = documents.some(documentMayHaveRemoteVectors);
     if (vectorStore.isConfigured()) {
       const remote = await vectorStore.deleteUserNamespace(job.userId);
       if (!remote.deleted) throw new Error(`Remote vector deletion failed: ${remote.reason || "unknown error"}`);
+    } else if (remoteVectorsMayExist) {
+      throw new Error("Pinecone is unavailable while indexed account vectors still require deletion");
     }
 
-    const documents = await Document.find({ userId: job.userId }).select("_id +rawUploadId").lean();
     for (const document of documents) {
       const raw = await documentQueueService.deleteUpload(document.rawUploadId);
       if (!raw.deleted) throw new Error(`Original upload deletion failed for document ${document._id}`);
     }
     const orphanedUploads = await documentQueueService.deleteUserUploads(job.userId);
     if (!orphanedUploads.deleted) throw new Error("One or more original uploads could not be deleted");
+
+    await purgeUserRateLimitState(job.userId);
 
     if (process.env.MONGODB_TRANSACTIONS === "true") {
       const session = await mongoose.startSession();
@@ -154,8 +169,8 @@ async function processNext() {
     }
     const email = job.notificationEmail;
     if (email) await emailService.sendAccountDeletionUpdate(email, true);
-    logger.info("Account deletion completed", { userId: job.userId.toString() });
-    return { deleted: true, userId: job.userId.toString() };
+    logger.info("Account deletion completed", { deletionJobId: job._id.toString() });
+    return { deleted: true, deletionJobId: job._id.toString() };
   } catch (error) {
     const exhausted = Number(job.attempts || 0) >= maxAttempts();
     const delay = Math.min(60 * 60 * 1000, 15000 * (2 ** Math.max(0, Number(job.attempts || 1) - 1)));
@@ -174,7 +189,7 @@ async function processNext() {
       reportOperationalError(`Account deletion dead-lettered: ${error.message}`, { service: "account-deletion-worker", severity: "critical" });
       if (job.notificationEmail) await emailService.sendAccountDeletionUpdate(job.notificationEmail, false);
     }
-    logger.warn("Account deletion attempt failed", { userId: job.userId.toString(), reason: error.message, exhausted });
+    logger.warn("Account deletion attempt failed", { deletionJobId: job._id.toString(), reason: error.message, exhausted });
     return { deleted: false, retryScheduled: !exhausted, reason: error.message };
   } finally {
     clearInterval(heartbeat);

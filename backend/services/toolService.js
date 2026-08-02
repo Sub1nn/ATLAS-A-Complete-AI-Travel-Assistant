@@ -1232,6 +1232,16 @@ function distanceKm(lat1, lon1, lat2, lon2) {
   return 6371 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
 }
 
+function spatiallyRelevantPlaces(places = [], latitude, longitude, maxDistanceKm = 25) {
+  const nearby = places.filter((place) => {
+    const placeLat = place.location?.latitude ?? place.geometry?.location?.lat ?? place.coordinates?.latitude;
+    const placeLon = place.location?.longitude ?? place.geometry?.location?.lng ?? place.coordinates?.longitude;
+    const distance = distanceKm(latitude, longitude, placeLat, placeLon);
+    return distance == null || distance <= maxDistanceKm;
+  });
+  return nearby.length ? nearby : places;
+}
+
 function highEndHotelName(name = "") {
   return /\b(radisson|marriott|hyatt|hilton|sheraton|intercontinental|crowne|autograph|soaltee|shanker|palace|resort|luxury|ritz|four seasons|mandarin oriental)\b/i.test(String(name));
 }
@@ -1466,7 +1476,7 @@ async function restaurantTool({ lat, lon, location_name, cuisine_preference = "l
     };
   }
 
-  let restaurants = raw;
+  let restaurants = spatiallyRelevantPlaces(raw, latitude, longitude, 20);
   const budget = normalize(budget_level);
   const cuisineText = normalize(cuisine_preference);
   if (/\bvegetarian\b/.test(cuisineText)) {
@@ -1616,15 +1626,11 @@ async function attractionsTool({ lat, lon, location_name, interest_type = "attra
   const isSportsRequest = /tennis|court|sports|badminton|football|soccer|basketball|volleyball|swimming|gym|fitness|padel|pickleball|squash|golf|climbing|bowling|skating|running|sauna/.test(normalizedInterest);
   const needsIndoorEvidence = /\bindoor\b/.test(normalizedInterest);
   const needsCompactArea = /\b(minimal walking|limited walking|compact)\b/.test(normalizedInterest);
+  const localCandidates = spatiallyRelevantPlaces(raw, latitude, longitude, isSportsRequest ? 30 : 20);
   const compactCandidates = needsCompactArea
-    ? raw.filter((place) => {
-        const placeLat = place.location?.latitude ?? place.geometry?.location?.lat;
-        const placeLon = place.location?.longitude ?? place.geometry?.location?.lng;
-        const distance = distanceKm(latitude, longitude, placeLat, placeLon);
-        return distance == null || distance <= 1.75;
-      })
-    : raw;
-  const spatialPool = compactCandidates.length ? compactCandidates : raw;
+    ? spatiallyRelevantPlaces(localCandidates, latitude, longitude, 1.75)
+    : localCandidates;
+  const spatialPool = compactCandidates.length ? compactCandidates : localCandidates;
   const indoorCandidates = needsIndoorEvidence
     ? spatialPool.filter((place) => /\b(museum|library|art gallery|art_gallery|shopping mall|shopping_mall)\b/.test(placeSearchText(place)))
     : [];
@@ -2463,5 +2469,6 @@ export const toolService = {
     recordProviderSuccess,
     restaurantPlan,
     activityPlan,
+    spatiallyRelevantPlaces,
   },
 };

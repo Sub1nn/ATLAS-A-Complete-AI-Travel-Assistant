@@ -1,21 +1,21 @@
 import React, { useEffect, useRef, useState } from "react";
-import { FileText, Globe2, History, Loader2, ShieldCheck } from "lucide-react";
+import { Compass, FileText, Globe2, History, Info, Loader2 } from "lucide-react";
 
 const benefits = [
   {
     icon: History,
-    title: "Saved planning history",
-    text: "Continue trip planning later without losing the previous context.",
+    title: "Continue where you left off",
+    text: "Return to saved trips without repeating destinations, preferences or earlier decisions.",
   },
   {
     icon: FileText,
-    title: "Document-aware chat",
-    text: "Upload travel PDFs, bookings or DOCX files and ask questions about them.",
+    title: "Plan with your documents",
+    text: "Ask questions about bookings, itineraries, PDFs and DOCX files.",
   },
   {
-    icon: ShieldCheck,
-    title: "Private workspace",
-    text: "Your account keeps conversations and uploaded files tied to your session.",
+    icon: Compass,
+    title: "Use current travel context",
+    text: "Check places, routes, weather and practical travel details as your plan changes.",
   },
 ];
 
@@ -31,6 +31,8 @@ const AuthPage = ({
   initialNotice = "",
   onClearInitialError,
   onClearInitialNotice,
+  publicPreview = false,
+  passwordRecoveryEnabled = true,
 }) => {
   const [mode, setMode] = useState(initialMode || "login");
   const [form, setForm] = useState({ name: "", email: "", password: "", privacyAccepted: false });
@@ -165,8 +167,8 @@ const AuthPage = ({
 
   return (
     <div className="min-h-screen bg-[#171817] text-[#f2f2ee]">
-      <div className="mx-auto grid min-h-screen max-w-6xl items-center gap-10 px-5 py-10 lg:grid-cols-[1.05fr_0.95fr]">
-        <section>
+      <div className="mx-auto grid min-h-screen max-w-6xl content-center gap-8 px-5 py-10 lg:grid-cols-[1.05fr_0.95fr] lg:gap-x-10">
+        <section className="lg:col-start-1 lg:row-start-1">
           <div className="mb-8 flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#3a3c3a] bg-[#242624]">
               <Globe2 className="h-[18px] w-[18px] text-[#b9ddc8]" />
@@ -180,36 +182,31 @@ const AuthPage = ({
           </div>
 
           <p className="text-xs font-medium uppercase tracking-[0.18em] text-[#8e908b]">
-            Your personal travel workspace
+            Your AI travel planning workspace
           </p>
-          <h1 className="mt-5 max-w-3xl text-4xl font-semibold leading-[1.08] tracking-[-0.04em] text-[#f3f3ef] sm:text-6xl">
-            Plan with context that stays with you.
+          <h1 className="mt-5 max-w-3xl text-4xl font-semibold leading-[1.06] tracking-[-0.04em] text-[#f3f3ef] sm:text-[3.35rem] lg:text-5xl xl:text-[3.35rem]">
+            Plan better trips with an assistant that remembers.
           </h1>
-          <p className="mt-5 max-w-2xl text-lg leading-8 text-[#a1a39d]">
-            Sign in to use ATLAS with persistent chat history, follow-up memory
-            and document upload support. This keeps your travel context
-            available across sessions.
+          <p className="mt-5 max-w-2xl text-lg leading-8 text-[#a9aba5]">
+            ATLAS keeps your destinations, preferences, conversations and
+            travel documents together, with current information on places,
+            routes, weather and safety. Sign in to continue without starting
+            over.
           </p>
 
-          <div className="mt-9 grid border-y border-[#303230] sm:grid-cols-3 lg:grid-cols-1 xl:grid-cols-3">
-            {benefits.map(({ icon: Icon, title: itemTitle, text }) => (
-              <div
-                key={itemTitle}
-                className="border-b border-[#303230] px-1 py-5 last:border-b-0 sm:border-b-0 sm:border-r sm:px-4 sm:first:pl-0 sm:last:border-r-0 lg:border-b lg:border-r-0 lg:px-1 lg:last:border-b-0 xl:border-b-0 xl:border-r xl:px-4"
-              >
-                <div className="mb-3 flex h-8 w-8 items-center justify-center rounded-md bg-[#242624]">
-                  <Icon className="h-4 w-4 text-[#9fc8b2]" />
-                </div>
-                <h3 className="text-sm font-medium text-[#e4e5e0]">
-                  {itemTitle}
-                </h3>
-                <p className="mt-2 text-sm leading-6 text-[#7f817c]">{text}</p>
-              </div>
-            ))}
-          </div>
         </section>
 
-        <section className="rounded-2xl border border-[#3a3c3a] bg-[#222422] p-6 shadow-[0_18px_60px_rgba(0,0,0,0.22)] sm:p-8">
+        <section className="rounded-2xl border border-[#3a3c3a] bg-[#222422] p-6 shadow-[0_18px_60px_rgba(0,0,0,0.22)] sm:p-8 lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:self-center">
+          {publicPreview && mode !== "reset" && mode !== "verify" && (
+            <div className="mb-5 flex gap-3 rounded-xl border border-[#496052] bg-[#1c2921] px-4 py-3 text-sm leading-6 text-[#c5d9cc]">
+              <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#9fc8b2]" />
+              <p>
+                <span className="font-medium text-[#e0eee5]">Public preview.</span>{" "}
+                Full access is enabled. Use a password you can remember
+                {!passwordRecoveryEnabled && "; password recovery is temporarily unavailable"}.
+              </p>
+            </div>
+          )}
           <div className="mb-6">
             <h2 className="text-2xl font-semibold tracking-[-0.02em] text-[#f2f2ee]">{title}</h2>
             <p className="mt-2 text-sm leading-6 text-[#999b95]">{subtitle}</p>
@@ -243,6 +240,11 @@ const AuthPage = ({
                     autoComplete="email"
                     required
                   />
+                  {mode === "signup" && (
+                    <span className="mt-2 block text-xs leading-5 text-[#777a75]">
+                      Use an address from a domain that can receive email.
+                    </span>
+                  )}
                 </label>
               )}
 
@@ -350,16 +352,7 @@ const AuthPage = ({
                 New to ATLAS? Create an account
               </button>
             )}
-            {mode === "signup" && (
-              <button
-                type="button"
-                onClick={() => switchMode("login")}
-                className="hover:text-[#d1eadc]"
-              >
-                Already have an account? Sign in
-              </button>
-            )}
-            {mode === "login" && (
+            {mode === "login" && passwordRecoveryEnabled && (
               <button
                 type="button"
                 onClick={() => switchMode("forgot")}
@@ -369,6 +362,25 @@ const AuthPage = ({
               </button>
             )}
           </div>
+        </section>
+
+        <section aria-label="Why use ATLAS" className="grid gap-3 sm:grid-cols-3 lg:col-start-1 lg:row-start-2 lg:grid-cols-1 xl:grid-cols-3">
+          {benefits.map(({ icon: Icon, title: itemTitle, text }) => (
+            <div
+              key={itemTitle}
+              className="flex min-h-[164px] flex-col rounded-xl border border-[#343734] bg-[#1c1e1c] p-4 shadow-[0_12px_32px_rgba(0,0,0,0.12)] lg:min-h-0 lg:flex-row xl:min-h-[164px] xl:flex-col"
+            >
+              <div className="mb-4 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#343734] bg-[#242624] lg:mb-0 lg:mr-4 xl:mb-4 xl:mr-0">
+                <Icon className="h-4 w-4 text-[#9fc8b2]" />
+              </div>
+              <div>
+                <h3 className="text-[15px] font-medium leading-5 text-[#e7e8e3]">
+                  {itemTitle}
+                </h3>
+                <p className="mt-2 text-sm leading-6 text-[#a1a39d]">{text}</p>
+              </div>
+            </div>
+          ))}
         </section>
       </div>
     </div>

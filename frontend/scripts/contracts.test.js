@@ -7,6 +7,11 @@ const hookSource = fs.readFileSync(new URL("../src/hooks/useChat.js", import.met
 const legalSource = fs.readFileSync(new URL("../src/legal-page.js", import.meta.url), "utf8");
 const viteSource = fs.readFileSync(new URL("../vite.config.js", import.meta.url), "utf8");
 const deletionStatusSource = fs.readFileSync(new URL("../src/deletion-status.js", import.meta.url), "utf8");
+const sidebarSource = fs.readFileSync(new URL("../src/components/sidebar/HistorySidebar.jsx", import.meta.url), "utf8");
+const deleteAccountDialogSource = fs.readFileSync(new URL("../src/components/sidebar/DeleteAccountDialog.jsx", import.meta.url), "utf8");
+const authPageSource = fs.readFileSync(new URL("../src/components/auth/AuthPage.jsx", import.meta.url), "utf8");
+const travelAssistantSource = fs.readFileSync(new URL("../src/components/TravelAssistant.jsx", import.meta.url), "utf8");
+const authHookSource = fs.readFileSync(new URL("../src/hooks/useAuth.js", import.meta.url), "utf8");
 
 test("document retry is exposed by documentAPI and consumed by useChat", () => {
   const conversationBlock = apiSource.slice(apiSource.indexOf("export const conversationAPI"), apiSource.indexOf("export const documentAPI"));
@@ -14,6 +19,41 @@ test("document retry is exposed by documentAPI and consumed by useChat", () => {
   assert.doesNotMatch(conversationBlock, /async retry\(/);
   assert.match(documentBlock, /async retry\(id\)/);
   assert.match(hookSource, /documentAPI\.retry\(id\)/);
+});
+
+test("account deletion is visible, deliberate and reports its destructive scope", () => {
+  assert.match(sidebarSource, />\s*Delete account\s*</);
+  assert.match(sidebarSource, /DeleteAccountDialog/);
+  assert.match(deleteAccountDialogSource, /role="dialog"/);
+  assert.match(deleteAccountDialogSource, /confirmation === CONFIRMATION_PHRASE/);
+  assert.match(deleteAccountDialogSource, /authAPI\.deleteAccount\(password\)/);
+  assert.match(deleteAccountDialogSource, /Pinecone namespace/);
+  assert.match(deleteAccountDialogSource, /deletion-status receipt for up to 30 days/);
+});
+
+test("authentication hero explains ATLAS benefits with distinct responsive cards", () => {
+  assert.match(authPageSource, /Plan better trips with an assistant that remembers\./);
+  assert.match(authPageSource, /Sign in to continue without starting/);
+  assert.match(authPageSource, /Continue where you left off/);
+  assert.match(authPageSource, /Plan with your documents/);
+  assert.match(authPageSource, /Use current travel context/);
+  assert.match(authPageSource, /grid gap-3 sm:grid-cols-3 lg:col-start-1 lg:row-start-2 lg:grid-cols-1 xl:grid-cols-3/);
+  assert.match(authPageSource, /lg:col-start-2 lg:row-span-2 lg:row-start-1/);
+  assert.match(authPageSource, /rounded-xl border border-\[#343734\]/);
+});
+
+test("public preview is clearly labelled without offering sandbox verification", () => {
+  assert.match(travelAssistantSource, /user\?\.publicPreview && !user\?\.emailVerified/);
+  assert.match(travelAssistantSource, />Public preview</);
+  assert.match(travelAssistantSource, /Full access is enabled while email verification is optional/);
+  assert.match(travelAssistantSource, /!user\?\.publicPreview && !user\?\.emailVerified/);
+  assert.match(sidebarSource, /Public preview account/);
+  assert.match(authPageSource, /Use an address from a domain that can receive email/);
+  assert.match(authPageSource, /Public preview\./);
+  assert.match(authPageSource, /password recovery is temporarily unavailable/);
+  assert.match(authPageSource, /mode === "login" && passwordRecoveryEnabled/);
+  assert.match(apiSource, /async config\(\)/);
+  assert.match(authHookSource, /Promise\.allSettled\(\[authAPI\.config\(\), authAPI\.restoreSession\(\)\]\)/);
 });
 
 test("session restoration uses one shared refresh promise", () => {

@@ -7,6 +7,7 @@ import { privacyController } from "../controllers/privacyController.js";
 import { requireCsrf } from "../services/sessionService.js";
 
 const router = express.Router();
+router.get("/config", asyncHandler(authController.config));
 router.post("/signup", authRateLimiter, asyncHandler(authController.signup));
 router.post("/login", authRateLimiter, asyncHandler(authController.login));
 router.get("/csrf", asyncHandler(authController.csrf));
