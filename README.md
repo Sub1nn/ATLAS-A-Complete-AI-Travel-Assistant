@@ -1,801 +1,366 @@
-# ATLAS AI Travel Assistant
+# ATLAS — Agentic AI Travel Assistant
 
-ATLAS is a full-stack AI travel assistant designed to help users plan trips, explore destinations, understand local context, and manage travel conversations in one workspace.
+<p align="center">
+  <img src="frontend/public/atlas-og-image.png" alt="ATLAS AI Travel Assistant" width="100%">
+</p>
 
-The application combines a React frontend, Node.js/Express backend, MongoDB persistence, JWT authentication, document upload, saved chat history, and external travel APIs. Users can create an account, continue previous conversations, upload travel-related files, and receive contextual AI responses supported by weather, location, safety, and document information where available.
+<p align="center">
+  An agentic travel-planning workspace with live travel context, conversation memory, document-aware chat and privacy-first account controls.
+</p>
 
----
+<p align="center">
+  <a href="https://atlas.51.21.25.3.nip.io/"><strong>Live public preview</strong></a>
+  ·
+  <a href="https://github.com/Sub1nn/ATLAS-A-Complete-AI-Travel-Assistant/actions/workflows/ci.yml"><strong>CI</strong></a>
+  ·
+  <a href="TRAVEL_RESPONSE_FLOW.md"><strong>Response architecture</strong></a>
+  ·
+  <a href="DOCKER_DEPLOYMENT.md"><strong>Deployment guide</strong></a>
+</p>
 
-## Features
+<p align="center">
+  <a href="https://github.com/Sub1nn/ATLAS-A-Complete-AI-Travel-Assistant/actions/workflows/ci.yml"><img src="https://github.com/Sub1nn/ATLAS-A-Complete-AI-Travel-Assistant/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <img src="https://img.shields.io/badge/Node.js-20.19%2B-5f8f72" alt="Node.js 20.19 or newer">
+  <img src="https://img.shields.io/badge/React-18-6f9f8c" alt="React 18">
+  <img src="https://img.shields.io/badge/LangGraph-agentic%20workflow-8bb69f" alt="LangGraph agentic workflow">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-b9ddc8" alt="MIT licence"></a>
+</p>
 
-### User authentication
+## Live preview
 
-- User signup and login
-- JWT-based authentication
-- Protected backend routes
-- Persistent frontend session
-- Automatic session validation on page reload
+**Try ATLAS:** https://atlas.51.21.25.3.nip.io/
 
-### AI travel assistant
+![ATLAS public preview sign-in](docs/images/atlas-public-preview.jpg)
 
-- Chat-based travel planning interface
-- Destination-aware responses
-- Context memory inside each conversation
-- Support for travel planning, local guidance, safety context, weather, accommodation guidance, sports/activity discovery, route planning, and practical trip advice
-- Dynamic response formatting that changes according to the user intent instead of using one generic travel template
+> [!IMPORTANT]
+> This deployment is a controlled portfolio preview, not an unrestricted public-production claim. Email verification is temporarily optional, password recovery is unavailable, provider usage is capped and new preview accounts default to 30-day data retention. Use a password you can remember and do not upload sensitive documents.
 
-### Conversation history
+## Why ATLAS
 
-- Saved conversations per authenticated user
-- Conversation list sidebar
-- Continue previous chats
-- Delete individual conversations
-- Clear all conversations
+ATLAS is more than a prompt wrapped in a chat interface. It resolves travel intent, preserves relevant constraints across follow-ups, selects bounded specialist tools, gathers current evidence and verifies the final response before presenting it in a readable travel-planning layout.
 
-### Document upload and document-aware chat
+| Capability | What it provides |
+| --- | --- |
+| Agentic planning | LangGraph coordinates context resolution, planning, tool selection, composition, verification and one bounded repair pass |
+| Live travel intelligence | Places, routes, geocoding, local time, weather, news and local discovery are gathered only when relevant |
+| Contextual conversations | Destinations, origin, dates, pace, accessibility, budget and preferences survive appropriate follow-ups without leaking stale locations |
+| Document-aware chat | PDF, DOCX and TXT content is extracted in a constrained worker and retrieved through user-isolated Pinecone namespaces |
+| Structured responses | Intent-specific renderers produce clear routes, itineraries, dining, accommodation, activity, weather and safety sections |
+| Privacy controls | Users can export data, change retention, delete conversations and trigger durable account deletion across application stores |
+| Resilient providers | Timeouts, bounded retries, circuit breakers, caching, rate limits and daily cost budgets protect availability and spend |
 
-- Upload PDF, DOCX, and TXT files
-- Extract and store document text
-- Split documents into searchable chunks
-- Ask questions about uploaded files
-- Attach documents to conversations
+## Architecture
 
-### External API integration
+~~~mermaid
+flowchart TB
+    User[Traveller] --> Edge[TLS reverse proxy]
+    Edge --> Web[React + Vite UI<br>Nginx]
+    Web --> API[Express API]
 
-ATLAS can use external services for live or contextual travel information:
+    API --> Auth[Auth, sessions, CSRF<br>privacy controls]
+    API --> Graph[Authoritative LangGraph workflow]
 
-- Groq LLM API for AI responses
-- Google Places API (New) and Routes API v2 for location, place and route information
-- OpenWeather API for weather data
-- NewsAPI for current safety or destination context
-- Yelp API support for local recommendations
+    Graph --> Context[Context and memory resolution]
+    Context --> Planner[Structured LangChain planner]
+    Planner --> Tools[Bounded specialist tools]
+    Tools --> Compose[Evidence-grounded composition]
+    Compose --> Verify[Quality verification<br>and one repair pass]
 
----
+    Tools --> Google[Google Maps Platform]
+    Tools --> Weather[OpenWeather]
+    Tools --> News[NewsAPI]
+    Tools --> Yelp[Yelp]
+    Planner --> Groq[Groq]
 
-## Pinecone semantic document retrieval
+    API --> Mongo[(MongoDB replica set)]
+    API --> Redis[(Redis)]
+    API --> Pinecone[(Pinecone)]
 
-ATLAS supports Pinecone-backed semantic retrieval for uploaded PDF, DOCX and TXT files. MongoDB stores the source document record. Pinecone stores vectors plus document identifiers, filenames and bounded document-chunk text; integrated-index mode also stores its searchable text field. See `PINECONE_RAG_SETUP.md` for setup details and `TRAVEL_RESPONSE_FLOW.md` for the orchestration design.
+    Docs[Document worker] --> Mongo
+    Docs --> Pinecone
+    Privacy[Privacy and deletion worker] --> Mongo
+    Privacy --> Pinecone
+    Retention[Retention worker] --> Mongo
 
-Recommended backend variables:
+    Graph -. sanitized structural traces .-> LangSmith[LangSmith]
+~~~
 
-```env
-PINECONE_ENABLED=true
-PINECONE_API_KEY=your_pinecone_api_key
-PINECONE_INDEX_NAME=atlas-documents
-PINECONE_INDEX_HOST=your_pinecone_index_host_if_using_an_existing_index
-PINECONE_INDEX_MODE=inference
-PINECONE_TEXT_FIELD=text
-PINECONE_EMBEDDING_MODEL=llama-text-embed-v2
-PINECONE_EMBEDDING_DIMENSIONS=1024
-PINECONE_NAMESPACE_PREFIX=atlas-user
-```
+### Response workflow
 
-Use `PINECONE_INDEX_MODE=inference` for the included automatic setup script. Integrated mode is supported when an integrated-embedding index has already been created in Pinecone with a compatible text field mapping.
+1. Resolve the current intent, destination changes and inherited constraints.
+2. Build a structured plan and select only the tools needed for that request.
+3. Execute provider calls with timeouts, budgets and bounded concurrency.
+4. Compose an answer from retrieved evidence using intent-specific layouts.
+5. Verify location relevance, required constraints, unsupported claims and response quality.
 
-Create the Pinecone index once from `backend/`:
+Exact live facts such as route duration, weather observations and provider-backed place details remain deterministic. Language-model output is schema-controlled and cannot silently replace grounded provider data.
 
-```bash
-npm run pinecone:setup
-```
+## Technology stack
 
-## Deployment support
+| Layer | Technologies |
+| --- | --- |
+| Frontend | React 18, Vite 8, Tailwind CSS, Axios, Lucide |
+| API | Node.js 20.19+, Express, Mongoose, Zod, Helmet |
+| Agent workflow | LangGraph, LangChain, ChatGroq, Groq, optional sanitized LangSmith tracing |
+| Data | MongoDB 7 replica set, Redis, Pinecone |
+| Travel providers | Google Places API (New), Routes API v2, Geocoding API, Time Zone API, OpenWeather, NewsAPI, Yelp |
+| Documents | Multer, pdf-parse, Mammoth, constrained child-process extraction |
+| Infrastructure | Docker Compose, Nginx, GitHub Actions; public preview on AWS EC2 behind Caddy TLS |
 
-- Dockerized frontend
-- Dockerized backend
-- MongoDB container using Docker Compose
-- Separate document, privacy-deletion and retention workers
-- Worker heartbeat and queue-health reporting
-- Nginx-based frontend production server
-- Backend health check endpoint
-- Environment-based configuration
+## Engineering highlights
 
----
+### Context and memory
 
-## Tech Stack
+- Short-term conversation state is stored with each MongoDB conversation.
+- LangGraph checkpoints use deterministic, pseudonymous thread identifiers.
+- Destination switches clear stale place and activity context.
+- Same-trip follow-ups retain relevant dates, origins, accessibility needs, exclusions and travel mode.
+- Conversation reset, retention and deletion also remove related agent checkpoints.
 
-### Frontend
+### Authentication and privacy
 
-- React 18
-- Vite
-- Tailwind CSS
-- Axios
-- Lucide React
+- Short-lived JWT access tokens are held in memory rather than durable browser storage.
+- Refresh sessions use rotating HttpOnly cookies with CSRF protection.
+- Policy acceptance and retention settings are persisted per user.
+- Account deletion runs as a durable, retryable worker job.
+- Deletion covers sessions, conversations, messages, uploads, extracted content, checkpoints, Redis rate-limit state and the user’s Pinecone namespace.
+- A pseudonymous deletion-status receipt remains temporarily available without retaining the deleted account identity.
 
-### Backend
+### Reliability and cost control
 
-- Node.js
-- Express.js
-- MongoDB
-- Mongoose
-- JWT
-- bcryptjs
-- Multer
-- pdf-parse
-- mammoth
-- Helmet
-- Morgan
-- Express Rate Limit
-- Zod
+- Redis-backed caching and distributed rate limits with explicit development behaviour.
+- Provider-specific timeouts, retryable-status handling, exponential backoff and circuit breakers.
+- Per-user and global daily provider and LLM budgets.
+- Idempotent chat requests and ownership-fenced conversation writes.
+- Durable document and account-deletion leases.
+- Worker heartbeats, queue-age checks, dead-letter reporting and readiness gating.
 
-### Infrastructure
+### Responsible travel output
 
-- Docker
-- Docker Compose
-- Nginx
-- MongoDB 7
+- Safety summaries separate retrieved news attention from official travel advice.
+- Country-level customs guidance avoids claiming legal clearance without current authoritative evidence.
+- Google attribution remains visible where required.
+- Places-derived content is not treated as durable user-owned data.
+- Accommodation results are comparison guidance only; ATLAS does not collect payment-card data or perform direct bookings.
 
----
+## Repository structure
 
-## Project Structure
-
-```text
-ATLAS-AI-Travel_Assistant/
-│
+~~~text
+.
 ├── backend/
-│   ├── config/
-│   │   └── rateLimiter.js
-│   │
-│   ├── controllers/
-│   │   ├── authController.js
-│   │   ├── chatController.js
-│   │   ├── conversationController.js
-│   │   └── documentController.js
-│   │
-│   ├── db/
-│   │   └── mongoose.js
-│   │
-│   ├── middleware/
-│   │   └── auth.js
-│   │
-│   ├── models/
-│   │   ├── User.js
-│   │   ├── Conversation.js
-│   │   └── Document.js
-│   │
-│   ├── routes/
-│   │   ├── auth.js
-│   │   ├── chat.js
-│   │   ├── conversations.js
-│   │   └── documents.js
-│   │
-│   ├── services/
-│   │   ├── contextService.js
-│   │   ├── documentService.js
-│   │   ├── responseVerifier.js
-│   │   ├── vectorStore.js
-│   │   └── toolService.js
-│   │
-│   ├── utils/
-│   │   ├── locationUtils.js
-│   │   ├── networkTest.js
-│   │   └── validation.js
-│   │
-│   ├── app.js
-│   ├── index.js
-│   ├── Dockerfile
-│   └── package.json
-│
+│   ├── agents/          # LangGraph state, nodes, models and tracing
+│   ├── config/          # Providers, rate limits and environment behaviour
+│   ├── controllers/     # Auth, chat, conversations, documents and privacy
+│   ├── models/          # MongoDB persistence and durable job records
+│   ├── routes/          # Express API routes
+│   ├── services/        # Tools, memory, documents, deletion and orchestration
+│   ├── scripts/         # Tests, workers, diagnostics, load and index jobs
+│   └── utils/
 ├── frontend/
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── auth/
-│   │   │   ├── chat/
-│   │   │   ├── features/
-│   │   │   └── sidebar/
-│   │   │
-│   │   ├── hooks/
-│   │   │   ├── useAuth.js
-│   │   │   └── useChat.js
-│   │   │
-│   │   ├── services/
-│   │   │   └── api.js
-│   │   │
-│   │   ├── utils/
-│   │   │   └── formatMessage.jsx
-│   │   │
-│   │   ├── App.jsx
-│   │   ├── main.jsx
-│   │   └── index.css
-│   │
-│   ├── Dockerfile
-│   ├── nginx.conf
-│   ├── vite.config.js
-│   └── package.json
-│
+│   ├── public/
+│   ├── scripts/         # Frontend contract tests
+│   └── src/             # React components, hooks, API client and renderers
+├── docs/images/
+├── .github/workflows/
 ├── docker-compose.yml
 ├── DOCKER_DEPLOYMENT.md
-├── README.md
-└── .gitignore
-```
-
----
-
-## System Architecture
-
-```text
-User
-  │
-  ▼
-React + Vite Frontend
-  │
-  │  Authenticated API requests
-  ▼
-Express Backend API
-  │
-  ├── Auth Controller
-  │     └── Signup, login, JWT validation
-  │
-  ├── Chat Controller
-  │     └── AI response generation and conversation updates
-  │
-  ├── Conversation Controller
-  │     └── Saved chat history
-  │
-  ├── Document Controller
-  │     └── File upload, text extraction, document search
-  │
-  ├── Tool Service
-  │     └── Weather, places, news, location and travel APIs
-  │
-  └── MongoDB
-        ├── Users
-        ├── Conversations
-        └── Documents
-```
-
----
-
-## Backend API Overview
-
-### Authentication
-
-| Method | Endpoint           | Description                        |
-| ------ | ------------------ | ---------------------------------- |
-| POST   | `/api/auth/signup` | Create a new user account          |
-| POST   | `/api/auth/login`  | Log in and receive JWT token       |
-| GET    | `/api/auth/me`     | Get the authenticated user profile |
-| POST   | `/api/auth/verify-email` | Verify an email token |
-| POST   | `/api/auth/resend-verification` | Resend a verification email |
-| POST   | `/api/auth/forgot-password` | Request a password reset |
-| POST   | `/api/auth/reset-password` | Reset a password with a token |
-| PATCH  | `/api/auth/preferences` | Update travel preferences |
-| GET    | `/api/auth/data-export` | Export the authenticated user's account data |
-| PATCH  | `/api/auth/privacy-settings` | Update account retention preferences |
-| DELETE | `/api/auth/account` | Confirm and enqueue permanent account deletion |
-| GET    | `/api/auth/account-deletion-status` | Check deletion progress using the one-time tracking token |
-
-### Chat
-
-| Method | Endpoint                 | Description                               |
-| ------ | ------------------------ | ----------------------------------------- |
-| POST   | `/api/chat`              | Send a message to the AI travel assistant |
-| POST   | `/api/reset-context`     | Reset conversation context                |
-| GET    | `/api/context/:conversationId` | Get conversation context             |
-| GET    | `/api/quality-analytics` | Get response quality analytics            |
-| GET    | `/api/network-test`      | Test external API connectivity            |
-
-### Conversations
-
-| Method | Endpoint                 | Description               |
-| ------ | ------------------------ | ------------------------- |
-| GET    | `/api/conversations`     | List user conversations   |
-| POST   | `/api/conversations`     | Create a new conversation |
-| GET    | `/api/conversations/:id` | Get one conversation      |
-| DELETE | `/api/conversations/:id` | Delete one conversation   |
-| DELETE | `/api/conversations`     | Delete all conversations  |
-
-### Documents
-
-| Method | Endpoint                | Description                   |
-| ------ | ----------------------- | ----------------------------- |
-| GET    | `/api/documents`        | List uploaded documents       |
-| POST   | `/api/documents/upload` | Upload PDF, DOCX, or TXT file |
-| POST   | `/api/documents/:id/retry` | Retry failed document processing |
-| DELETE | `/api/documents/:id`    | Queue durable document deletion |
-
-### Health Check
-
-| Method | Endpoint  | Description          |
-| ------ | --------- | -------------------- |
-| GET    | `/health` | Backend health check |
-| GET    | `/health/ready` | Dependency readiness check |
-| GET    | `/health/live` | Process liveness check |
-| GET    | `/api/auth/account-deletion-status` | Check deletion status using the tracking token |
-
----
-
-## Environment Variables
-
-Create a `.env` file inside the `backend/` directory.
-
-```env
-NODE_ENV=development
-DEPLOYMENT_ENV=development
-PORT=4000
-CORS_ORIGIN=http://localhost:5173
-
-# Database
-MONGODB_URI=mongodb://127.0.0.1:27017/atlas_travel?replicaSet=rs0&directConnection=true
+├── PINECONE_RAG_SETUP.md
+└── TRAVEL_RESPONSE_FLOW.md
+~~~
 
-# Authentication
-JWT_SECRET=change_this_to_a_long_random_secret
-JWT_ACCESS_EXPIRES_IN=15m
-REFRESH_TOKEN_DAYS=30
-PRIVACY_POLICY_VERSION=2026-06-22
-TERMS_VERSION=2026-06-22
+## Quick start with Docker
 
-# LLM provider
-GROQ_API_KEY=your_groq_api_key
-GROQ_MODEL=llama-3.3-70b-versatile
-ATLAS_LANGCHAIN_PLANNER_ENABLED=false
-ATLAS_LANGCHAIN_RESPONSE_ENABLED=false
+### Prerequisites
 
-# Agent workflow rollout and sanitized tracing
-ATLAS_AGENT_SHADOW_MODE=false
-ATLAS_AGENT_GRAPH_ENABLED=false
-ATLAS_AGENT_CANARY_PERCENT=0
-ATLAS_AGENT_FALLBACK_ENABLED=true
-ATLAS_AGENT_REQUEST_TIMEOUT_MS=60000
-LANGSMITH_TRACING=false
-LANGSMITH_API_KEY=
-LANGSMITH_PROJECT=atlas-travel-assistant
-LANGSMITH_WORKSPACE_ID=
-LANGSMITH_TRACING_SAMPLING_RATE=0.1
+- Docker with Compose
+- Git
+- Provider credentials for the features you want to enable
 
-# Optional vector database placeholder
-PINECONE_API_KEY=your_pinecone_api_key
+Clone the repository:
 
-# Rate limiting
-ENFORCE_DEVELOPMENT_LIMITS=false
-RATE_LIMIT_WINDOW_MS=900000
-RATE_LIMIT_MAX_REQUESTS=100
+    git clone https://github.com/Sub1nn/ATLAS-A-Complete-AI-Travel-Assistant.git
+    cd ATLAS-A-Complete-AI-Travel-Assistant
 
-# Travel APIs
-GOOGLE_MAPS_SERVER_API_KEY=your_google_maps_platform_server_key
-OPEN_WEATHER_KEY=your_openweather_key
-NEWS_API_KEY=your_newsapi_key
-YELP_API_KEY=your_yelp_key
+Create local environment files:
 
-# Production email delivery
-EMAIL_TRANSPORT=resend
-EMAIL_FROM=ATLAS <no-reply@yourdomain.com>
-RESEND_API_KEY=your_resend_api_key
-```
+    cp backend/.env.example backend/.env
+    cp frontend/.env.example frontend/.env
 
-Google Maps Platform endpoint mapping:
+Add your required secrets to **backend/.env**, then start the complete stack:
 
-- Backend geocoding uses `https://maps.googleapis.com/maps/api/geocode/json`.
-- Backend live venue discovery uses Places API (New) at `https://places.googleapis.com/v1/places:searchText`.
-- Backend route planning uses Routes API v2 at `https://routes.googleapis.com/directions/v2:computeRoutes`.
-- Backend local-time context uses `https://maps.googleapis.com/maps/api/timezone/json`.
-- Browser maps, if enabled, must use `VITE_GOOGLE_MAPS_API_KEY` only.
-- Do not expose `GOOGLE_MAPS_SERVER_API_KEY` through Vite or browser code.
+    docker compose up --build
 
-In `NODE_ENV=development`, ATLAS bypasses HTTP rate limits and daily chat/provider/LLM usage budgets by default so local testing can continue without exhausting app-level counters. Set `ENFORCE_DEVELOPMENT_LIMITS=true` if you want to test production-like throttling locally. Production keeps limits enabled.
+Open:
 
-### Staging email capture
+- Frontend: http://localhost:5173
+- Backend: http://localhost:4000
+- Health: http://localhost:4000/health
+- Readiness: http://localhost:4000/health/ready
 
-Production uses Resend by default and requires a verified sending domain. An isolated staging deployment may capture verification and password-reset messages in Mailtrap Sandbox instead of delivering them to real inboxes:
+Docker Compose starts MongoDB as a replica set, Redis, the one-shot index migration, the API, all three workers and the frontend. Persistent volumes keep MongoDB and Redis data across normal restarts.
 
-```env
-DEPLOYMENT_ENV=staging
-EMAIL_TRANSPORT=mailtrap_sandbox
-MAILTRAP_SMTP_HOST=sandbox.smtp.mailtrap.io
-MAILTRAP_SMTP_PORT=2525
-MAILTRAP_SMTP_SECURE=false
-MAILTRAP_SMTP_USER=your_mailtrap_sandbox_username
-MAILTRAP_SMTP_PASS=your_mailtrap_sandbox_password
-```
+Stop the stack:
 
-Mailtrap Sandbox is rejected unless `DEPLOYMENT_ENV=staging`. Never use it as a production delivery fallback: messages are intentionally captured and do not reach recipient inboxes. Keep the credentials in an untracked environment file or deployment secret manager.
+    docker compose down
 
-### Public preview email verification
+Remove the stack and local database/cache volumes:
 
-Email verification remains required by default. A controlled development or staging preview can temporarily allow signed-in users to explore ATLAS without marking their email address as verified:
+    docker compose down -v
 
-```env
-DEPLOYMENT_ENV=staging
-EMAIL_VERIFICATION_MODE=optional
-PASSWORD_RECOVERY_ENABLED=false
-PUBLIC_PREVIEW_DATA_RETENTION_DAYS=30
-```
+> [!CAUTION]
+> The volume-removal command permanently deletes local MongoDB and Redis data.
 
-Optional verification is rejected when `DEPLOYMENT_ENV=production`. During preview signup, ATLAS requires the submitted domain to publish a usable MX mail record; this filters non-mail domains but does not prove ownership of an individual mailbox. Mailbox ownership still requires real email verification or a trusted OAuth provider. The frontend displays a compact public-preview notice, labels unverified identities as preview accounts and hides verification and password-recovery actions that cannot reach visitors through Mailtrap Sandbox. New preview accounts default to 30-day chat and document retention. Restore `EMAIL_VERIFICATION_MODE=required` and `PASSWORD_RECOVERY_ENABLED=true` when real email delivery is configured.
+## Local development
 
-### Agent workflow rollout
+Use Node.js 20.19 or newer. CI and Docker use Node.js 22.
 
-ATLAS has two LangGraph workflows:
+Install dependencies:
 
-- `ATLAS_AGENT_SHADOW_MODE=true` runs a compact context graph beside the legacy pipeline. It evaluates destination switches and multi-destination handling without changing the answer.
-- `ATLAS_AGENT_GRAPH_ENABLED=true` enables the authoritative travel orchestrator. It owns context resolution, structured planning, document retrieval, bounded tool routing, evidence collection, response composition, verification, quality assessment and one bounded repair pass.
+    cd backend
+    npm ci
+    cd ../frontend
+    npm ci
 
-Use `ATLAS_AGENT_CANARY_PERCENT` to assign a deterministic percentage of users to the authoritative graph. Keep `ATLAS_AGENT_FALLBACK_ENABLED=true` during rollout so any graph timeout or failure returns through the proven legacy pipeline. A production canary must use a percentage above zero and cannot disable fallback.
+Start the shared data services from the repository root:
 
-LangGraph checkpoints use MongoDB and expire after `ATLAS_AGENT_CHECKPOINT_TTL_SECONDS`. Conversation reset, conversation deletion, retention and account deletion also remove matching checkpoints. Development and tests can fall back to in-memory checkpoints if MongoDB is unavailable; production cannot.
+    docker compose up -d mongo redis
 
-Only the compact shadow graph is checkpointed. The authoritative graph is deliberately transient so provider responses, Places content, document excerpts and guest inputs are not copied into graph storage.
+Run the database index migration:
 
-LangSmith tracing is optional. Enable it with `LANGSMITH_TRACING=true` and store `LANGSMITH_API_KEY` in the deployment secret manager. Set `LANGSMITH_WORKSPACE_ID` when the LangSmith account uses multiple workspaces. ATLAS checks the credentials once, disables tracing if they are rejected, and continues serving chat. The application turns off LangChain's automatic raw-run tracing and emits only its own sanitized structural metrics; prompts, answers, documents and credentials are excluded. Use a low production sampling rate and configure retention according to the privacy policy.
+    cd backend
+    npm run db:indexes
 
-`ATLAS_LANGCHAIN_PLANNER_ENABLED` selects the LangChain `ChatGroq` structured planner. `ATLAS_LANGCHAIN_RESPONSE_ENABLED` enables schema-controlled composition for complex or document-focused requests. Exact live-data renderers remain deterministic. Complex itineraries use a stricter evidence contract: model-selected venues are checked against the current request's live evidence before rendering.
+Start the API and frontend in separate terminals:
 
-Recommended rollout:
+    cd backend
+    npm run dev
 
-1. Run shadow mode and compare context-switch metrics.
-2. Enable both LangChain flags for internal development evaluation.
-3. Start the authoritative graph at a small production canary percentage.
-4. Compare intent accuracy, fallback rate, quality score, latency and provider cost in LangSmith.
-5. Increase the canary only after multi-turn and provider-failure acceptance scenarios pass.
+    cd frontend
+    npm run dev
 
-Create a `.env` file inside the `frontend/` directory.
+For complete document, deletion and retention behaviour, run these backend processes separately:
 
-```env
-VITE_API_BASE_URL=http://localhost:4000/api
-```
+    npm run worker:documents
+    npm run worker:privacy
+    npm run worker:retention
 
-For Docker production builds, the frontend uses `/api` through the Nginx reverse proxy.
+## Configuration
 
----
+The checked-in examples are the source of truth:
 
-## Security Notes
+- **backend/.env.example** — API, database, providers, workers, security and observability
+- **frontend/.env.example** — browser-safe Vite configuration
+- **.env.example** — root Docker Compose defaults
 
-Do not commit real `.env` files to GitHub.
+Important rules:
 
-The repository should only include safe example files such as:
+- Never commit populated environment files.
+- Use one server-side Google Maps Platform key: **GOOGLE_MAPS_SERVER_API_KEY**.
+- Keep any browser Maps JavaScript key separate as **VITE_GOOGLE_MAPS_API_KEY**.
+- Never expose the server key through Vite.
+- Production requires a MongoDB replica set and **MONGODB_TRANSACTIONS=true**.
+- Redis is required by the production Compose services.
+- Mailtrap Sandbox is staging-only; production email delivery uses Resend with a verified domain.
+- LangSmith tracing is optional and should use low sampling with the repository’s sanitized trace payloads.
 
-```text
-backend/.env.example
-frontend/.env.example
-```
+## API overview
 
-Recommended `.gitignore` entries:
+| Area | Main endpoints |
+| --- | --- |
+| Authentication | **/api/auth/signup**, **/api/auth/login**, **/api/auth/refresh**, **/api/auth/me** |
+| Privacy | **/api/auth/data-export**, **/api/auth/privacy-settings**, **/api/auth/account** |
+| Chat | **/api/chat**, **/api/reset-context**, **/api/context/:conversationId** |
+| Conversations | **/api/conversations** and **/api/conversations/:id** |
+| Documents | **/api/documents**, **/api/documents/upload**, retry and deletion routes |
+| Operations | **/health**, **/health/live**, **/health/ready** and protected internal metrics |
 
-```gitignore
-# Environment files
-.env
-**/.env
-*.env.local
+See the route modules under **backend/routes/** for the complete contracts.
 
-# Dependencies
-node_modules/
-**/node_modules/
+## Testing
 
-# Build output
-dist/
-**/dist/
-build/
-**/build/
+Backend unit and regression suite:
 
-# Logs
-logs/
-*.log
-npm-debug.log*
-yarn-debug.log*
-pnpm-debug.log*
+    cd backend
+    npm test
 
-# OS/editor files
-.DS_Store
-**/.DS_Store
-.vscode/
-.idea/
+Frontend contract tests, lint and production build:
 
-# Temporary files
-*.tmp
-*.swp
-```
+    cd frontend
+    npm test
+    npm run lint
+    npm run build
 
-For production deployment, use a long random value for `JWT_SECRET`.
+Replica-set integration tests:
 
-Example:
+    cd backend
+    npm run test:integration
 
-```text
-JWT_SECRET=replace_with_a_secure_random_string_at_least_32_characters_long
-```
+Additional operational checks:
 
----
+    npm run diagnostic
+    npm run test-setup
+    npm run test:load:authenticated
+    npm run test:soak
 
-## Local Development Setup
+Container validation:
 
-### 1. Clone the repository
+    docker compose config -q
+    docker compose build
 
-```bash
-git clone https://github.com/your-username/ATLAS-AI-Travel_Assistant.git
-cd ATLAS-AI-Travel_Assistant
-```
+GitHub Actions runs backend and frontend checks, container builds, replica-set integration tests and the authenticated regression load on pushes and pull requests.
 
-Use Node.js 20.19+ or 22.12+. The Docker images use Node.js 22.
+## Deployment
 
-### 2. Install backend dependencies
+The public preview currently runs on a small AWS EC2 instance using:
 
-```bash
-cd backend
-npm ci
-```
+- Caddy for TLS termination
+- Nginx for the built React application
+- Express API
+- MongoDB 7 replica set
+- Redis with append-only persistence
+- Separate document, privacy/deletion and retention workers
+- Health checks and restart policies for every long-running application process
 
-### 3. Install frontend dependencies
+The deployment uses intentionally low provider budgets because it is a portfolio preview. A broader production launch should move secrets to a managed secret store, use managed databases with tested backups, add external alerts and billing alarms, and validate multi-instance behaviour under realistic sustained load.
 
-```bash
-cd ../frontend
-npm ci
-```
+See [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md) for the general container deployment model.
 
-### 4. Start MongoDB locally
+## Public-preview limitations
 
-If MongoDB is installed locally:
+- Email verification is temporarily optional and an MX-domain check does not prove mailbox ownership.
+- Password recovery is disabled until a verified sending domain is configured.
+- Provider and LLM requests have deliberately low daily limits.
+- External data can be delayed, incomplete or unavailable.
+- Safety, entry, health, customs, legal, price and availability information must be verified with authoritative sources.
+- Direct hotel booking and payment handling are outside the current scope.
 
-```bash
-mongod
-```
+## Documentation
 
-Or start MongoDB using Docker:
+- [Production and Docker deployment](DOCKER_DEPLOYMENT.md)
+- [Pinecone document retrieval](PINECONE_RAG_SETUP.md)
+- [Travel response and orchestration flow](TRAVEL_RESPONSE_FLOW.md)
+- [Repository agent instructions](AGENTS.md)
+- [Backend environment reference](backend/.env.example)
+- [Frontend environment reference](frontend/.env.example)
 
-```bash
-docker run --name atlas-mongo -p 27017:27017 -d mongo:7
-```
+## Roadmap
 
-### 5. Start the backend
+- Replace preview authentication with verified-domain email delivery and/or trusted OAuth.
+- Move the public deployment to a custom domain and managed secret storage.
+- Add managed MongoDB backups with restore drills.
+- Validate multi-instance API and worker deployments with sustained provider-enabled load.
+- Add external error, queue-age, budget and billing alerts.
+- Expand reviewed country intelligence and multilingual output.
+- Continue improving accessible itinerary editing, budget comparison and map-led planning.
 
-```bash
-cd backend
-npm run dev
-```
+## Licence
 
-The backend runs on:
-
-```text
-http://localhost:4000
-```
-
-Health check:
-
-```text
-http://localhost:4000/health
-```
-
-### 6. Start the frontend
-
-Open a second terminal:
-
-```bash
-cd frontend
-npm run dev
-```
-
-The frontend runs on:
-
-```text
-http://localhost:5173
-```
-
----
-
-## Running with Docker Compose
-
-The project includes a full Docker Compose setup with:
-
-- MongoDB
-- One-shot database index migration
-- Backend API
-- Document processing worker
-- Privacy and deletion worker
-- Retention worker
-- Frontend served through Nginx
-
-### Start the full application
-
-```bash
-docker compose up --build
-```
-
-Frontend:
-
-```text
-http://localhost:5173
-```
-
-Backend:
-
-```text
-http://localhost:4000
-```
-
-MongoDB:
-
-```text
-mongodb://127.0.0.1:27017/atlas_travel?replicaSet=rs0&directConnection=true
-```
-
-### Stop containers
-
-```bash
-docker compose down
-```
-
-### Stop containers and remove MongoDB data volume
-
-```bash
-docker compose down -v
-```
-
----
-
-## Build Checks
-
-### Frontend production build
-
-```bash
-cd frontend
-npm run build
-```
-
-### Backend start check
-
-```bash
-cd backend
-npm start
-```
-
-### Backend diagnostic scripts
-
-```bash
-cd backend
-npm run diagnostic
-npm run test-setup
-```
-
----
-
-## Document Upload Workflow
-
-ATLAS supports PDF, DOCX, and TXT upload.
-
-The document workflow is:
-
-```text
-Upload file
-  │
-  ▼
-Validate file type
-  │
-  ▼
-Extract text
-  │
-  ├── PDF through pdf-parse
-  ├── DOCX through mammoth
-  └── TXT through buffer text parsing
-  │
-  ▼
-Split text into chunks
-  │
-  ▼
-Generate searchable chunks
-  │
-  ▼
-Store document metadata and fallback chunks in MongoDB
-  │
-  ▼
-Index chunks in the user-specific Pinecone namespace when Pinecone is enabled
-  │
-  ▼
-Retrieve semantically relevant chunks during chat, with MongoDB fallback if Pinecone is unavailable
-```
-
-Current document retrieval uses Pinecone semantic search when configured. MongoDB remains the source of truth for users, conversations, messages and document metadata.
-
----
-
-## Main User Flow
-
-```text
-1. User creates an account or logs in
-2. Frontend stores the JWT token
-3. User starts a travel chat
-4. Backend creates or updates a conversation
-5. User may upload travel documents
-6. Backend extracts and stores document content
-7. User asks travel questions
-8. Backend combines:
-   - conversation memory
-   - user message
-   - document context
-   - external API data
-   - LLM response generation
-9. Assistant response is saved and shown in the chat UI
-10. User can return later and continue the conversation
-```
-
----
-
-## Production Considerations
-
-Before deploying this application publicly, review the following:
-
-### Required
-
-- Use secure production API keys
-- Use a strong `JWT_SECRET`
-- Store secrets in the hosting provider secret manager
-- Remove all real `.env` files from Git tracking
-- Enable HTTPS
-- Configure production CORS origin
-- Use a managed MongoDB instance
-- Configure `METRICS_TOKEN` and an HTTPS `ERROR_REPORTING_WEBHOOK_URL`
-- Review rate limits for external APIs
-- Configure Resend and verify its sending domain
-- Run `npm run db:indexes` during managed-database deployment
-- Configure automated MongoDB backups and restore testing
-- Configure the operator, privacy contact, jurisdiction, lawful basis, international-transfer safeguards and supervisory authority after legal review
-- Run the document and retention workers continuously
-- Run the privacy worker independently from document parsing
-- Alert when `/health/ready` reports missing workers, old queues, or deletion dead letters
-- Use the metrics-token-protected `/internal/deletion-dead-letters` endpoint and retry endpoints to recover exhausted account or document deletions
-- Configure global provider/LLM budgets and billing alerts in the provider consoles
-- Run LangGraph in shadow mode before enabling authoritative orchestration
-- Store `LANGSMITH_API_KEY` in the deployment secret manager and sample production traces
-- Review LangSmith retention and deletion settings as part of the privacy assessment
-- Use a MongoDB replica set with `MONGODB_TRANSACTIONS=true`
-- Terminate HTTPS at the hosting load balancer or reverse proxy
-
-### Capacity validation
-
-`npm run test:integration` exercises same-conversation contention, fenced writes, expiring operation leases, global provider budgets, and document/account deletion races. `npm run test:load:authenticated` supplies the short authenticated regression load. Run `npm run test:soak` against the production load balancer with deployment-specific `SOAK_TEST_DURATION_MS`, `SOAK_TEST_CONCURRENCY`, and `SOAK_TEST_URL` values. Public-scale claims still require results from the real multi-instance deployment with paid providers enabled, realistic uploads, provider latency/failure injection, shutdown tests, and billing alarms.
-
-## Optional Product Improvements
-
-Planned improvements that would make ATLAS stronger:
-
-- Itinerary builder with editable day-by-day plans
-- Map-based place visualization
-- User profile preferences
-- Saved destinations
-- Trip budget estimation
-- PDF export for itineraries
-- Multi-language support
-- Admin dashboard for analytics
-- Cloud deployment with CI/CD
-- Better automated tests for backend routes and frontend components
-
----
-
-## Portfolio Value
-
-This project demonstrates practical full-stack development skills:
-
-- React frontend development
-- Node.js and Express API design
-- MongoDB data modeling
-- Authentication and authorization
-- AI API integration
-- External API orchestration
-- File upload and document parsing
-- Docker-based deployment
-- Production-aware project structure
-
-ATLAS is designed as a realistic AI travel assistant application rather than a simple chatbot demo.
-
----
-
-## License
-
-This project is licensed under the MIT License.
-
----
+ATLAS is available under the [MIT Licence](LICENSE).
 
 ## Author
 
-Subin Khatiwada
+**Subin Khatiwada**
 
-Master’s student in robotics and machine learning with interests in full-stack development, AI systems, intelligent automation, and practical machine learning applications.
+Master’s student in robotics and machine learning focused on full-stack engineering, applied AI systems and intelligent automation.
 
----
-
-Real `.env` files are excluded from the final ZIP. Start from `.env.example`, `backend/.env.example` and `frontend/.env.example` when configuring local or cloud deployments.
-
-
-## Google Places API (New) and Routes API v2
-
-ATLAS uses Google Places API (New) for venue, restaurant, accommodation and activity discovery. Routes use the Routes API v2 `computeRoutes` endpoint with an explicit response field mask. Enable **Places API (New)** and **Routes API** in Google Cloud and restrict the backend key to those APIs. The diagnostic script treats permission errors as failed connectivity.
-
-## Travel orchestration update
-
-The backend now uses an intent-first travel pipeline. Google Places API (New) is used for live place discovery, OpenWeather for weather, NewsAPI for current safety context, Google Routes API v2 for routes, Pinecone for document RAG, and Groq for structured planning and final language generation. The response composer handles destination planning, sports/activity searches, hotels/stays, dining/nightlife, route planning, weather and safety with distinct layouts.
+- GitHub: https://github.com/Sub1nn
