@@ -9,6 +9,7 @@ const viteSource = fs.readFileSync(new URL("../vite.config.js", import.meta.url)
 const deletionStatusSource = fs.readFileSync(new URL("../src/deletion-status.js", import.meta.url), "utf8");
 const sidebarSource = fs.readFileSync(new URL("../src/components/sidebar/HistorySidebar.jsx", import.meta.url), "utf8");
 const deleteAccountDialogSource = fs.readFileSync(new URL("../src/components/sidebar/DeleteAccountDialog.jsx", import.meta.url), "utf8");
+const indexHtmlSource = fs.readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const authPageSource = fs.readFileSync(new URL("../src/components/auth/AuthPage.jsx", import.meta.url), "utf8");
 const travelAssistantSource = fs.readFileSync(new URL("../src/components/TravelAssistant.jsx", import.meta.url), "utf8");
 const authHookSource = fs.readFileSync(new URL("../src/hooks/useAuth.js", import.meta.url), "utf8");
@@ -54,6 +55,14 @@ test("public preview is clearly labelled without offering sandbox verification",
   assert.match(authPageSource, /mode === "login" && passwordRecoveryEnabled/);
   assert.match(apiSource, /async config\(\)/);
   assert.match(authHookSource, /Promise\.allSettled\(\[authAPI\.config\(\), authAPI\.restoreSession\(\)\]\)/);
+});
+
+test("social sharing metadata uses deploy-time absolute URLs and a LinkedIn-sized PNG", () => {
+  assert.match(indexHtmlSource, /property="og:url" content="%VITE_PUBLIC_URL%"/);
+  assert.match(indexHtmlSource, /property="og:image" content="%VITE_PUBLIC_URL%atlas-og-image\.png"/);
+  assert.match(indexHtmlSource, /property="og:image:width" content="1200"/);
+  assert.match(indexHtmlSource, /property="og:image:height" content="630"/);
+  assert.match(indexHtmlSource, /name="twitter:card" content="summary_large_image"/);
 });
 
 test("session restoration uses one shared refresh promise", () => {
