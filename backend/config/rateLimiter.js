@@ -9,6 +9,11 @@ const chatMaxRequests = Number(process.env.CHAT_RATE_LIMIT_MAX_REQUESTS || 12);
 let redisStoreWarningLogged = false;
 let redisClientPromise = null;
 const fallbackCounters = new Map();
+const USER_SCOPED_RATE_LIMIT_PREFIXES = Object.freeze([
+  "email-resend",
+  "chat",
+  "document-upload",
+]);
 
 function clientKey(req) {
   return req.user?._id ? `user:${req.user._id.toString()}` : req.ip;
@@ -180,6 +185,49 @@ export const documentUploadRateLimiter = createLimiter({
   keyGenerator: clientKey,
   message: "Too many document uploads. Please wait before uploading more files.",
 });
+
+function userScopedRateLimitKeys(userId) {
+  const accountKey = `user:${String(userId)}`;
+  return USER_SCOPED_RATE_LIMIT_PREFIXES.map((prefix) => `atlas:${prefix}:${accountKey}`);
+}
+
+export async function purgeUserRateLimitState(userId) {
+  const accountKey = `user:${String(userId)}`;
+  const knownKeys = userScopedRateLimitKeys(userId);
+  const redis = await getRedisClient();
+  if (process.env.REDIS_URL && !redis) {
+    throw new Error("Redis is unavailable while deleting account rate-limit state");
+  }
+
+  let redisDeleted = 0;
+  if (redis) {
+    const discoveredKeys = [];
+    for await (const key of redis.scanIterator({ MATCH: `atlas:*:${accountKey}`, COUNT: 100 })) {
+      discoveredKeys.push(String(key));
+    }
+    const keys = [...new Set([...knownKeys, ...discoveredKeys])];
+    if (keys.length) redisDeleted = await redis.del(keys);
+  }
+
+  let memoryDeleted = 0;
+  for (const key of [...fallbackCounters.keys()]) {
+    if (knownKeys.includes(key) || key.endsWith(`:${accountKey}`)) {
+      memoryDeleted += Number(fallbackCounters.delete(key));
+    }
+  }
+
+  return { redisDeleted, memoryDeleted };
+}
+
+export const rateLimiterTestUtils = {
+  userScopedRateLimitKeys,
+  seedFallback(key) {
+    fallbackCounters.set(key, { totalHits: 1, resetAt: Date.now() + 60000 });
+  },
+  hasFallback(key) {
+    return fallbackCounters.has(key);
+  },
+};
 
 export async function closeRateLimitStore() {
   const client = redisClientPromise ? await redisClientPromise.catch(() => null) : null;

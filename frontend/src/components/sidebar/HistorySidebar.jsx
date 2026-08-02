@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Download, LogOut, MessageSquarePlus, Shield, Trash2, UserX } from "lucide-react";
 import { authAPI } from "../../services/api";
+import DeleteAccountDialog from "./DeleteAccountDialog";
 
 const plainPreview = (value = "") => String(value || "")
   .replace(/!\[[^\]]*]\([^)]*\)/g, "")
@@ -27,8 +28,8 @@ const HistorySidebar = ({
 }) => {
   const [confirmClear, setConfirmClear] = useState(false);
   const [showPrivacy, setShowPrivacy] = useState(false);
+  const [showDeleteAccount, setShowDeleteAccount] = useState(false);
   const [retentionDays, setRetentionDays] = useState(Number(user?.dataRetentionDays || 365));
-  const [deletePassword, setDeletePassword] = useState("");
   const [privacyStatus, setPrivacyStatus] = useState("");
 
   const handleClearHistory = async () => {
@@ -64,17 +65,6 @@ const HistorySidebar = ({
       setPrivacyStatus("Retention preference saved.");
     } catch (error) {
       setPrivacyStatus(error.message || "Could not save retention preference.");
-    }
-  };
-
-  const deleteAccount = async () => {
-    if (!deletePassword) return setPrivacyStatus("Enter your password to confirm deletion.");
-    try {
-      const deletion = await authAPI.deleteAccount(deletePassword);
-      if (deletion.trackingToken) sessionStorage.setItem("atlas_deletion_token", deletion.trackingToken);
-      window.location.replace(`/account-deletion-status.html${deletion.trackingToken ? `#token=${encodeURIComponent(deletion.trackingToken)}` : ""}`);
-    } catch (error) {
-      setPrivacyStatus(error.message || "Account deletion failed.");
     }
   };
 
@@ -183,7 +173,9 @@ const HistorySidebar = ({
       <div className="border-t border-[#303230] p-3">
         <div className="mb-2 px-2">
           <p className="truncate text-sm font-medium text-[#dedfda]">{user?.name}</p>
-          <p className="truncate text-xs text-[#747671]">{user?.email}</p>
+          <p className="truncate text-xs text-[#747671]">
+            {user?.publicPreview && !user?.emailVerified ? "Public preview account" : user?.email}
+          </p>
         </div>
 
         <button type="button" onClick={() => setShowPrivacy((value) => !value)} className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-sm text-[#a4a6a0] transition hover:bg-[#2b2d2b] hover:text-[#ededE9]">
@@ -199,11 +191,14 @@ const HistorySidebar = ({
               </select>
             </label>
             <button type="button" onClick={saveRetention} className="text-[#b5d5c3] hover:text-[#d1eadc]">Save retention preference</button>
-            <input type="password" value={deletePassword} onChange={(event) => setDeletePassword(event.target.value)} placeholder="Password to delete account" className="w-full rounded-md border border-[#573838] bg-[#242020] p-2 text-[#dedfda] placeholder:text-[#806b6b]" />
-            <button type="button" onClick={deleteAccount} className="flex items-center gap-2 text-[#d99d9d] hover:text-[#edb4b4]"><UserX className="h-3.5 w-3.5" /> Permanently delete account</button>
             {privacyStatus && <p className="leading-5 text-[#7f817c]">{privacyStatus}</p>}
           </div>
         )}
+
+        <button type="button" onClick={() => setShowDeleteAccount(true)} className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-sm text-[#b98e8e] transition hover:bg-[#382626] hover:text-[#e1aaaa]">
+          <UserX className="h-4 w-4" />
+          Delete account
+        </button>
 
         <button
           type="button"
@@ -215,6 +210,7 @@ const HistorySidebar = ({
         </button>
       </div>
     </aside>
+      <DeleteAccountDialog isOpen={showDeleteAccount} onClose={() => setShowDeleteAccount(false)} />
     </>
   );
 };

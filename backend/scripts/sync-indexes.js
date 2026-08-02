@@ -22,15 +22,20 @@ dotenv.config({ path: path.resolve(__dirname, "../.env") });
 try {
   const connected = await connectDatabase();
   if (!connected) throw new Error("MongoDB connection is unavailable");
+
+  // These collections have changed index options across releases. Reconcile
+  // them before creating the remaining additive indexes so an old index with
+  // the same name cannot block startup migrations.
+  await Session.syncIndexes();
+  await AccountDeletion.syncIndexes();
+
   await Promise.all([
     User.createIndexes(),
     Conversation.createIndexes(),
     Message.createIndexes(),
     Document.createIndexes(),
-    Session.createIndexes(),
     ChatRequest.createIndexes(),
     DailyUsage.createIndexes(),
-    AccountDeletion.createIndexes(),
     StorageUsage.createIndexes(),
     OperationLease.createIndexes(),
     DocumentDeletion.createIndexes(),
