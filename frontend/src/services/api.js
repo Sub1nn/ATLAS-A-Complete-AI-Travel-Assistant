@@ -93,6 +93,10 @@ apiClient.interceptors.response.use(
 );
 
 export const authAPI = {
+  async config() {
+    const { data } = await apiClient.get("/auth/config");
+    return data;
+  },
   async signup(payload) {
     const { data } = await apiClient.post("/auth/signup", payload);
     return applySession(data);

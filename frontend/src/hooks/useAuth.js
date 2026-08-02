@@ -6,6 +6,11 @@ export const useAuth = () => {
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
   const [authError, setAuthError] = useState("");
   const [authNotice, setAuthNotice] = useState("");
+  const [authConfig, setAuthConfig] = useState({
+    publicPreview: false,
+    emailVerificationRequired: true,
+    passwordRecoveryEnabled: false,
+  });
 
   const clearSession = useCallback(() => {
     authAPI.clearLocalSession();
@@ -30,15 +35,12 @@ export const useAuth = () => {
   useEffect(() => {
     let mounted = true;
 
-    authAPI
-      .restoreSession()
-      .then((data) => {
-        if (mounted) setUser(data.user);
-      })
-      .catch(() => {
-        if (mounted) {
-          clearSession();
-        }
+    Promise.allSettled([authAPI.config(), authAPI.restoreSession()])
+      .then(([configResult, sessionResult]) => {
+        if (!mounted) return;
+        if (configResult.status === "fulfilled") setAuthConfig(configResult.value);
+        if (sessionResult.status === "fulfilled") setUser(sessionResult.value.user);
+        else clearSession();
       })
       .finally(() => {
         if (mounted) setIsCheckingAuth(false);
@@ -54,7 +56,9 @@ export const useAuth = () => {
     setAuthNotice("");
     const data = await authAPI.login(payload);
     setUser(data.user);
-    if (data.emailVerificationRequired) {
+    if (data.user?.publicPreview) {
+      setAuthNotice("ATLAS public preview access is enabled.");
+    } else if (data.emailVerificationRequired) {
       setAuthNotice("Please verify your email when possible. Some production features may require verification.");
     }
     return data.user;
@@ -112,6 +116,7 @@ export const useAuth = () => {
     isCheckingAuth,
     authError,
     authNotice,
+    authConfig,
     clearAuthError: () => setAuthError(""),
     clearAuthNotice: () => setAuthNotice(""),
   };

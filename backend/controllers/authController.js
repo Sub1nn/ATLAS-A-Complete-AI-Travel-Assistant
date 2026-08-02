@@ -13,12 +13,22 @@ import {
 } from "../utils/validation.js";
 import { emailService } from "../services/emailService.js";
 import { sessionService } from "../services/sessionService.js";
+import { emailDomainService } from "../services/emailDomainService.js";
+import {
+  isEmailVerificationRequired,
+  isPasswordRecoveryEnabled,
+  isPublicPreviewEnabled,
+  publicAuthConfiguration,
+} from "../config/emailVerification.js";
 
 const safeUser = (user) => ({
   id: user._id.toString(),
   name: user.name,
   email: user.email,
   emailVerified: Boolean(user.emailVerified),
+  emailVerificationRequired: isEmailVerificationRequired() && !user.emailVerified,
+  publicPreview: isPublicPreviewEnabled(),
+  passwordRecoveryEnabled: isPasswordRecoveryEnabled(),
   preferences: user.preferences || {},
   dataRetentionDays: Number(user.dataRetentionDays || process.env.DEFAULT_DATA_RETENTION_DAYS || 365),
   privacyVersion: user.legalAcceptance?.privacyVersion || "",
@@ -37,7 +47,7 @@ function dummyPasswordHash() {
 function emailDeliveryMessage(delivery, successMessage, failedMessage) {
   if (delivery?.sent) return successMessage;
   if (process.env.NODE_ENV === "production") return failedMessage;
-  return `${failedMessage} In local development, configure RESEND_API_KEY or use the console email fallback.`;
+  return `${failedMessage} In local development, configure an email transport or use the console email fallback.`;
 }
 
 async function recordFailedLogin(user) {
@@ -63,10 +73,26 @@ async function issueVerification(user) {
 }
 
 export const authController = {
+  async config(_req, res) {
+    res.json(publicAuthConfiguration());
+  },
+
   async signup(req, res) {
     const parsed = validate(authSignupSchema, req.body || {});
     if (parsed.error) return res.status(400).json({ message: parsed.error });
     const { name, email, password } = parsed.data;
+
+    if (isPublicPreviewEnabled()) {
+      const domainCheck = await emailDomainService.checkEmailDomain(email);
+      if (!domainCheck.acceptsMail) {
+        return res.status(domainCheck.transient ? 503 : 400).json({
+          message: domainCheck.transient
+            ? "ATLAS could not confirm the email domain right now. Please try again."
+            : "Use an email address from a domain that can receive email.",
+          code: domainCheck.transient ? "EMAIL_DOMAIN_CHECK_UNAVAILABLE" : "EMAIL_DOMAIN_CANNOT_RECEIVE_MAIL",
+        });
+      }
+    }
 
     const existing = await User.findOne({ email }).select("+passwordHash");
     if (existing) return res.status(409).json({ message: "An account with this email already exists" });
@@ -81,22 +107,31 @@ export const authController = {
         termsVersion: process.env.TERMS_VERSION || "2026-06-22",
         acceptedAt: new Date(),
       },
-      dataRetentionDays: Number(process.env.DEFAULT_DATA_RETENTION_DAYS || 365),
+      dataRetentionDays: isPublicPreviewEnabled()
+        ? Math.max(30, Math.min(Number(process.env.PUBLIC_PREVIEW_DATA_RETENTION_DAYS || 30), 730))
+        : Number(process.env.DEFAULT_DATA_RETENTION_DAYS || 365),
     });
-    const verification = await issueVerification(user);
+    const verificationRequired = isEmailVerificationRequired();
+    const verification = verificationRequired
+      ? await issueVerification(user)
+      : { delivery: { sent: false, provider: "public_preview" } };
     const token = await sessionService.createSession(user, res);
 
     res.status(201).json({
       user: safeUser(user),
       token,
       csrfToken: res.locals.csrfToken,
-      emailVerificationRequired: true,
-      emailDelivery: verification.delivery.sent ? "sent" : "failed",
-      message: emailDeliveryMessage(
-        verification.delivery,
-        "Account created. Please verify your email from the link we sent.",
-        "Account created, but the verification email could not be sent. Use the resend verification option after checking email configuration.",
-      ),
+      emailVerificationRequired: verificationRequired,
+      emailDelivery: verificationRequired
+        ? (verification.delivery.sent ? "sent" : "failed")
+        : "disabled_for_preview",
+      message: verificationRequired
+        ? emailDeliveryMessage(
+          verification.delivery,
+          "Account created. Please verify your email from the link we sent.",
+          "Account created, but the verification email could not be sent. Use the resend verification option after checking email configuration.",
+        )
+        : "Account created. ATLAS public preview access is enabled.",
     });
   },
 
@@ -128,7 +163,7 @@ export const authController = {
       user: safeUser(user),
       token,
       csrfToken: res.locals.csrfToken,
-      emailVerificationRequired: !user.emailVerified,
+      emailVerificationRequired: isEmailVerificationRequired() && !user.emailVerified,
     });
   },
 
@@ -170,6 +205,12 @@ export const authController = {
   },
 
   async resendVerification(req, res) {
+    if (isPublicPreviewEnabled()) {
+      return res.status(409).json({
+        message: "Email verification is temporarily optional during the ATLAS public preview.",
+        code: "EMAIL_VERIFICATION_OPTIONAL",
+      });
+    }
     if (req.user.emailVerified) return res.json({ message: "Email is already verified" });
     const verification = await issueVerification(req.user);
     if (!verification.delivery.sent) {
@@ -186,6 +227,13 @@ export const authController = {
   },
 
   async forgotPassword(req, res) {
+    if (!isPasswordRecoveryEnabled()) {
+      return res.status(503).json({
+        message: "Password recovery is temporarily unavailable during the ATLAS public preview.",
+        code: "PASSWORD_RECOVERY_DISABLED",
+      });
+    }
+
     const parsed = validate(emailOnlySchema, req.body || {});
     if (parsed.error) return res.status(400).json({ message: parsed.error });
 

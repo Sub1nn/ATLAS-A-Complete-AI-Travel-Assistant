@@ -57,6 +57,41 @@ test("legal metadata endpoint is available without authentication", async () => 
   assert.ok("privacyVersion" in response.body);
 });
 
+test("public auth configuration exposes capabilities without secrets", async () => {
+  const previousMode = process.env.EMAIL_VERIFICATION_MODE;
+  const previousRecovery = process.env.PASSWORD_RECOVERY_ENABLED;
+  process.env.EMAIL_VERIFICATION_MODE = "optional";
+  process.env.PASSWORD_RECOVERY_ENABLED = "false";
+
+  const response = await request(app).get("/api/auth/config");
+
+  if (previousMode === undefined) delete process.env.EMAIL_VERIFICATION_MODE;
+  else process.env.EMAIL_VERIFICATION_MODE = previousMode;
+  if (previousRecovery === undefined) delete process.env.PASSWORD_RECOVERY_ENABLED;
+  else process.env.PASSWORD_RECOVERY_ENABLED = previousRecovery;
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, {
+    publicPreview: true,
+    emailVerificationRequired: false,
+    passwordRecoveryEnabled: false,
+  });
+  assert.equal(JSON.stringify(response.body).includes("MAILTRAP"), false);
+});
+
+test("disabled password recovery fails immediately without querying user data", async () => {
+  const previous = process.env.PASSWORD_RECOVERY_ENABLED;
+  process.env.PASSWORD_RECOVERY_ENABLED = "false";
+  const response = await request(app)
+    .post("/api/auth/forgot-password")
+    .send({ email: "visitor@example.com" });
+  if (previous === undefined) delete process.env.PASSWORD_RECOVERY_ENABLED;
+  else process.env.PASSWORD_RECOVERY_ENABLED = previous;
+
+  assert.equal(response.status, 503);
+  assert.equal(response.body.code, "PASSWORD_RECOVERY_DISABLED");
+});
+
 test("outdated policy acceptance is blocked from data-processing features", () => {
   const req = { user: { legalAcceptance: { privacyVersion: "old", termsVersion: "old" } } };
   let statusCode = 200;
@@ -70,6 +105,8 @@ test("outdated policy acceptance is blocked from data-processing features", () =
 });
 
 test("unverified accounts are blocked from sensitive features", () => {
+  const previousMode = process.env.EMAIL_VERIFICATION_MODE;
+  process.env.EMAIL_VERIFICATION_MODE = "required";
   const req = { user: { emailVerified: false } };
   let statusCode = 200;
   let payload;
@@ -79,9 +116,25 @@ test("unverified accounts are blocked from sensitive features", () => {
   };
   let nextCalled = false;
   requireVerifiedEmail(req, res, () => { nextCalled = true; });
+  if (previousMode === undefined) delete process.env.EMAIL_VERIFICATION_MODE;
+  else process.env.EMAIL_VERIFICATION_MODE = previousMode;
   assert.equal(statusCode, 403);
   assert.equal(payload.code, "EMAIL_VERIFICATION_REQUIRED");
   assert.equal(nextCalled, false);
+});
+
+test("public preview permits an unverified account without marking it verified", () => {
+  const previousMode = process.env.EMAIL_VERIFICATION_MODE;
+  process.env.EMAIL_VERIFICATION_MODE = "optional";
+  const req = { user: { emailVerified: false } };
+  let nextCalled = false;
+
+  requireVerifiedEmail(req, {}, () => { nextCalled = true; });
+
+  if (previousMode === undefined) delete process.env.EMAIL_VERIFICATION_MODE;
+  else process.env.EMAIL_VERIFICATION_MODE = previousMode;
+  assert.equal(nextCalled, true);
+  assert.equal(req.user.emailVerified, false);
 });
 
 test("Yelp requests use bearer authentication", () => {

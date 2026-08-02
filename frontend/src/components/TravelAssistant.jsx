@@ -8,6 +8,7 @@ import {
   Landmark,
   Map,
   Menu,
+  Info,
   ShieldCheck,
   Sparkles,
   Utensils,
@@ -281,7 +282,19 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
             </div>
           </header>
 
-          {!user?.emailVerified && (
+          {user?.publicPreview && !user?.emailVerified && (
+            <div className="border-b border-[#354139] bg-[#1b211d] px-4 py-2 text-xs text-[#aebdb3] sm:px-6">
+              <p className="mx-auto flex max-w-4xl items-center justify-center gap-2">
+                <Info className="h-3.5 w-3.5 shrink-0 text-[#94b5a1]" aria-hidden="true" />
+                <span>
+                  <span className="font-medium text-[#d8e3dc]">Public preview</span>
+                  <span className="hidden sm:inline"> · Full access is enabled while email verification is optional.</span>
+                </span>
+              </p>
+            </div>
+          )}
+
+          {!user?.publicPreview && !user?.emailVerified && (
             <div className="border-b border-[#54462f] bg-[#28231b] px-5 py-3 text-sm text-[#e3cfaa] sm:px-6 lg:px-8">
               <div className="mx-auto flex max-w-4xl flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <span>Please verify your email to keep your ATLAS account production-ready.</span>

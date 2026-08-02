@@ -1,4 +1,16 @@
 import crypto from "crypto";
+import {
+  EMAIL_TRANSPORT_MAILTRAP_SANDBOX,
+  EMAIL_TRANSPORT_RESEND,
+  SUPPORTED_EMAIL_TRANSPORTS,
+  selectedEmailTransport,
+} from "../config/emailTransport.js";
+import {
+  EMAIL_VERIFICATION_OPTIONAL,
+  SUPPORTED_EMAIL_VERIFICATION_MODES,
+  isPasswordRecoveryEnabled,
+  selectedEmailVerificationMode,
+} from "../config/emailVerification.js";
 
 const PLACEHOLDER_PATTERNS = [
   "change_this",
@@ -34,7 +46,25 @@ export function getJwtSecret() {
 
 export function assertProductionEnvironment() {
   assertAgentEnvironment();
+  const emailVerificationMode = selectedEmailVerificationMode();
+  if (!SUPPORTED_EMAIL_VERIFICATION_MODES.has(emailVerificationMode)) {
+    throw new Error(`EMAIL_VERIFICATION_MODE must be one of: ${[...SUPPORTED_EMAIL_VERIFICATION_MODES].join(", ")}.`);
+  }
+  if (emailVerificationMode === EMAIL_VERIFICATION_OPTIONAL && process.env.DEPLOYMENT_ENV === "production") {
+    throw new Error("Optional email verification is allowed only for development or staging previews.");
+  }
   if (process.env.NODE_ENV !== "production") return;
+
+  const emailTransport = selectedEmailTransport();
+  if (!SUPPORTED_EMAIL_TRANSPORTS.has(emailTransport)) {
+    throw new Error(`EMAIL_TRANSPORT must be one of: ${[...SUPPORTED_EMAIL_TRANSPORTS].join(", ")}.`);
+  }
+  if (emailTransport === EMAIL_TRANSPORT_MAILTRAP_SANDBOX && process.env.DEPLOYMENT_ENV !== "staging") {
+    throw new Error("MAILTRAP Sandbox email delivery is allowed only when DEPLOYMENT_ENV=staging.");
+  }
+  if (emailTransport === EMAIL_TRANSPORT_MAILTRAP_SANDBOX && isPasswordRecoveryEnabled()) {
+    throw new Error("PASSWORD_RECOVERY_ENABLED=false is required with Mailtrap Sandbox because visitors cannot receive its messages.");
+  }
 
   const required = [
     "JWT_SECRET",
@@ -42,7 +72,6 @@ export function assertProductionEnvironment() {
     "GROQ_API_KEY",
     "APP_BASE_URL",
     "CORS_ORIGIN",
-    "RESEND_API_KEY",
     "EMAIL_FROM",
     "PRIVACY_POLICY_VERSION",
     "TERMS_VERSION",
@@ -57,6 +86,10 @@ export function assertProductionEnvironment() {
     "GLOBAL_DAILY_PROVIDER_CALL_LIMIT",
     "GLOBAL_DAILY_LLM_CALL_LIMIT",
   ];
+  if (emailTransport === EMAIL_TRANSPORT_RESEND) required.push("RESEND_API_KEY");
+  if (emailTransport === EMAIL_TRANSPORT_MAILTRAP_SANDBOX) {
+    required.push("MAILTRAP_SMTP_HOST", "MAILTRAP_SMTP_USER", "MAILTRAP_SMTP_PASS");
+  }
   const unsafe = required.filter((key) => isPlaceholderSecret(process.env[key]));
 
   if (unsafe.length) {
@@ -69,6 +102,13 @@ export function assertProductionEnvironment() {
 
   if (String(process.env.CORS_ORIGIN || "").includes("*")) {
     throw new Error("CORS_ORIGIN must be an explicit allowlist in production, not a wildcard.");
+  }
+
+  if (emailTransport === EMAIL_TRANSPORT_MAILTRAP_SANDBOX) {
+    const smtpPort = Number(process.env.MAILTRAP_SMTP_PORT || 2525);
+    if (!Number.isInteger(smtpPort) || smtpPort < 1 || smtpPort > 65535) {
+      throw new Error("MAILTRAP_SMTP_PORT must be a valid TCP port.");
+    }
   }
 
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(process.env.PRIVACY_CONTACT_EMAIL || ""))) {

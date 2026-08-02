@@ -1,5 +1,14 @@
 import axios from "axios";
+import nodemailer from "nodemailer";
+import {
+  EMAIL_TRANSPORT_MAILTRAP_SANDBOX,
+  EMAIL_TRANSPORT_RESEND,
+  mailtrapSandboxConfig,
+  selectedEmailTransport,
+} from "../config/emailTransport.js";
 import { logger } from "../utils/logger.js";
+
+let mailtrapTransporter;
 
 function appBaseUrl() {
   return (process.env.APP_BASE_URL || process.env.CORS_ORIGIN || "http://localhost:5173").split(",")[0].trim().replace(/\/$/, "");
@@ -42,6 +51,28 @@ async function sendWithResend({ to, subject, html, text }) {
   return true;
 }
 
+function getMailtrapTransporter() {
+  if (!mailtrapTransporter) {
+    mailtrapTransporter = nodemailer.createTransport(mailtrapSandboxConfig());
+  }
+  return mailtrapTransporter;
+}
+
+async function sendWithMailtrapSandbox({ to, subject, html, text }) {
+  const config = mailtrapSandboxConfig();
+  if (!config.auth.user || !config.auth.pass) return false;
+
+  await getMailtrapTransporter().sendMail({
+    from: fromAddress(),
+    to,
+    subject,
+    html,
+    text,
+  });
+
+  return true;
+}
+
 async function sendWithConsole({ to, subject, text }) {
   if (process.env.NODE_ENV === "production") return false;
   logger.debug("Development email generated", { to, subject, text });
@@ -59,7 +90,13 @@ export const emailService = {
 
   async sendMail(payload) {
     try {
-      if (await sendWithResend(payload)) return { sent: true, provider: "resend" };
+      const transport = selectedEmailTransport();
+      if (transport === EMAIL_TRANSPORT_MAILTRAP_SANDBOX && await sendWithMailtrapSandbox(payload)) {
+        return { sent: true, provider: EMAIL_TRANSPORT_MAILTRAP_SANDBOX };
+      }
+      if (transport === EMAIL_TRANSPORT_RESEND && await sendWithResend(payload)) {
+        return { sent: true, provider: EMAIL_TRANSPORT_RESEND };
+      }
       if (await sendWithConsole(payload)) return { sent: true, provider: "console" };
       return { sent: false, provider: "none" };
     } catch (error) {
@@ -114,5 +151,11 @@ export const emailService = {
       text: `Your account deletion is being processed. Keep this private status link until deletion completes: ${statusUrl}`,
       html: `<p>Your ATLAS account deletion is being processed.</p><p>Keep this private link until deletion completes: <a href="${escapeHtml(statusUrl)}">View deletion status</a></p>`,
     });
+  },
+  _test: {
+    resetMailtrapTransporter() {
+      if (mailtrapTransporter) mailtrapTransporter.close();
+      mailtrapTransporter = undefined;
+    },
   },
 };

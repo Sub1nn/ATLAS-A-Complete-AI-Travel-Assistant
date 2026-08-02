@@ -43,9 +43,15 @@ async function runDiagnostics() {
     "GROQ_API_KEY",
     "JWT_SECRET",
     "MONGODB_URI",
-    "RESEND_API_KEY",
     "EMAIL_FROM",
   ];
+
+  const emailTransport = String(process.env.EMAIL_TRANSPORT || "resend").trim().toLowerCase();
+  if (emailTransport === "mailtrap_sandbox") {
+    requiredVars.push("MAILTRAP_SMTP_HOST", "MAILTRAP_SMTP_USER", "MAILTRAP_SMTP_PASS");
+  } else {
+    requiredVars.push("RESEND_API_KEY");
+  }
 
   const optionalVars = [
     "GOOGLE_MAPS_SERVER_API_KEY",
