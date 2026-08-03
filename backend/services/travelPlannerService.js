@@ -29,6 +29,8 @@ const TravelPlanSchema = z.object({
     origin: z.string(),
     destination: z.string(),
     mode: z.string(),
+    departure_time: z.string(),
+    arrival_time: z.string(),
   }).nullable(),
   required_tools: z.array(z.string()).max(7),
   place_search_queries: z.array(z.string()).max(10),
@@ -86,6 +88,8 @@ function sanitizePlan(plan = {}) {
       origin: cleanString(plan.route.origin || ""),
       destination: cleanString(plan.route.destination || ""),
       mode: cleanString(plan.route.mode || "transit", 30),
+      departureTime: cleanString(plan.route.departure_time || plan.route.departureTime || "", 8),
+      arrivalTime: cleanString(plan.route.arrival_time || plan.route.arrivalTime || "", 8),
     } : null,
     required_tools: safeArray(plan.required_tools, 7),
     place_search_queries: safeArray(plan.place_search_queries, 10),
@@ -123,7 +127,7 @@ export async function createTravelPlan({ message = "", memory = {}, previousMess
       activity: "specific sport/activity such as tennis, badminton, museum, restaurant, hotel, hiking; empty if broad destination planning",
       date_text: "raw user date phrase such as this Saturday, tomorrow, this weekend",
       target_date: "YYYY-MM-DD when resolvable, otherwise empty",
-      route: { origin: "", destination: "", mode: "train|transit|driving|walking|bicycling" },
+      route: { origin: "", destination: "", mode: "train|transit|driving|walking|bicycling", departure_time: "HH:mm or empty", arrival_time: "HH:mm or empty" },
       required_tools: ["weather", "places", "news", "culture", "route", "hotels", "restaurants", "nightlife"],
       place_search_queries: ["short query strings for place search, requested activity first"],
       map_searches: ["short Google Maps searches, requested intent first"],
@@ -207,10 +211,16 @@ export function applyTravelPlan(resolved = {}, plan = null) {
       "activity_recommendations",
       "travel_logistics",
     ].includes(resolved.intent?.type);
+  const keepActiveRouteIntent = resolved.intent?.type === "route_planning"
+    && Boolean(
+      (resolved.routeRequest?.origin && resolved.routeRequest?.destination)
+      || (resolved.memory?.route?.origin && resolved.memory?.route?.destination),
+    );
   const keepDestinationIntent = keepLocationOnlyDestinationIntent
     || keepRefinementDestinationIntent
     || keepItineraryDestinationIntent
-    || keepHighConfidenceDeterministicIntent;
+    || keepHighConfidenceDeterministicIntent
+    || keepActiveRouteIntent;
   const keepExplicitDestination = Boolean(
     resolved.destination
     && (resolved.explicitLocations?.length || resolved.locations?.length),

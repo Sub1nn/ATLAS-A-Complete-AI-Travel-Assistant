@@ -37,6 +37,23 @@ test("keeps real city names with accent variants", () => {
   );
 });
 
+test("recognizes plain not-negation for excluded venue traits", () => {
+  assert.equal(
+    contextService.isTermNegated("I need a bookable court, not an outdoor court.", "outdoor"),
+    true,
+  );
+  assert.equal(
+    contextService.containsPositiveTerm("I need a bookable court, not an outdoor court.", "outdoor"),
+    false,
+  );
+  const resolved = contextService.resolveContext(
+    "Where can I play indoor tennis? I need a bookable court, not an outdoor court.",
+    {},
+    [],
+  );
+  assert.equal(resolved.activityRequest.activity, "tennis");
+});
+
 test("recognizes ISO-backed countries beyond the manual shortlist", () => {
   assert.equal(contextService.isCountryLike("Liechtenstein"), true);
   assert.equal(contextService.isCountryLike("Côte d'Ivoire"), true);
@@ -53,6 +70,7 @@ test("detects route requests with origin and destination", () => {
   assert.equal(route.origin, "Helsinki railway station");
   assert.equal(route.destination, "Helsinki airport");
   assert.equal(route.mode, "train");
+  assert.equal(route.arrivalTime, "");
 
   const resolved = contextService.resolveContext("Route from Kamppi to Helsinki airport", {}, []);
   assert.equal(resolved.intent.type, "route_planning");
@@ -73,6 +91,64 @@ test("does not mistake an itinerary time window for a route", () => {
   assert.equal(resolved.requestProfile.constraints.endTime, "18:00");
   assert.equal(resolved.requestProfile.constraints.accessible, true);
   assert.deepEqual(resolved.requestProfile.constraints.dietary, ["vegetarian"]);
+});
+
+test("extracts described multi-day durations without treating split as a city", () => {
+  const resolved = contextService.resolveContext(
+    "Plan 5 relaxed days in Nepal, split between Kathmandu and Pokhara.",
+    {},
+    [],
+  );
+
+  assert.equal(resolved.requestProfile.constraints.dayCount, 5);
+  assert.deepEqual(resolved.explicitLocations, ["nepal", "kathmandu", "pokhara"]);
+});
+
+test("treats a named-city adjustment as a focused continuation of the trip plan", () => {
+  const first = contextService.resolveContext(
+    "Plan 5 relaxed days in Nepal, split between Kathmandu and Pokhara.",
+    {},
+    [],
+  );
+  const followUp = contextService.resolveContext(
+    "Make Pokhara quieter and add one easy lake activity.",
+    first.memory,
+    [{ role: "user", content: "Plan 5 relaxed days in Nepal, split between Kathmandu and Pokhara." }],
+  );
+
+  assert.equal(followUp.intent.type, "destination_planning");
+  assert.equal(followUp.intent.isFollowUp, true);
+  assert.equal(followUp.requestProfile.itineraryContinuation, true);
+  assert.equal(followUp.destination, "pokhara");
+});
+
+test("destination switches preserve a referenced budget instead of downgrading it", () => {
+  const first = contextService.resolveContext(
+    "Plan 5 relaxed days in Nepal with a mid-range budget.",
+    {},
+    [],
+  );
+  const switched = contextService.resolveContext(
+    "Instead, compare Abu Dhabi for the same dates and budget.",
+    first.memory,
+    [],
+  );
+
+  assert.equal(switched.destination, "abu dhabi");
+  assert.equal(switched.memory.budget, "mid-range");
+  assert.equal(switched.requestProfile.constraints.dayCount, 5);
+  assert.equal(switched.memory.locations.includes("nepal"), false);
+});
+
+test("multi-country safety comparisons preserve every compared country", () => {
+  const resolved = contextService.resolveContext(
+    "Compare the current travel safety of Nepal and Iran. Which one needs more caution?",
+    {},
+    [],
+  );
+
+  assert.deepEqual(resolved.explicitLocations, ["nepal", "iran"]);
+  assert.deepEqual(resolved.memory.locations, ["nepal", "iran"]);
 });
 
 test("day trips keep the departure city as an origin and preserve no-car constraints", () => {
@@ -178,6 +254,62 @@ test("mixed city planning requests stay destination-scoped instead of activity-o
   assert.ok(resolved.memory.interests.includes("food"));
 });
 
+test("multi-day country planning keeps food and culture as preferences", () => {
+  const resolved = contextService.resolveContext(
+    "I am visiting Japan for 7 days in October for the first time. I like food and culture, dislike rushed itineraries, and have a mid-range budget.",
+    {},
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "destination_planning");
+  assert.equal(resolved.destination, "japan");
+  assert.equal(resolved.requestProfile.constraints.dayCount, 7);
+  assert.deepEqual(resolved.memory.interests, ["food", "culture"]);
+});
+
+test("packing questions with flight endpoints stay customs logistics requests", () => {
+  const resolved = contextService.resolveContext(
+    "I am flying from Finland to Japan via Qatar with prescription ADHD medicine and a power bank. What must I check before packing?",
+    {},
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "travel_logistics");
+  assert.equal(resolved.requestProfile.customs, true);
+  assert.equal(resolved.routeRequest, null);
+  assert.deepEqual(resolved.travelRoles, {
+    origin: "Finland",
+    destination: "Japan",
+    transit: ["Qatar"],
+  });
+});
+
+test("layover questions preserve airport, duration and baggage context", () => {
+  const resolved = contextService.resolveContext(
+    "I have a 6-hour layover at Singapore Changi with cabin luggage. What can I realistically do without missing my flight?",
+    {},
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "travel_logistics");
+  assert.equal(resolved.requestProfile.layover.airport, "Singapore Changi");
+  assert.equal(resolved.requestProfile.layover.durationMinutes, 360);
+  assert.equal(resolved.requestProfile.layover.cabinLuggage, true);
+});
+
+test("route requests preserve an arrive-by time and travel date", () => {
+  const route = contextService.extractRouteRequest(
+    "What is the simplest public-transport route from Helsinki Central Station to Porvoo Old Town tomorrow, arriving by 10:00? Minimise transfers.",
+  );
+
+  assert.equal(route.origin, "Helsinki Central Station");
+  assert.equal(route.destination, "Porvoo Old Town");
+  assert.equal(route.mode, "transit");
+  assert.equal(route.departureTime, "");
+  assert.equal(route.arrivalTime, "10:00");
+  assert.match(route.targetDate, /^\d{4}-\d{2}-\d{2}$/);
+});
+
 test("keeps hotel amenities inside accommodation intent", () => {
   const resolved = contextService.resolveContext(
     "Compare family-friendly hotels in central Paris for 2 adults and two children. We need step-free access and would prefer a pool.",
@@ -188,6 +320,22 @@ test("keeps hotel amenities inside accommodation intent", () => {
   assert.equal(resolved.intent.type, "accommodation_search");
   assert.equal(resolved.activityRequest, null);
   assert.equal(resolved.memory.interests.includes("swimming"), false);
+});
+
+test("hotel comparisons parse natural date ranges, word-based occupancy and travel tier", () => {
+  const resolved = contextService.resolveContext(
+    "Compare three mid-range hotels in Paris for two adults from 10 to 13 October 2026. Show total stay price and cancellation terms, but do not book anything.",
+    {},
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "accommodation_search");
+  assert.equal(resolved.memory.budget, "mid-range");
+  assert.equal(resolved.requestProfile.constraints.checkIn, "2026-10-10");
+  assert.equal(resolved.requestProfile.constraints.checkOut, "2026-10-13");
+  assert.equal(resolved.requestProfile.constraints.adults, 2);
+  assert.equal(resolved.requestProfile.constraints.startTime, undefined);
+  assert.equal(resolved.requestProfile.constraints.endTime, undefined);
 });
 
 test("keeps multi-day travel plans broad and honors negative preferences", () => {
@@ -544,6 +692,26 @@ test("common Abu Dhabi typo resolves without inheriting stale locations", () => 
   assert.deepEqual(planned.memory.locations, ["United Arab Emirates", "abu dhabi"]);
 });
 
+test("multi-day destination switches preserve indoor and low-walking constraints", () => {
+  const resolved = contextService.resolveContext(
+    "Now switch the same 3-day plan to Abu Dhabi, keep it indoor-focused, vegetarian and low walking.",
+    {
+      destination: "Kyoto",
+      locations: ["Kyoto"],
+      lastIntent: "destination_planning",
+      constraints: { dayCount: 3, dietary: ["vegetarian"], minimalWalking: true },
+    },
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "destination_planning");
+  assert.equal(contextService.canonicalDestination(resolved.destination), "Abu Dhabi");
+  assert.equal(resolved.requestProfile.constraints.dayCount, 3);
+  assert.equal(resolved.requestProfile.constraints.indoorPreferred, true);
+  assert.equal(resolved.requestProfile.constraints.minimalWalking, true);
+  assert.deepEqual(resolved.requestProfile.constraints.dietary, ["vegetarian"]);
+});
+
 test("generic court follow-up can still inherit remembered sport", () => {
   const memory = {
     destination: "Riihimäki",
@@ -576,6 +744,21 @@ test("detects nightlife and bars as dining recommendations", () => {
   assert.equal(resolved.intent.type, "dining_recommendations");
   assert.equal(resolved.memory.diningStyle, "nightlife");
   assert.equal(resolved.destination.toLowerCase(), "tokyo");
+});
+
+test("dining locations exclude trailing time and budget clauses", () => {
+  const resolved = contextService.resolveContext(
+    "Find three vegetarian dinner options near Shinjuku Station after 21:00, under ¥4,000 per person.",
+    {},
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "dining_recommendations");
+  assert.equal(resolved.destination, "Shinjuku Station");
+  assert.equal(resolved.requestProfile.constraints.maxStops, 3);
+  assert.equal(resolved.requestProfile.constraints.startTime, "21:00");
+  assert.equal(resolved.requestProfile.constraints.maxBudget, 4000);
+  assert.deepEqual(resolved.requestProfile.constraints.dietary, ["vegetarian"]);
 });
 
 test("detects flexible accommodation categories and budget", () => {
@@ -653,6 +836,66 @@ test("requested result counts are preserved for viewpoints and options", () => {
   );
 
   assert.equal(resolved.requestProfile.constraints.maxStops, 2);
+  assert.equal(resolved.requestProfile.constraints.minimalWalking, true);
+});
+
+test("route preference follow-ups understand least walking and preserve the active journey", () => {
+  const resolved = contextService.resolveContext(
+    "What if I want the option with the least walking?",
+    {
+      destination: "Helsinki Airport",
+      locations: ["Helsinki"],
+      lastIntent: "route_planning",
+      constraints: {},
+      route: { origin: "Helsinki railway station", destination: "the airport", mode: "train" },
+    },
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "route_planning");
+  assert.equal(resolved.requestProfile.constraints.minimalWalking, true);
+  assert.equal(resolved.routeRequest.origin, "Helsinki railway station");
+  assert.equal(resolved.routeRequest.destination, "the airport");
+});
+
+test("the LLM planner cannot replace an active route preference follow-up with weather", () => {
+  const resolved = contextService.resolveContext(
+    "Please give me the option with the least walking.",
+    {
+      destination: "Helsinki",
+      locations: ["Helsinki"],
+      lastIntent: "route_planning",
+      constraints: {},
+      route: { origin: "Helsingin päärautatieasema", destination: "Helsinki Airport", mode: "train" },
+    },
+    [],
+  );
+  const planned = travelPlannerService.applyTravelPlan(resolved, {
+    intent: "weather_inquiry",
+    confidence: 0.99,
+    destination: "Helsinki",
+  });
+
+  assert.equal(planned.intent.type, "route_planning");
+  assert.equal(planned.routeRequest.origin, "Helsingin päärautatieasema");
+  assert.equal(planned.requestProfile.constraints.minimalWalking, true);
+});
+
+test("route preference wording recovers a stored journey even after a misclassified turn", () => {
+  const resolved = contextService.resolveContext(
+    "Give me the option with the least walking.",
+    {
+      destination: "Helsinki",
+      locations: ["Helsinki"],
+      lastIntent: "weather_inquiry",
+      constraints: {},
+      route: { origin: "Helsingin päärautatieasema", destination: "Helsinki Airport", mode: "train" },
+    },
+    [{ role: "assistant", content: "Hourly weather forecast for Helsinki." }],
+  );
+
+  assert.equal(resolved.intent.type, "route_planning");
+  assert.equal(resolved.routeRequest.destination, "Helsinki Airport");
   assert.equal(resolved.requestProfile.constraints.minimalWalking, true);
 });
 

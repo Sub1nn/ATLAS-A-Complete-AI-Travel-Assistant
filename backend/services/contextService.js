@@ -137,7 +137,7 @@ const NON_LOCATION_WORDS = new Set([
 for (const word of TEMPORAL_LOCATION_WORDS) NON_LOCATION_WORDS.add(word);
 
 const TRAILING_CONTEXT_WORDS = [
-  "today", "tomorrow", "tonight", "this", "next", "with", "without", "for", "from", "to", "near", "around", "and", "or", "but", "as",
+  "today", "tomorrow", "tonight", "this", "next", "with", "without", "for", "from", "to", "near", "around", "and", "or", "but", "as", "after", "before", "under", "over", "per",
   "instead", "keep", "walking",
   "focus", "focused", "focussed", "featuring", "including", "centered", "centred",
   "weather", "forecast", "hourly", "hourely", "hotels", "hotel", "restaurants", "restaurant", "prices", "price",
@@ -196,7 +196,7 @@ function isTermNegated(text = "", term = "") {
   const key = normalize(term);
   if (!value || !key) return false;
   return new RegExp(
-    `\\b(?:do\\s+not|don['’]?t|dont|no|without|avoid|skip|exclude|excluding|dislike|not\\s+interested\\s+in)\\b[^.!?;]{0,48}\\b${escapeRegex(key)}\\b`,
+    `\\b(?:do\\s+not|don['’]?t|dont|no|without|avoid|skip|exclude|excluding|dislike|not\\s+interested\\s+in|not(?:\\s+(?:an?|the))?)\\b[^.!?;]{0,48}\\b${escapeRegex(key)}\\b`,
     "i",
   ).test(value);
 }
@@ -218,7 +218,12 @@ function extractPrimaryActivity(message = "", memory = {}, options = {}) {
   for (const activity of ACTIVITY_DEFINITIONS) {
     const matchedCurrent = activity.words.some((word) => containsPositiveTerm(currentText, word));
     if (!matchedCurrent) continue;
-    const explicitlyExcluded = activity.words.some((word) => isTermNegated(currentText, word));
+    const explicitlyExcluded = activity.words.some((word) => {
+      // "not an outdoor court" excludes the venue trait, not tennis itself.
+      // Generic court tokens must not erase a positively requested sport.
+      if (activity.key === "tennis" && /^(?:court|courts)$/.test(word)) return false;
+      return isTermNegated(currentText, word);
+    });
     if (explicitlyExcluded) continue;
     const accommodationContext = /\b(hotel|hotels|hostel|hostels|resort|resorts|accommodation|stay|stays|room|rooms|property|properties)\b/.test(currentText);
     if (
@@ -384,7 +389,7 @@ function extractLocations(message = "") {
     const normalizedLoc = normalize(loc);
     if (
       normalizedLoc === "split"
-      && /\bsplit\s+(?:the\s+)?(?:time|days?|trip|budget|cost|stay|visit|itinerary)\b/i.test(raw)
+      && /\bsplit\s+(?:(?:the\s+)?(?:time|days?|trip|budget|cost|stay|visit|itinerary)\b|between\b)/i.test(raw)
     ) {
       continue;
     }
@@ -528,12 +533,13 @@ function extractRequestConstraints(message = "", previous = {}) {
 
   setTrue("accessible", /\b(accessible|accessibility|wheelchair|step[-\s]?free|mobility)\b/);
   setTrue("senior", /\b(senior|elderly|older (?:adult|parent|mother|father)|\d{2,3}[-\s]?year[-\s]?old)\b/);
-  setTrue("minimalWalking", /\b(minimal|little|less|limited|avoid)\s+walking\b|\bwalking\s+(?:as little as possible|limit|minimal|limited)\b/);
+  setTrue("minimalWalking", /\b(minimal|minimum|least|little|less|lowest|low|limited|avoid|short)\s+(?:amount\s+of\s+)?walking\b|\bwalking\s+(?:as little as possible|limit|minimum|minimal|least|lowest|low|limited)\b|\bshortest\s+walk(?:ing)?\b/);
   setTrue("minimalWalking", /\b(?:avoid|avoiding|limit|limited)\s+(?:steep\s+)?(?:walking|walks?|hills?|slopes?|inclines?|stairs?|steps?)\b|\b(?:steep\s+walking|steep\s+walks?|many\s+stairs?|long\s+walks?)\b/);
   setTrue("minimalWalking", /\b(knee|ankle|hip|leg)\s+(?:injury|pain|problem)|\b(?:moderate|gentle)\s+walking\b|\bfrequent\s+(?:rest|seating)|\brest\s+stops?\b/);
-  setTrue("minimalTransfers", /\b(minimal|few|fewer|avoid)\s+transfers?\b|\btransfers?\s+(?:as little as possible|minimal|limited)\b/);
+  setTrue("minimalTransfers", /\b(minimal|minimum|few|fewer|fewest|least|avoid|no)\s+transfers?\b|\btransfers?\s+(?:as little as possible|minimal|minimum|limited|fewest|least)\b|\b(?:direct|no[-\s]?change)\s+(?:route|service|train|bus|option)\b/);
   setTrue("noCar", /\b(?:without|no)\s+(?:a\s+)?car\b|\b(?:do\s+not|don['’]?t|cannot|can['’]?t)\s+drive\b|\bpublic\s+transport\s+only\b/);
   setTrue("indoorAlternative", /\b(indoor|covered)\s+(?:alternative|option|backup)s?\b/);
+  setTrue("indoorPreferred", /\b(?:indoor[-\s]?focused|focus(?:ed)?\s+on\s+indoor|mostly\s+indoor|keep\s+(?:it|the\s+plan)\s+indoors?)\b/);
   setTrue("rainAlternative", /\b(if it rains|rainy\s+day|rain(?:y)?\s+(?:alternative|option|backup)|wet[-\s]?weather)\b/);
   setTrue("breakfastPreferred", /\b(breakfast (?:preferred|included)|include breakfast|with breakfast|breakfast)\b/);
   const amenities = [
@@ -563,19 +569,23 @@ function extractRequestConstraints(message = "", previous = {}) {
     if (currency) constraints.currency = currency;
   }
 
-  const timeRangeMatch = raw.match(/\bbetween\s+(\d{1,2}(?::\d{2})?)\s+and\s+(\d{1,2}(?::\d{2})?)\b/i);
-  if (timeRangeMatch) {
-    constraints.startTime = timeRangeMatch[1].includes(":") ? timeRangeMatch[1] : `${timeRangeMatch[1]}:00`;
-    constraints.endTime = timeRangeMatch[2].includes(":") ? timeRangeMatch[2] : `${timeRangeMatch[2]}:00`;
-  } else {
-    const startMatch = raw.match(/\b(?:(?:start|starting)\s+)?(?:after|from)\s+(\d{1,2}(?::\d{2})?)\b/i)
-      || raw.match(/\b(?:start|starting)\s+at\s+(\d{1,2}(?::\d{2})?)\b/i);
-    if (startMatch) constraints.startTime = startMatch[1].includes(":") ? startMatch[1] : `${startMatch[1]}:00`;
-    const endMatch = raw.match(/\b(?:until|to|before)\s+(\d{1,2}(?::\d{2})?)\b/i);
-    if (endMatch) constraints.endTime = endMatch[1].includes(":") ? endMatch[1] : `${endMatch[1]}:00`;
+  const monthPattern = "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?";
+  const stayRange = raw.match(new RegExp(`\\b(?:from\\s+)?(\\d{1,2})\\s*(?:[–—-]|to|until|through)\\s*(\\d{1,2})\\s+(${monthPattern})\\s+(\\d{4})\\b`, "i"));
+  if (!stayRange) {
+    const timeRangeMatch = raw.match(/\bbetween\s+(\d{1,2}(?::\d{2})?)\s+and\s+(\d{1,2}(?::\d{2})?)\b/i);
+    if (timeRangeMatch) {
+      constraints.startTime = timeRangeMatch[1].includes(":") ? timeRangeMatch[1] : `${timeRangeMatch[1]}:00`;
+      constraints.endTime = timeRangeMatch[2].includes(":") ? timeRangeMatch[2] : `${timeRangeMatch[2]}:00`;
+    } else {
+      const startMatch = raw.match(/\b(?:(?:start|starting)\s+)?(?:after|from)\s+(\d{1,2}(?::\d{2})?)\b/i)
+        || raw.match(/\b(?:start|starting)\s+at\s+(\d{1,2}(?::\d{2})?)\b/i);
+      if (startMatch) constraints.startTime = startMatch[1].includes(":") ? startMatch[1] : `${startMatch[1]}:00`;
+      const endMatch = raw.match(/\b(?:until|to|before)\s+(\d{1,2}(?::\d{2})?)\b/i);
+      if (endMatch) constraints.endTime = endMatch[1].includes(":") ? endMatch[1] : `${endMatch[1]}:00`;
+    }
   }
 
-  const dayCountMatch = raw.match(/\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fourteen)[-\s]?days?\b/i);
+  const dayCountMatch = raw.match(/\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fourteen)(?:(?:\s+[\p{L}\p{M}-]+){0,3}\s+days?|[-\s]?days?)\b/iu);
   if (dayCountMatch) {
     const dayWords = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fourteen: 14 };
     const days = dayWords[normalize(dayCountMatch[1])] || Number(dayCountMatch[1]);
@@ -595,14 +605,13 @@ function extractRequestConstraints(message = "", previous = {}) {
     constraints.maxStops = words[normalize(stopLimitMatch[1])] || Number(stopLimitMatch[1]);
   }
   const resultCountMatch = raw.match(
-    /\b(?:suggest|show|give|find|recommend|compare|list)?\s*(?:me\s+)?(?:exactly|only|top|best)?\s*(\d+|one|two|three|four|five)\s+(?:genuinely\s+)?(?:places?|options?|viewpoints?|attractions?|restaurants?|hotels?|stays?|venues?|stops?)\b/i,
+    /\b(?:suggest|show|give|find|recommend|compare|list)?\s*(?:me\s+)?(?:exactly|only|top|best)?\s*(\d+|one|two|three|four|five)\s+(?:(?:genuinely|vegetarian|vegan|halal|kosher|accessible|budget|luxury|local|nearby|indoor|outdoor|breakfast|lunch|dinner|dining|meal)\s+){0,3}(?:places?|options?|viewpoints?|attractions?|restaurants?|hotels?|stays?|venues?|stops?)\b/i,
   );
   if (!constraints.maxStops && resultCountMatch) {
     const words = { one: 1, two: 2, three: 3, four: 4, five: 5 };
     constraints.maxStops = words[normalize(resultCountMatch[1])] || Number(resultCountMatch[1]);
   }
 
-  const stayRange = raw.match(/\b(\d{1,2})\s*[–—-]\s*(\d{1,2})\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{4})\b/i);
   if (stayRange) {
     const months = {
       jan: 0, january: 0, feb: 1, february: 1, mar: 2, march: 2, apr: 3, april: 3,
@@ -619,8 +628,11 @@ function extractRequestConstraints(message = "", previous = {}) {
     }
   }
 
-  const adultsMatch = raw.match(/\b(\d+)\s+adults?\b/i);
-  if (adultsMatch) constraints.adults = Number(adultsMatch[1]);
+  const adultsMatch = raw.match(/\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+adults?\b/i);
+  if (adultsMatch) {
+    const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+    constraints.adults = words[normalize(adultsMatch[1])] || Number(adultsMatch[1]);
+  }
   const childAges = [...raw.matchAll(/\b(?:child|children|kid|kids)(?:\s+aged?|\s+ages?)?\s+(\d{1,2})(?:\s*(?:,|and)\s*(\d{1,2}))?/gi)]
     .flatMap((match) => [match[1], match[2]])
     .filter(Boolean)
@@ -768,7 +780,7 @@ function isAffirmation(message = "") {
   if (direct.test(text)) return true;
   const agreement = /^(yes|yeah|yep|sure|ok|okay|please)\b/i.test(text);
   const wantsMore = /\b(i\s+)?(want|would like|need)\s+(to\s+)?(know|see|hear)|\b(tell|show|give)\s+me\b|\bmore\b/i.test(text);
-  const hasNewSpecificIntent = /\b(weather|forecast|hourly|hotel|hostel|motel|lodge|restaurant|cafe|bar|pub|nightclub|nightlife|club|pdf|document|price|visa|airport|safety|itinerary|route|directions)\b/i.test(text);
+  const hasNewSpecificIntent = /\b(weather|forecast|hourly|hotel|hostel|motel|lodge|restaurant|cafe|bar|pub|nightclub|nightlife|club|pdf|document|price|visa|airport|safety|itinerary|route|directions|walking|walk|transfers?|direct|fastest|quickest|cheapest|accessible|step[-\s]?free)\b/i.test(text);
   return text.length <= 90 && (agreement || wantsMore) && !hasNewSpecificIntent;
 }
 
@@ -856,7 +868,7 @@ function extractRouteRequest(message = "") {
     : "transit";
 
   const patterns = [
-    /\bfrom\s+([^?.,;]+?)\s+(?:to|towards?)\s+([^?.,;]+?)(?:[?!.]|$)/i,
+    /\bfrom\s+([^?.,;]+?)\s+(?:to|towards?)\s+([^?.,;]+?)(?:[,;?!.]|$)/i,
     /\b(?:route|directions?|navigate|how\s+(?:do\s+)?i\s+get|how\s+to\s+get|go|get|travel|drive|walk|bus|train|metro)\s+(?:from\s+)([^?.,;]+?)\s+(?:to|towards?)\s+([^?.,;]+?)[?!.]*$/i,
     /\bfrom\s+([^?.,;]+?)\s+(?:to|towards?)\s+([^?.,;]+?)[?!.]*$/i,
     /\b(?:to|towards?)\s+([^?.,;]+?)\s+(?:from\s+)([^?.,;]+?)[?!.]*$/i,
@@ -876,7 +888,10 @@ function extractRouteRequest(message = "") {
     }
     const startsLikeClock = (value = "") => /^\d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?(?:\s|$)/i.test(String(value).trim());
     if (origin && destination && !startsLikeClock(origin) && !startsLikeClock(destination)) {
-      const departureClock = raw.match(/\b(?:at|after|from)\s+(\d{1,2})(?::(\d{2}))?\b/i);
+      const arrivalClock = raw.match(/\b(?:arrive|arriving|arrival)\s+(?:by|at|before)\s+(\d{1,2})(?::(\d{2}))?\b/i);
+      const departureClock = arrivalClock
+        ? null
+        : raw.match(/\b(?:depart(?:ing|ure)?\s+(?:at|after)|leave|leaving\s+(?:at|after)|at|after|from)\s+(\d{1,2})(?::(\d{2}))?\b/i);
       const dateContext = resolveDateContext(raw);
       return {
         origin,
@@ -884,6 +899,9 @@ function extractRouteRequest(message = "") {
         mode,
         departureTime: departureClock
           ? `${String(Number(departureClock[1])).padStart(2, "0")}:${String(Number(departureClock[2] || 0)).padStart(2, "0")}`
+          : "",
+        arrivalTime: arrivalClock
+          ? `${String(Number(arrivalClock[1])).padStart(2, "0")}:${String(Number(arrivalClock[2] || 0)).padStart(2, "0")}`
           : "",
         dateLabel: dateContext?.label || "",
         targetDate: dateContext?.iso || "",
@@ -894,11 +912,41 @@ function extractRouteRequest(message = "") {
   return null;
 }
 
+function extractLayoverRequest(message = "", previous = {}) {
+  const raw = String(message || "").trim();
+  const text = normalize(raw);
+  const explicitLayover = /\b(layover|stopover|flight connection|connecting flight|connection time|transit time)\b/.test(text);
+  const connectionFollowUp = Boolean(previous?.airport)
+    && /\b(arrival|departure|terminal|gate|same ticket|same booking|checked through|collect (?:my )?bag|leave the airport|stay airside|go landside)\b/.test(text);
+  if (!explicitLayover && !connectionFollowUp) return null;
+
+  const hourMatch = raw.match(/\b(\d+(?:\.\d+)?)\s*[-\s]?\s*(?:hours?|hrs?)\b/i);
+  const minuteMatch = raw.match(/\b(\d{1,3})\s*[-\s]?\s*(?:minutes?|mins?)\b/i);
+  const airportMatch = raw.match(/\b(?:at|in)\s+([\p{L}\p{M}][\p{L}\p{M}'’.-]*(?:\s+[\p{L}\p{M}][\p{L}\p{M}'’.-]*){0,5}?)(?=\s+(?:with|for|between|and|before|after|on)\b|[,.?!]|$)/iu);
+  const terminalMatches = [...raw.matchAll(/\b(?:terminal|t)\s*([1-9][a-z]?)\b/gi)].map((match) => `T${String(match[1]).toUpperCase()}`);
+  const durationMinutes = hourMatch
+    ? Math.round(Number(hourMatch[1]) * 60 + Number(minuteMatch?.[1] || 0))
+    : minuteMatch
+    ? Number(minuteMatch[1])
+    : Number(previous.durationMinutes || 0) || null;
+
+  return {
+    airport: stripLocationCandidate(airportMatch?.[1] || previous.airport || ""),
+    durationMinutes,
+    arrivalTerminal: terminalMatches[0] || previous.arrivalTerminal || "",
+    departureTerminal: terminalMatches[1] || terminalMatches[0] || previous.departureTerminal || "",
+    cabinLuggage: /\b(cabin|carry[-\s]?on|hand)\s+(?:bag|bags|baggage|luggage)\b/.test(text) || Boolean(previous.cabinLuggage),
+    checkedThrough: /\b(?:bag|bags|baggage|luggage)\s+(?:is|are|will be|checked)\s+(?:checked\s+)?through\b|\bchecked through\b/.test(text) || Boolean(previous.checkedThrough),
+    sameTicket: /\b(?:same|one|single)\s+(?:ticket|booking|reservation|pnr)\b/.test(text) || Boolean(previous.sameTicket),
+  };
+}
+
 function detectIntent(message = "", memory = {}, previousMessages = []) {
   const acceptedOffer = inferAcceptedOffer(message, previousMessages, memory);
   if (acceptedOffer) return { type: acceptedOffer.intentType, confidence: 0.94, isFollowUp: true, acceptedOffer };
 
   const text = normalize(message);
+  const layoverRequest = extractLayoverRequest(message, memory.layover || {});
   const locations = locationsForMessage(message, memory);
   const hasStoredLocation = Boolean(memory?.destination || memory?.locations?.length);
   const hasDate = /\b(today|tomorrow|tonight|weekend|afternoon|evening|now)\b/.test(text);
@@ -919,7 +967,7 @@ function detectIntent(message = "", memory = {}, previousMessages = []) {
   const explicitSafety = ["safe", "safety", "risk", "danger", "security", "advisory", "war", "conflict", "unrest"]
     .some((term) => containsPositiveTerm(text, term));
   const mixedPlanningCategoryCount = [explicitAccommodation, explicitDining, explicitActivity].filter(Boolean).length;
-  const planningPhrase = /\b(plan|build|create|make it|revise|refine|adjust|update|itinerary|one[-\s]?day|day plan|weekend|visit|travel|trip)\b/.test(text);
+  const planningPhrase = /\b(plan|planning|build|create|make it|revise|refine|adjust|update|itinerary|one[-\s]?day|day plan|weekend|visit|visiting|travel|traveling|travelling|trip)\b/.test(text);
   const explicitDayPlan = /\b(?:one|1)(?:\s+\w+){0,3}\s+day\b|\bday[-\s]?plan\b|\bitinerary\b/.test(text);
   const explicitMultiDayPlan = /\b(?:\d{1,2}|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fourteen)[-\s]+days?\b/.test(text);
   const explicitHalfDayPlan = /\b(?:plan|build|create|make it)\b[\s\S]{0,64}\b(?:morning|afternoon|evening)\b|\b(?:just|only|one)\b[\s\S]{0,32}\b(?:morning|afternoon|evening)\b/.test(text);
@@ -927,15 +975,21 @@ function detectIntent(message = "", memory = {}, previousMessages = []) {
   const basePlan = /\b(?:recommend|choose|suggest)\b[\s\S]{0,140}\b(?:base|bases|nights?)\b/.test(text);
   const routeRequest = extractRouteRequest(message);
   const hasRoute = Boolean(routeRequest) || /\b(route|directions?|navigation|navigate|how to get|how do i get|go from|get from|distance|duration)\b/.test(text);
+  const routePreferenceFollowUp = Boolean(memory?.route?.origin && memory?.route?.destination)
+    && /\b(?:same|that|this|the)\s+(?:route|journey|trip|option)\b|\b(?:least|less|lowest|minimum|minimal|shortest)\s+(?:amount\s+of\s+)?walking\b|\bshortest\s+walk(?:ing)?\b|\b(?:fewest|fewer|least|no|avoid)\s+transfers?\b|\b(?:fastest|quickest|shortest|simplest|direct|cheapest)\s+(?:route|journey|service|train|bus|option)\b/.test(text);
   const locationOnlyFollowUp = isLocationOnlyFollowUp(message, memory, locations);
-  const customsQuestion = /\b(customs?|declare|declaration|restricted|prohibited|allowed|bring|carry|pack|import|border)\b/.test(text)
+  const customsQuestion = /\b(customs?|declare|declaration|restricted|prohibited|allowed|bring|carry|take|pack|packing|import|border|airport security)\b/.test(text)
     && /\b(medicine|medication|prescription|insulin|food|meat|dairy|cheese|milk|cash|money|power bank|battery|lithium|drone|alcohol|tobacco|weapon|spray)\b/.test(text);
   const visaQuestion = /\b(visa|visa[-\s]?free|entry requirements?|need a visa|immigration permission)\b/.test(text);
   const itineraryContinuation = hasStoredLocation
     && (memory.lastIntent === "destination_planning" || /\b(?:day|itinerary|plan|trip)\b/.test(normalize(memory.lastTopic || "")))
-    && /\b(make it|revise|refine|adjust|update|make\b[\s\S]{0,80}\b(?:breakfast|lunch|dinner|meal|backup|stop|plan)|add\b[\s\S]{0,80}\b(?:backup|alternative|stop|meal)|replace|change|keep (?:the )?(?:same|whole)|whole day|same (?:requirements|plan|trip)|focus (?:on|around)|start (?:after|at|from)|under\s*[€$£¥]?\s*\d+)\b/.test(text);
+    && /\b(make it|revise|refine|adjust|update|make\b[\s\S]{0,80}\b(?:breakfast|lunch|dinner|meal|backup|stop|plan|quieter|calmer|slower|faster|easier|accessible|cheaper|shorter|longer)|add\b[\s\S]{0,80}\b(?:backup|alternative|stop|meal|activity|experience|attraction|visit|lake|museum|park|beach)|replace|change|keep (?:the )?(?:same|whole)|whole day|same (?:requirements|plan|trip)|focus (?:on|around)|start (?:after|at|from)|under\s*[€$£¥]?\s*\d+)\b/.test(text);
   const selectionFollowUp = hasStoredLocation
     && /\b(which (?:one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|10)|which of those|which of these|those options|these options|(?:pick|choose|select|show|give|compare|rank) (?:the )?(?:one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|10)|(?:best|top|only|exactly) (?:one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|10))\b/.test(text);
+
+  if (layoverRequest) {
+    return { type: "travel_logistics", confidence: 0.98, isFollowUp: !/\b(layover|stopover|flight connection|connecting flight)\b/.test(text), layoverRequest };
+  }
 
   if (customsQuestion) {
     return { type: "travel_logistics", confidence: 0.98, isFollowUp: false, customsQuestion: true };
@@ -947,6 +1001,10 @@ function detectIntent(message = "", memory = {}, previousMessages = []) {
 
   if (hasRoute) {
     return { type: "route_planning", confidence: routeRequest ? 0.96 : 0.78, isFollowUp: !routeRequest && hasStoredLocation, routeRequest };
+  }
+
+  if (routePreferenceFollowUp) {
+    return { type: "route_planning", confidence: 0.96, isFollowUp: true, routeRequest: memory.route };
   }
 
   if (selectionFollowUp && memory.lastIntent) {
@@ -1023,6 +1081,7 @@ function updateMemory(memory = {}, message = "", intent = {}, baseDate = new Dat
   const dateContext = resolveDateContext(message, baseDate);
   const acceptedOffer = intent.acceptedOffer || null;
   const routeRequest = intent.type === "route_planning" ? (intent.routeRequest || extractRouteRequest(message)) : null;
+  const layoverRequest = intent.layoverRequest || null;
   const primaryActivity = intent.primaryActivity || extractPrimaryActivity(message, memory) || extractPrimaryActivity(acceptedOffer?.topic || "");
   const interests = [
     ...INTEREST_WORDS.filter((word) => {
@@ -1051,7 +1110,9 @@ function updateMemory(memory = {}, message = "", intent = {}, baseDate = new Dat
     && /\b(?:instead|switch|change|move)\b/.test(text),
   );
   const contextChanged = switchedCountry || explicitDestinationReplacement;
-  const explicitlyKeepsRequirements = /\b(same (?:plan|requirements|constraints|preferences)|keep (?:the )?(?:same|plan|requirements|constraints|preferences))\b/.test(text);
+  const keepsSameDates = /\b(?:same dates?|keep (?:the )?same dates?)\b/.test(text);
+  const keepsSameBudget = /\b(?:same (?:dates? and )?budget|keep (?:the )?same budget)\b/.test(text);
+  const explicitlyKeepsRequirements = /\b(same (?:plan|requirements|constraints|preferences|dates?(?: and budget)?|budget(?: and dates?)?)|keep (?:the )?(?:same|plan|requirements|constraints|preferences|dates?|budget))\b/.test(text);
   const continuesPreviousPlan = /\b(?:make|switch|change|move)\b[\s\S]{0,48}\b(?:instead|same plan)\b/.test(text);
   const portableConstraintKeys = [
     "accessible",
@@ -1060,6 +1121,7 @@ function updateMemory(memory = {}, message = "", intent = {}, baseDate = new Dat
     "minimalTransfers",
     "dietary",
     "indoorAlternative",
+    "indoorPreferred",
     "rainAlternative",
   ];
   const portableConstraints = Object.fromEntries(
@@ -1098,7 +1160,8 @@ function updateMemory(memory = {}, message = "", intent = {}, baseDate = new Dat
     delete updated.diningStyle;
     delete updated.route;
     delete updated.pendingActivitySearch;
-    delete updated.targetDate;
+    delete updated.layover;
+    if (!keepsSameDates) delete updated.targetDate;
     if (!/\b(budget|cheap|affordable|luxury|premium)\b/.test(text)) delete updated.budget;
   }
 
@@ -1119,7 +1182,12 @@ function updateMemory(memory = {}, message = "", intent = {}, baseDate = new Dat
       const countryContext = (memory.locations || []).filter((loc) => isCountryLike(loc)).slice(-1);
       updated.locations = [...new Set([...countryContext, ...locations])].slice(-8);
     }
-    updated.locations = pruneLocationsForCurrentDestination(updated.locations, updated.destination).slice(-8);
+    const comparisonCountries = locations.filter((loc) => isCountryLike(loc));
+    const keepsCountryComparison = comparisonCountries.length > 1
+      && /\b(compare|comparison|versus|vs\.?|which (?:is|one)|safer)\b/.test(text);
+    updated.locations = keepsCountryComparison
+      ? [...new Set(locations)].slice(0, 8)
+      : pruneLocationsForCurrentDestination(updated.locations, updated.destination).slice(-8);
   }
 
   const areaMatch = String(message || "").match(/\b(?:near|around|close to|by|next to)\s+(?:the\s+)?([A-Z][\p{L}\p{M}'-]*(?:\s+[A-Z][\p{L}\p{M}'-]*){0,4})/u);
@@ -1127,13 +1195,13 @@ function updateMemory(memory = {}, message = "", intent = {}, baseDate = new Dat
     updated.area = areaMatch[1].trim();
   }
 
-  if (/\b(moderate|mid[-\s]?range)\s+budget\b/.test(text)) updated.budget = "mid-range";
+  if (/\b(moderate|mid[-\s]?range)(?:\s+(?:budget|hotels?|stays?|accommodation))?\b/.test(text)) updated.budget = "mid-range";
   else if (
     text.includes("cheap")
     || text.includes("affordable")
     || text.includes("low cost")
     || text.includes("low-cost")
-    || (text.includes("budget") && !Number(requestConstraints.maxBudget))
+    || (text.includes("budget") && !keepsSameBudget && !Number(requestConstraints.maxBudget))
   ) updated.budget = "budget";
   if (text.includes("luxury") || text.includes("premium") || text.includes("expensive") || text.includes("five star") || text.includes("5 star")) updated.budget = "luxury";
   if (/\bhostel|hostels\b/.test(text)) updated.stayType = "hostel";
@@ -1156,6 +1224,7 @@ function updateMemory(memory = {}, message = "", intent = {}, baseDate = new Dat
     };
   }
   if (routeRequest) updated.route = routeRequest;
+  if (layoverRequest) updated.layover = layoverRequest;
   return updated;
 }
 
@@ -1168,6 +1237,7 @@ function requestBaseDate(clientLocalDate = "") {
 function resolveContext(message = "", memory = {}, previousMessages = [], options = {}) {
   const baseDate = requestBaseDate(options.clientLocalDate);
   const intent = detectIntent(message, memory, previousMessages);
+  const layoverRequest = intent.layoverRequest || (intent.type === "travel_logistics" ? extractLayoverRequest(message, memory.layover || {}) : null);
   const locations = destinationLocations(message, memory, intent);
   const visaDestination = intent.visaQuestion ? extractVisaDestination(message, locations) : "";
   const visaTraveller = intent.visaQuestion ? extractVisaTravellerContext(message) : null;
@@ -1272,10 +1342,12 @@ function resolveContext(message = "", memory = {}, previousMessages = [], option
     routeRequest: intent.type === "route_planning" ? (intent.routeRequest || updatedMemory.route || null) : null,
     journeyRequest,
     activityRequest,
+    layoverRequest,
     travelRoles,
     requestProfile: {
       customs: Boolean(intent.customsQuestion),
       visa: intent.visaQuestion ? visaTraveller : null,
+      layover: layoverRequest,
       itineraryContinuation: Boolean(intent.itineraryContinuation),
       constraints: updatedMemory.constraints || {},
     },
@@ -1306,6 +1378,7 @@ export const contextService = {
   resolveDateContext,
   requestBaseDate,
   extractRouteRequest,
+  extractLayoverRequest,
   extractTravelRoles,
   extractRequestConstraints,
   extractPrimaryActivity,

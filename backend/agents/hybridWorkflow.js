@@ -141,7 +141,7 @@ function responseMode(intent = "", message = "", resolved = {}) {
   if (intent === "accommodation_search") return "comparison";
   if (intent === "safety_inquiry" || resolved.requestProfile?.customs) return "advisory";
   if (intent === "document_chat") return "document_answer";
-  if (intent === "destination_planning" && /\b(itinerary|day[- ]?by[- ]?day|\d+\s*days?|one day|two days|three days)\b/i.test(message)) return "itinerary";
+  if (intent === "destination_planning" && /\b(itinerary|day[- ]?by[- ]?day|\d+[-\s]*days?|one[-\s]+day|two[-\s]+days|three[-\s]+days)\b/i.test(message)) return "itinerary";
   if (["activity_recommendations", "dining_recommendations"].includes(intent)) return "shortlist";
   return "direct";
 }
