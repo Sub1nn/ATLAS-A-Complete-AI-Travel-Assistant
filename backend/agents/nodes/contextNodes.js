@@ -20,6 +20,7 @@ export function resolveContextNode(state) {
     state.message,
     state.memory,
     state.previousMessages,
+    state.temporalContext,
   );
   return {
     resolved: travelPlannerService.applyTravelPlan(deterministic, state.planner),
