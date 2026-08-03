@@ -2,7 +2,7 @@ import axios from "axios";
 import { AsyncLocalStorage } from "async_hooks";
 import { cacheKey, getOrSetCache } from "./cacheService.js";
 import { logger } from "../utils/logger.js";
-import { getLocationData } from "../utils/locationUtils.js";
+import { calculateDistance, getLocationData } from "../utils/locationUtils.js";
 import { countryService } from "./countryService.js";
 
 const tools = [
@@ -128,9 +128,11 @@ const tools = [
         properties: {
           origin: { type: "string", description: "Starting point or address" },
           destination: { type: "string", description: "Destination place or address" },
+          location_context: { type: "string", description: "City or region used to resolve relative endpoints such as 'the airport' or 'central station'" },
           mode: { type: "string", description: "Preferred mode: transit, walking, driving, bicycling" },
           departure_time: { type: "string", description: "Requested local departure time in HH:mm" },
-          target_date: { type: "string", description: "Requested departure date in YYYY-MM-DD" },
+          arrival_time: { type: "string", description: "Requested local arrival time in HH:mm; transit only" },
+          target_date: { type: "string", description: "Requested travel date in YYYY-MM-DD" },
           date_label: { type: "string", description: "Original human-readable date phrase" },
           minimal_walking: { type: "boolean", description: "Prefer the verified option with the least walking" },
           minimal_transfers: { type: "boolean", description: "Prefer the verified option with the fewest transfers" },
@@ -674,14 +676,17 @@ function textQueryForNearby({ type, keyword, locationName = "" }) {
   return `${[...new Set(parts.map((item) => String(item).trim()).filter(Boolean))].join(" ")} in ${locationName}`;
 }
 
-async function placesTextSearchNew({ query, lat, lon, radius = 8000, maxResultCount = 10 }) {
+async function placesTextSearchNew({ query, lat, lon, radius = 8000, maxResultCount = 10, includedType = "", strictTypeFiltering = false }) {
   const key = googlePlacesKey();
   if (!key) throw new Error("Google Places API key is not configured");
 
   const body = {
     textQuery: query,
     maxResultCount: Math.max(1, Math.min(Number(maxResultCount) || 10, 20)),
+    languageCode: "en",
   };
+  if (includedType) body.includedType = includedType;
+  if (includedType && strictTypeFiltering) body.strictTypeFiltering = true;
 
   const latitude = Number(lat);
   const longitude = Number(lon);
@@ -1755,6 +1760,7 @@ function compactRouteLeg(route = {}, origin = "", destination = "") {
       duration: durationText(step.staticDuration),
       travel_mode: step.travelMode || "",
       transit_line: step.transitDetails?.transitLine?.nameShort || step.transitDetails?.transitLine?.name || "",
+      transit_vehicle: step.transitDetails?.transitLine?.vehicle?.type || "",
       is_transit: Boolean(step.transitDetails || step.travelMode === "TRANSIT"),
     };
   }).filter((step) => step.instruction);
@@ -1775,6 +1781,7 @@ function compactRouteLeg(route = {}, origin = "", destination = "") {
   return {
     summary: route.description || fallbackSummary,
     distance: distanceText(route.distanceMeters),
+    distance_meters: Number(route.distanceMeters) || null,
     duration: durationText(route.duration),
     start_address: origin,
     end_address: destination,
@@ -1813,6 +1820,7 @@ function compactLegacyRoute(route = {}, origin = "", destination = "") {
       duration: step.duration?.text || durationText(`${Number(step.duration?.value || 0)}s`),
       travel_mode: step.travel_mode || "",
       transit_line: line,
+      transit_vehicle: transit?.line?.vehicle?.type || transit?.line?.vehicle?.name || "",
       is_transit: Boolean(transit || step.travel_mode === "TRANSIT"),
     };
   }).filter((step) => step.instruction);
@@ -1829,6 +1837,7 @@ function compactLegacyRoute(route = {}, origin = "", destination = "") {
   return {
     summary: route.summary || fallbackSummary,
     distance: leg.distance?.text || "distance unavailable",
+    distance_meters: Number(leg.distance?.value) || null,
     duration: leg.duration?.text || "duration unavailable",
     start_address: leg.start_address || origin,
     end_address: leg.end_address || destination,
@@ -1844,13 +1853,162 @@ function compactLegacyRoute(route = {}, origin = "", destination = "") {
   };
 }
 
-async function routeDepartureEpoch(origin = "", targetDate = "", departureTime = "") {
+const GENERIC_ROUTE_ENDPOINTS = Object.freeze([
+  { kind: "airport", type: "airport", pattern: /^(?:the\s+)?(?:(?:nearest|main|local|international)\s+)?airport$/i },
+  { kind: "train_station", type: "train_station", pattern: /^(?:the\s+)?(?:(?:nearest|main|central|local)\s+)?(?:railway|rail|train)\s+station$/i },
+  { kind: "bus_station", type: "bus_station", pattern: /^(?:the\s+)?(?:(?:nearest|main|central|local)\s+)?(?:bus|coach)\s+(?:station|terminal)$/i },
+  { kind: "transit_station", type: "transit_station", pattern: /^(?:the\s+)?(?:(?:nearest|main|central|local)\s+)?(?:station|transit hub)$/i },
+]);
+
+const ROUTE_INFRASTRUCTURE = Object.freeze([
+  { kind: "airport", type: "airport", pattern: /\b(?:airport|aeropuerto|aeroport|flughafen|lentokentt[aä]|空港)\b/i },
+  { kind: "train_station", type: "train_station", pattern: /\b(?:railway|rail|train)\s+station\b|\b(?:hauptbahnhof|gare|stazione|rautatieasema|järnvägsstation|駅)\b/i },
+  { kind: "bus_station", type: "bus_station", pattern: /\b(?:bus|coach)\s+(?:station|terminal)\b/i },
+]);
+
+function routeEndpointKind(value = "") {
+  const endpoint = String(value || "").trim();
+  const generic = GENERIC_ROUTE_ENDPOINTS.find((item) => item.pattern.test(endpoint));
+  if (generic) return { kind: generic.kind, includedType: generic.type, generic: true };
+  const infrastructure = ROUTE_INFRASTRUCTURE.find((item) => item.pattern.test(endpoint));
+  return infrastructure
+    ? { kind: infrastructure.kind, includedType: infrastructure.type, generic: false }
+    : { kind: "place", includedType: "", generic: false };
+}
+
+function routeEndpointFromPlace(place = {}, raw = "") {
+  const compact = compactPlace(place);
+  const latitude = Number(compact.latitude);
+  const longitude = Number(compact.longitude);
+  return {
+    raw,
+    label: compact.name || raw,
+    address: compact.address || compact.name || raw,
+    place_id: compact.place_id || null,
+    latitude: Number.isFinite(latitude) ? latitude : null,
+    longitude: Number.isFinite(longitude) ? longitude : null,
+    resolved: Boolean(compact.place_id || compact.address),
+  };
+}
+
+function routeEndpointFromLocation(location = {}, raw = "") {
+  const latitude = Number(location.lat);
+  const longitude = Number(location.lon);
+  return {
+    raw,
+    label: location.formatted_address || location.city || raw,
+    address: location.formatted_address || raw,
+    place_id: location.place_id || null,
+    latitude: Number.isFinite(latitude) ? latitude : null,
+    longitude: Number.isFinite(longitude) ? longitude : null,
+    resolved: Number.isFinite(latitude) && Number.isFinite(longitude),
+  };
+}
+
+async function resolveRouteEndpoint(value = "", { locationContext = "", anchor = null } = {}) {
+  const raw = String(value || "").trim();
+  const classification = routeEndpointKind(raw);
+  const context = String(locationContext || "").trim();
+  if (classification.generic && !context && !anchor?.label && !anchor?.address) {
+    return { raw, label: raw, address: raw, resolved: false, ...classification, reason: "ROUTE_ENDPOINT_CONTEXT_REQUIRED" };
+  }
+
+  if (classification.includedType) {
+    const contextLabel = context || anchor?.label || anchor?.address || "";
+    const query = classification.generic ? `${classification.kind.replace(/_/g, " ")} in ${contextLabel}` : context ? `${raw} in ${context}` : raw;
+    try {
+      const places = await placesTextSearchNew({
+        query,
+        lat: anchor?.latitude,
+        lon: anchor?.longitude,
+        radius: classification.kind === "airport" ? 50000 : 20000,
+        maxResultCount: 5,
+        includedType: classification.includedType,
+        strictTypeFiltering: true,
+      });
+      if (places.length) return { ...routeEndpointFromPlace(places[0], raw), ...classification };
+    } catch (error) {
+      logger.debug("Route endpoint Places resolution failed", { endpoint: raw, reason: error.message });
+    }
+  }
+
+  if (classification.generic) {
+    return { raw, label: raw, address: raw, resolved: false, ...classification, reason: "ROUTE_ENDPOINT_UNRESOLVED" };
+  }
+
+  try {
+    const location = await getLocationData(context && !normalize(raw).includes(normalize(context)) ? `${raw}, ${context}` : raw);
+    return { ...routeEndpointFromLocation(location, raw), ...classification };
+  } catch (error) {
+    logger.debug("Route endpoint geocoding failed", { endpoint: raw, reason: error.message });
+    return { raw, label: raw, address: raw, resolved: false, ...classification, reason: "ROUTE_ENDPOINT_UNRESOLVED" };
+  }
+}
+
+function routeWaypoint(endpoint = {}) {
+  if (endpoint.place_id) return { placeId: endpoint.place_id };
+  if (Number.isFinite(endpoint.latitude) && Number.isFinite(endpoint.longitude)) {
+    return { location: { latLng: { latitude: endpoint.latitude, longitude: endpoint.longitude } } };
+  }
+  return { address: endpoint.address || endpoint.raw || "" };
+}
+
+const TRAIN_VEHICLE_TYPES = new Set([
+  "COMMUTER_TRAIN", "HEAVY_RAIL", "HIGH_SPEED_TRAIN", "LONG_DISTANCE_TRAIN", "METRO_RAIL", "MONORAIL", "RAIL", "SUBWAY", "TRAM",
+]);
+
+function routePlausibility(route = {}, { originEndpoint = {}, destinationEndpoint = {}, requestedMode = "transit" } = {}) {
+  const reasons = [];
+  const routeKm = Number(route.distance_meters) / 1000;
+  const durationHours = Number(route.duration_seconds) / 3600;
+  const hasCoordinates = [originEndpoint.latitude, originEndpoint.longitude, destinationEndpoint.latitude, destinationEndpoint.longitude]
+    .every((value) => Number.isFinite(Number(value)));
+  const directKm = hasCoordinates
+    ? calculateDistance(originEndpoint.latitude, originEndpoint.longitude, destinationEndpoint.latitude, destinationEndpoint.longitude)
+    : null;
+
+  if (Number.isFinite(directKm) && Number.isFinite(routeKm)) {
+    const maximumDetourKm = Math.max(120, directKm * 6 + 30);
+    if (routeKm > maximumDetourKm) reasons.push("ROUTE_GEOGRAPHIC_DETOUR");
+    if (directKm < 120 && durationHours > 10) reasons.push("ROUTE_DURATION_IMPLAUSIBLE");
+  }
+  if (Number(route.transfer_count) > 10) reasons.push("ROUTE_TRANSFER_COUNT_IMPLAUSIBLE");
+  if (["transit", "train"].includes(requestedMode) && Number(route.transit_step_count || 0) < 1) reasons.push("ROUTE_TRANSIT_DETAILS_MISSING");
+  if (requestedMode === "train") {
+    const vehicles = (route.steps || []).map((step) => String(step.transit_vehicle || "").toUpperCase()).filter(Boolean);
+    if (vehicles.length && !vehicles.some((vehicle) => TRAIN_VEHICLE_TYPES.has(vehicle))) reasons.push("ROUTE_TRAIN_MODE_MISMATCH");
+  }
+  return { passed: reasons.length === 0, reasons, direct_distance_km: Number.isFinite(directKm) ? directKm : null };
+}
+
+function validateRoutes(routes = [], context = {}) {
+  const accepted = [];
+  const rejected = [];
+  for (const route of routes) {
+    const plausibility = routePlausibility(route, context);
+    const annotated = { ...route, plausibility };
+    (plausibility.passed ? accepted : rejected).push(annotated);
+  }
+  return { accepted, rejected };
+}
+
+async function routeLocalTimeEpoch(locationName = "", targetDate = "", localTime = "") {
   if (!targetDate) return null;
-  const time = /^\d{2}:\d{2}$/.test(departureTime) ? departureTime : "12:00";
+  const time = /^\d{2}:\d{2}$/.test(localTime) ? localTime : "12:00";
   const naiveUtc = Math.floor(new Date(`${targetDate}T${time}:00Z`).getTime() / 1000);
   if (!Number.isFinite(naiveUtc)) return null;
   try {
-    const location = await getLocationData(origin);
+    let location;
+    try {
+      location = await getLocationData(locationName);
+    } catch (primaryError) {
+      const localityFallback = String(locationName || "")
+        .replace(/\b(?:old town|historic cent(?:re|er)|city cent(?:re|er)|central station|railway station|train station|bus station|airport|terminal\s*\d*)\b/gi, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!localityFallback || localityFallback.toLowerCase() === String(locationName || "").trim().toLowerCase()) throw primaryError;
+      location = await getLocationData(localityFallback);
+    }
     const timezone = await googleTimeZone({ lat: location.lat, lon: location.lon, timestampSeconds: naiveUtc });
     const offset = Number(timezone?.raw_offset_seconds || 0) + Number(timezone?.dst_offset_seconds || 0);
     return naiveUtc - offset;
@@ -1860,7 +2018,7 @@ async function routeDepartureEpoch(origin = "", targetDate = "", departureTime =
   }
 }
 
-async function legacyDirectionsRoute({ from, to, travelMode, departureEpoch, key }) {
+async function legacyDirectionsRoute({ from, to, travelMode, departureEpoch, arrivalEpoch, key }) {
   const params = {
     origin: from,
     destination: to,
@@ -1870,7 +2028,8 @@ async function legacyDirectionsRoute({ from, to, travelMode, departureEpoch, key
     units: "metric",
     key,
   };
-  if (departureEpoch && ["transit", "driving"].includes(travelMode)) params.departure_time = departureEpoch;
+  if (arrivalEpoch && travelMode === "transit") params.arrival_time = arrivalEpoch;
+  else if (departureEpoch && ["transit", "driving"].includes(travelMode)) params.departure_time = departureEpoch;
   const data = await withRetry(
     () => httpGet("https://maps.googleapis.com/maps/api/directions/json", params, "directions"),
     "directions",
@@ -1885,8 +2044,10 @@ async function legacyDirectionsRoute({ from, to, travelMode, departureEpoch, key
 async function routeTool({
   origin,
   destination,
+  location_context = "",
   mode = "transit",
   departure_time = "",
+  arrival_time = "",
   target_date = "",
   date_label = "",
   minimal_walking = false,
@@ -1908,17 +2069,66 @@ async function routeTool({
   const requestedMode = normalize(mode);
   const travelMode = ["driving", "walking", "bicycling", "transit"].includes(requestedMode) ? requestedMode : "transit";
   const displayMode = /train/.test(requestedMode) ? "train" : travelMode;
-  const mapUrl = mapsDirectionsUrl(from, to, travelMode);
   const key = googlePlacesKey();
-  const departureEpoch = await routeDepartureEpoch(from, target_date, departure_time);
+  let contextAnchor = null;
+  if (location_context) {
+    try {
+      const contextLocation = await getLocationData(location_context);
+      contextAnchor = routeEndpointFromLocation(contextLocation, location_context);
+    } catch (error) {
+      logger.debug("Route location context could not be geocoded", { locationContext: location_context, reason: error.message });
+    }
+  }
+  const originEndpoint = await resolveRouteEndpoint(from, { locationContext: location_context, anchor: contextAnchor });
+  const destinationEndpoint = await resolveRouteEndpoint(to, {
+    locationContext: location_context,
+    anchor: originEndpoint.resolved ? originEndpoint : contextAnchor,
+  });
+  const resolvedFrom = originEndpoint.label || originEndpoint.address || from;
+  const resolvedTo = destinationEndpoint.label || destinationEndpoint.address || to;
+  const mapUrl = mapsDirectionsUrl(resolvedFrom, resolvedTo, travelMode);
+
+  if (!originEndpoint.resolved || !destinationEndpoint.resolved) {
+    const unresolved = [!originEndpoint.resolved ? from : "", !destinationEndpoint.resolved ? to : ""].filter(Boolean);
+    return {
+      origin: resolvedFrom,
+      destination: resolvedTo,
+      requested_origin: from,
+      requested_destination: to,
+      resolved_origin: originEndpoint,
+      resolved_destination: destinationEndpoint,
+      mode: displayMode,
+      routes: [],
+      rejected_route_count: 0,
+      validation_warnings: ["ROUTE_ENDPOINT_UNRESOLVED"],
+      search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${resolvedFrom} → ${resolvedTo}`, url: mapUrl, is_search: true }],
+      data_quality: dataNote("limited", `ATLAS could not identify ${unresolved.join(" and ")} precisely enough to calculate a trustworthy route.`, { reason_code: "ROUTE_ENDPOINT_UNRESOLVED" }),
+      practical_tips: ["Use the exact airport, station, terminal or street name so ATLAS can keep both endpoints in the same area."],
+    };
+  }
+
+  const arrivalEpoch = arrival_time && travelMode === "transit"
+    ? await routeLocalTimeEpoch(resolvedTo, target_date, arrival_time)
+    : null;
+  const parsedDepartureEpoch = arrivalEpoch
+    ? null
+    : await routeLocalTimeEpoch(resolvedFrom, target_date, departure_time);
+  const departureEpoch = parsedDepartureEpoch
+    || (!arrivalEpoch && ["transit", "driving"].includes(travelMode)
+      ? Math.floor(Date.now() / (5 * 60 * 1000)) * 5 * 60
+      : null);
 
   if (!key) {
     return {
-      origin: from,
-      destination: to,
+      origin: resolvedFrom,
+      destination: resolvedTo,
+      requested_origin: from,
+      requested_destination: to,
+      resolved_origin: originEndpoint,
+      resolved_destination: destinationEndpoint,
       mode: displayMode,
       routes: [],
-      search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${from} → ${to}`, url: mapUrl, is_search: true }],
+      search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${resolvedFrom} → ${resolvedTo}`, url: mapUrl, is_search: true }],
       data_quality: dataNote("limited", "ATLAS route verification is not configured, so only a map link is available."),
       practical_tips: ["Open the route in Maps and choose public transport, walking or driving depending on your situation."],
     };
@@ -1939,21 +2149,30 @@ async function routeTool({
       "routes.legs.steps.transitDetails.tripShortText",
       "routes.legs.steps.transitDetails.transitLine.name",
       "routes.legs.steps.transitDetails.transitLine.nameShort",
+      "routes.legs.steps.transitDetails.transitLine.vehicle.name.text",
+      "routes.legs.steps.transitDetails.transitLine.vehicle.type",
       "routes.legs.steps.transitDetails.stopDetails.arrivalStop.name",
       "routes.legs.steps.transitDetails.stopDetails.departureStop.name",
       "routes.legs.steps.transitDetails.localizedValues.arrivalTime.time.text",
       "routes.legs.steps.transitDetails.localizedValues.departureTime.time.text",
     ].join(",");
     const routeBody = {
-      origin: { address: from },
-      destination: { address: to },
+      origin: routeWaypoint(originEndpoint),
+      destination: routeWaypoint(destinationEndpoint),
       travelMode: routeMode,
-      computeAlternativeRoutes: routeMode !== "TRANSIT",
+      computeAlternativeRoutes: true,
       languageCode: "en-US",
       units: "METRIC",
     };
-    if (departureEpoch && ["TRANSIT", "DRIVE"].includes(routeMode)) {
+    if (arrivalEpoch && routeMode === "TRANSIT") {
+      routeBody.arrivalTime = new Date(arrivalEpoch * 1000).toISOString();
+    } else if (departureEpoch && ["TRANSIT", "DRIVE"].includes(routeMode)) {
       routeBody.departureTime = new Date(departureEpoch * 1000).toISOString();
+    }
+    if (routeMode === "TRANSIT" && (minimal_walking || minimal_transfers)) {
+      routeBody.transitPreferences = {
+        routingPreference: minimal_walking ? "LESS_WALKING" : "FEWER_TRANSFERS",
+      };
     }
     const data = await withRetry(
       () => httpPost(
@@ -1965,11 +2184,11 @@ async function routeTool({
       "directions"
     );
 
-    let routes = (data.routes || []).slice(0, 3).map((route) => compactRouteLeg(route, from, to));
+    let routes = (data.routes || []).slice(0, 3).map((route) => compactRouteLeg(route, resolvedFrom, resolvedTo));
     let routeSource = "google_routes_api_v2";
     if (travelMode === "transit" && (minimal_walking || minimal_transfers)) {
       try {
-        const alternatives = await legacyDirectionsRoute({ from, to, travelMode, departureEpoch, key });
+        const alternatives = await legacyDirectionsRoute({ from: resolvedFrom, to: resolvedTo, travelMode, departureEpoch, arrivalEpoch, key });
         routes = [...routes, ...alternatives.routes];
         if (alternatives.routes.length) routeSource = "google_routes_api_v2_and_directions_alternatives";
       } catch (preferenceError) {
@@ -1977,14 +2196,22 @@ async function routeTool({
       }
     }
     if (!routes.length && travelMode === "transit") {
-      const legacy = await legacyDirectionsRoute({ from, to, travelMode, departureEpoch, key });
+      const legacy = await legacyDirectionsRoute({ from: resolvedFrom, to: resolvedTo, travelMode, departureEpoch, arrivalEpoch, key });
       routes = legacy.routes;
       if (routes.length) routeSource = "google_directions_api_legacy_fallback";
     }
+    const validated = validateRoutes(routes, { originEndpoint, destinationEndpoint, requestedMode: displayMode });
+    routes = validated.accepted;
     const uniqueRoutes = [];
     const seenRoutes = new Set();
     for (const item of routes) {
-      const key = `${item.departure_time}|${item.arrival_time}|${item.transit_step_count}|${item.walking_meters}|${item.duration_seconds}`;
+      const servicePattern = (item.steps || [])
+        .filter((step) => step.is_transit || step.transit_line)
+        .map((step) => `${step.transit_line || step.travel_mode}:${step.departure_stop || ""}:${step.arrival_stop || ""}`)
+        .join("|");
+      const key = Number(item.transit_step_count || 0) > 0
+        ? `transit:${normalize(item.summary || servicePattern)}:${Number(item.transfer_count || 0)}`
+        : `${item.summary || ""}|${servicePattern}|${Math.round(Number(item.duration_seconds || 0) / 60)}|${Math.round(Number(item.walking_meters || 0) / 50)}`;
       if (seenRoutes.has(key)) continue;
       seenRoutes.add(key);
       uniqueRoutes.push(item);
@@ -1996,38 +2223,72 @@ async function routeTool({
       if (minimal_transfers && Number(left.transfer_count || 0) !== Number(right.transfer_count || 0)) {
         return Number(left.transfer_count || 0) - Number(right.transfer_count || 0);
       }
-      return Number(left.duration_seconds || Number.MAX_SAFE_INTEGER) - Number(right.duration_seconds || Number.MAX_SAFE_INTEGER);
+      const practicalScore = (item) => (
+        Number(item.duration_seconds || Number.MAX_SAFE_INTEGER)
+        + Number(item.transfer_count || 0) * 12 * 60
+      );
+      return practicalScore(left) - practicalScore(right);
     }).slice(0, 3);
     return {
-      origin: from,
-      destination: to,
+      origin: resolvedFrom,
+      destination: resolvedTo,
+      requested_origin: from,
+      requested_destination: to,
+      resolved_origin: originEndpoint,
+      resolved_destination: destinationEndpoint,
       mode: displayMode,
       requested_departure: {
         date: target_date || null,
         time: departure_time || null,
         label: date_label || null,
       },
+      requested_arrival: {
+        date: target_date || null,
+        time: arrival_time || null,
+        label: date_label || null,
+      },
       routes,
-      search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${from} → ${to}`, url: mapUrl, is_search: true }],
-      data_quality: dataNote(routes.length ? "verified" : "limited", routes.length ? "ATLAS verified route distance and duration. Exact live traffic and disruptions should still be checked before leaving." : "ATLAS could not verify a route for this request; use the Maps link and adjust origin, destination or mode.", { source: routeSource }),
-      practical_tips: ["Check live traffic, transit disruptions and last departure times before leaving.", "For tourist trips, save the route offline or screenshot key steps."],
+      rejected_route_count: validated.rejected.length,
+      validation_warnings: [...new Set(validated.rejected.flatMap((item) => item.plausibility?.reasons || []))],
+      search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${resolvedFrom} → ${resolvedTo}`, url: mapUrl, is_search: true }],
+      data_quality: dataNote(routes.length ? "verified" : "limited", routes.length
+        ? "ATLAS checked the route against the resolved endpoints, requested mode and geographic distance. Confirm live disruptions before leaving."
+        : validated.rejected.length
+        ? "ATLAS rejected the returned route because it did not match the resolved endpoints or requested transport mode."
+        : "ATLAS could not verify a route for this request; use the Maps link and adjust origin, destination or mode.", {
+          source: routeSource,
+          ...(routes.length ? {} : { reason_code: validated.rejected.length ? "ROUTE_EVIDENCE_REJECTED" : "ROUTE_NOT_FOUND" }),
+        }),
+      practical_tips: ["Check live departures, disruptions and platform information before leaving."],
     };
   } catch (error) {
     if (travelMode === "transit") {
       try {
-        const legacy = await legacyDirectionsRoute({ from, to, travelMode, departureEpoch, key });
-        if (legacy.routes.length) {
+        const legacy = await legacyDirectionsRoute({ from: resolvedFrom, to: resolvedTo, travelMode, departureEpoch, arrivalEpoch, key });
+        const validatedLegacy = validateRoutes(legacy.routes, { originEndpoint, destinationEndpoint, requestedMode: displayMode });
+        if (validatedLegacy.accepted.length) {
           return {
-            origin: from,
-            destination: to,
+            origin: resolvedFrom,
+            destination: resolvedTo,
+            requested_origin: from,
+            requested_destination: to,
+            resolved_origin: originEndpoint,
+            resolved_destination: destinationEndpoint,
             mode: displayMode,
             requested_departure: {
               date: target_date || null,
               time: departure_time || null,
               label: date_label || null,
             },
-            routes: legacy.routes,
-            search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${from} → ${to}`, url: mapUrl, is_search: true }],
+            requested_arrival: {
+              date: target_date || null,
+              time: arrival_time || null,
+              label: date_label || null,
+            },
+            routes: validatedLegacy.accepted,
+            rejected_route_count: validatedLegacy.rejected.length,
+            validation_warnings: [...new Set(validatedLegacy.rejected.flatMap((item) => item.plausibility?.reasons || []))],
+            search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${resolvedFrom} → ${resolvedTo}`, url: mapUrl, is_search: true }],
             data_quality: dataNote("verified", "ATLAS verified this transit route using the enabled Google Directions service after the primary route service returned no usable result.", { source: "google_directions_api_legacy_fallback" }),
             practical_tips: ["Check live departures, disruptions and platform information before leaving.", "For airport travel, keep extra time for immigration, baggage and finding the correct platform."],
           };
@@ -2037,11 +2298,15 @@ async function routeTool({
       }
     }
     return {
-      origin: from,
-      destination: to,
+      origin: resolvedFrom,
+      destination: resolvedTo,
+      requested_origin: from,
+      requested_destination: to,
+      resolved_origin: originEndpoint,
+      resolved_destination: destinationEndpoint,
       mode: displayMode,
       routes: [],
-      search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${from} → ${to}`, url: mapUrl, is_search: true }],
+      search_actions: [{ name: "Open route in Google Maps", category: "route", address: `${resolvedFrom} → ${resolvedTo}`, url: mapUrl, is_search: true }],
       data_quality: dataNote("limited", userSafeProviderError(error, "ATLAS could not verify this route right now.")),
       practical_tips: ["Use the Maps route link as a fallback and confirm traffic, transit schedules and walking safety before leaving."],
     };
@@ -2560,6 +2825,12 @@ export const toolService = {
     officialAdvisoryLinks,
     fetchGovUkTravelAdvisory,
     compactRouteLeg,
+    compactLegacyRoute,
+    routeEndpointKind,
+    routePlausibility,
+    validateRoutes,
+    routeWaypoint,
+    routeLocalTimeEpoch,
     isLowValueAttractionPlace,
     shouldRecordProviderFailure,
     assertCircuitClosed,

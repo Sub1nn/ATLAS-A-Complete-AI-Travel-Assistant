@@ -42,6 +42,19 @@ function toolHasVerifiedLiveData(toolResults = []) {
   });
 }
 
+function verifiedPlaceNames(toolResults = []) {
+  const names = [];
+  for (const item of toolResults) {
+    const result = item?.result || item || {};
+    for (const key of ["recommendations", "restaurants", "properties", "places", "attractions", "hotels"]) {
+      for (const place of Array.isArray(result[key]) ? result[key] : []) {
+        if (place?.name) names.push(String(place.name).trim().toLowerCase());
+      }
+    }
+  }
+  return [...new Set(names.filter(Boolean))];
+}
+
 function appendNote(answer, note) {
   if (answer.toLowerCase().includes(note.toLowerCase().slice(0, 50))) return answer;
   return `${answer.trim()}\n\n**Verification note**\n${note}`;
@@ -89,7 +102,7 @@ function redactUnsupportedAvailability(answer = "") {
     .replace(/\bare operational\b/gi, "have an operational status that requires direct confirmation");
 }
 
-function qualifyUnsupportedAccessibility(answer = "", requestConstraints = {}) {
+function qualifyUnsupportedAccessibility(answer = "", requestConstraints = {}, evidencePlaceNames = []) {
   const accessibilitySensitive = Boolean(
     requestConstraints?.accessible
     || requestConstraints?.senior
@@ -120,7 +133,11 @@ function qualifyUnsupportedAccessibility(answer = "", requestConstraints = {}) {
     .replace(/\bis accessible by (?:car|taxi|public (?:transport|transportation))[^\n.,;]*/gi, "needs direct confirmation for drop-off and public-transport access")
     .replace(/\bis located in an? flat area[^\n.]*/gi, "has a route whose slope, surfaces and walking distance need direct confirmation")
     .replace(/\b(?:visitors?\s+)?can take an? (?:taxi|ride[- ]hailing service)[^\n.]*to avoid walking\b/gi, "confirm a suitable door-to-door drop-off point; a vehicle ride does not prove the final approach is step-free")
-    .replace(/^(\s*[-*•]\s*[^:\n]{2,120}):[^\n]*(?:accessible|minimal walking|flat area|steep walking)[^\n]*$/gim, "$1: live viewpoint candidate; confirm walking distance, slopes, steps, surfaces and drop-off access directly")
+    .replace(/^(\s*[-*•]\s*[^:\n]{2,120}):[^\n]*(?:accessible|minimal walking|flat area|steep walking)[^\n]*$/gim, (line, label) => (
+      evidencePlaceNames.some((name) => line.toLowerCase().includes(name))
+        ? line
+        : `${label}: live place candidate; confirm walking distance, slopes, steps, surfaces and drop-off access directly`
+    ))
     .replace(/\b(?:is|are) (?:fully )?(?:wheelchair[- ]accessible|step[- ]free)\b/gi, "requires direct accessibility confirmation");
 }
 
@@ -173,7 +190,7 @@ export function verifyResponse({
     notes.push("Unsupported live availability or opening-hour claims were removed. Confirm them on the official website or booking platform.");
   }
 
-  const accessibilityChecked = qualifyUnsupportedAccessibility(revised, requestConstraints);
+  const accessibilityChecked = qualifyUnsupportedAccessibility(revised, requestConstraints, verifiedPlaceNames(toolResults));
   if (accessibilityChecked !== revised) {
     revised = accessibilityChecked;
   }

@@ -216,7 +216,7 @@ function normalizedHeadings(answer = "") {
     .filter(Boolean);
 }
 
-export function assessResponseQuality({ answer = "", resolved = {}, memory = {}, message = "", responsePlan = {}, evidence = {} } = {}) {
+export function assessResponseQuality({ answer = "", resolved = {}, memory = {}, message = "", responsePlan = {}, evidence = {}, toolResults = [] } = {}) {
   const issues = [];
   const text = String(answer || "").trim();
   const headings = normalizedHeadings(text);
@@ -261,6 +261,26 @@ export function assessResponseQuality({ answer = "", resolved = {}, memory = {},
   if (asksForRoute && !/\b(route|travel|journey|train|bus|drive|walk|cycle|transit|duration|distance)\b/i.test(text)) {
     issues.push("INTENT_MISMATCH");
   }
+  if (asksForRoute) {
+    const routeEvidence = (toolResults || []).find((item) => item.tool === "route_and_transport_planner")?.result;
+    const routeOptions = Array.isArray(routeEvidence?.routes) ? routeEvidence.routes : [];
+    const evidenceLimited = routeEvidence && routeEvidence.data_quality?.status !== "verified";
+    const unresolvedEndpoint = routeEvidence?.data_quality?.reason_code === "ROUTE_ENDPOINT_UNRESOLVED"
+      || routeEvidence?.validation_warnings?.includes("ROUTE_ENDPOINT_UNRESOLVED");
+    const rejectedEvidence = Number(routeEvidence?.rejected_route_count || 0) > 0 && !routeOptions.length;
+    if (unresolvedEndpoint && !/\b(could not identify|exact airport|exact station|exact terminal|clarif|precisely)\b/i.test(text)) {
+      issues.push("ROUTE_ENDPOINT_UNRESOLVED_NOT_DISCLOSED");
+    }
+    if (rejectedEvidence && !/\b(reject|incorrect|did not match|no itinerary|could not verify)\b/i.test(text)) {
+      issues.push("ROUTE_REJECTION_NOT_DISCLOSED");
+    }
+    if ((evidenceLimited || !routeOptions.length) && /\b(?:ATLAS\s+)?verified\b|\bconfirmed route\b/i.test(text)) {
+      issues.push("ROUTE_VERIFICATION_OVERCLAIM");
+    }
+    if (routeOptions.some((item) => item.plausibility?.passed === false)) {
+      issues.push("IMPLAUSIBLE_ROUTE_PRESENTED");
+    }
+  }
   if (/\b(vegetarian|vegan|halal|kosher|gluten[-\s]?free)\b/i.test(message) && !/\b(vegetarian|vegan|halal|kosher|gluten[-\s]?free|dietary)\b/i.test(text)) {
     issues.push("DIETARY_CONSTRAINT_MISSING");
   }
@@ -279,6 +299,10 @@ export function assessResponseQuality({ answer = "", resolved = {}, memory = {},
   }
   if ((constraints.indoorAlternative || constraints.rainAlternative) && !/\b(indoor|covered|rain|wet[-\s]?weather|weather backup|alternative)\b/i.test(text)) {
     issues.push("WEATHER_BACKUP_MISSING");
+  }
+  if (constraints.indoorPreferred && !/\b(indoor|inside|covered)\b/i.test(text)) {
+    issues.push("The answer omitted the requested indoor focus.");
+    issueCodes.push("INDOOR_FOCUS_MISSING");
   }
   if (constraints.startTime && !text.includes(String(constraints.startTime).replace(/^0/, "")) && !text.includes(String(constraints.startTime))) {
     issues.push("START_TIME_MISSING");
@@ -325,20 +349,50 @@ export function assessResponseQuality({ answer = "", resolved = {}, memory = {},
 }
 
 export function qualityGateNode(state) {
-  return tracedNode("atlas-agent-quality-gate", state, async () => ({
-    quality: assessResponseQuality({
+  return tracedNode("atlas-agent-quality-gate", state, async () => {
+    const quality = assessResponseQuality({
       answer: state.answer,
       resolved: state.resolved,
       memory: state.memory,
       message: state.message,
       responsePlan: state.responsePlan,
       evidence: state.evidence,
-    }),
-  }));
+      toolResults: state.successfulToolResults,
+    });
+    const runtime = getAgentRuntime();
+    if (!quality.passed || typeof runtime.reviewResponseQuality !== "function") return { quality };
+    try {
+      const review = await runtime.reviewResponseQuality({
+        answer: state.answer,
+        resolved: state.resolved,
+        message: state.message,
+        responsePlan: state.responsePlan,
+        toolResults: state.successfulToolResults,
+      });
+      if (!review || review.skipped) return { quality: { ...quality, review } };
+      const issueCodes = [...new Set([...(quality.issueCodes || []), ...(review.issueCodes || [])])];
+      return {
+        quality: {
+          ...quality,
+          passed: quality.passed && review.passed,
+          score: review.passed ? quality.score : Math.min(quality.score, 0.6),
+          issueCodes,
+          review,
+        },
+      };
+    } catch {
+      return { quality: { ...quality, review: { skipped: true, reason: "review_unavailable" } } };
+    }
+  });
 }
 
 export function routeAfterQualityGate(state) {
   return state.quality?.passed ? "finalize" : "repair";
+}
+
+export function routeAfterRepair(state) {
+  if (state.quality?.passed || Number(state.repairCount || 0) >= 2) return "finalize";
+  return "repair";
 }
 
 export function repairResponseNode(state) {
@@ -355,17 +409,42 @@ export function repairResponseNode(state) {
       documentFocused: state.documentFocused,
     });
     const repairedAnswer = repaired?.answer || state.answer;
+    let repairedQuality = assessResponseQuality({
+      answer: repairedAnswer,
+      resolved: state.resolved,
+      memory: state.memory,
+      message: state.message,
+      responsePlan: state.responsePlan,
+      evidence: state.evidence,
+      toolResults: state.successfulToolResults,
+    });
+    if (repairedQuality.passed && typeof runtime.reviewResponseQuality === "function") {
+      try {
+        const review = await runtime.reviewResponseQuality({
+          answer: repairedAnswer,
+          resolved: state.resolved,
+          message: state.message,
+          responsePlan: state.responsePlan,
+          toolResults: state.successfulToolResults,
+        });
+        if (review && !review.skipped) {
+          const issueCodes = [...new Set([...(repairedQuality.issueCodes || []), ...(review.issueCodes || [])])];
+          repairedQuality = {
+            ...repairedQuality,
+            passed: repairedQuality.passed && review.passed,
+            score: review.passed ? repairedQuality.score : Math.min(repairedQuality.score, 0.6),
+            issueCodes,
+            review,
+          };
+        }
+      } catch {
+        repairedQuality = { ...repairedQuality, review: { skipped: true, reason: "review_unavailable" } };
+      }
+    }
     return {
       answer: repairedAnswer,
       verificationResult: repaired?.verificationResult || state.verificationResult,
-      quality: assessResponseQuality({
-        answer: repairedAnswer,
-        resolved: state.resolved,
-        memory: state.memory,
-        message: state.message,
-        responsePlan: state.responsePlan,
-        evidence: state.evidence,
-      }),
+      quality: repairedQuality,
       repairCount: state.repairCount + 1,
     };
   });

@@ -36,6 +36,63 @@ import { authSignupSchema, chatRequestSchema, validate } from "../utils/validati
 process.env.NODE_ENV = "test";
 const execFileAsync = promisify(execFile);
 
+test("route endpoint classification recognizes relative transport hubs without hardcoding a city", () => {
+  assert.deepEqual(toolService._test.routeEndpointKind("the airport"), {
+    kind: "airport",
+    includedType: "airport",
+    generic: true,
+  });
+  assert.deepEqual(toolService._test.routeEndpointKind("central train station"), {
+    kind: "train_station",
+    includedType: "train_station",
+    generic: true,
+  });
+  assert.equal(toolService._test.routeEndpointKind("Victoria Island").kind, "place");
+});
+
+test("route plausibility rejects global detours for local journeys", () => {
+  const endpoints = {
+    originEndpoint: { latitude: 60.1719, longitude: 24.9414 },
+    destinationEndpoint: { latitude: 60.3172, longitude: 24.9633 },
+    requestedMode: "train",
+  };
+  const absurd = toolService._test.routePlausibility({
+    distance_meters: 3_131_000,
+    duration_seconds: 42 * 60 * 60,
+    transfer_count: 8,
+    transit_step_count: 8,
+    steps: [{ transit_vehicle: "COMMUTER_TRAIN" }],
+  }, endpoints);
+  assert.equal(absurd.passed, false);
+  assert.ok(absurd.reasons.includes("ROUTE_GEOGRAPHIC_DETOUR"));
+  assert.ok(absurd.reasons.includes("ROUTE_DURATION_IMPLAUSIBLE"));
+
+  const local = toolService._test.routePlausibility({
+    distance_meters: 24_000,
+    duration_seconds: 34 * 60,
+    transfer_count: 0,
+    transit_step_count: 1,
+    steps: [{ transit_vehicle: "COMMUTER_TRAIN" }],
+  }, endpoints);
+  assert.equal(local.passed, true);
+});
+
+test("train requests reject bus-only results even when the route is geographically plausible", () => {
+  const result = toolService._test.routePlausibility({
+    distance_meters: 20_000,
+    duration_seconds: 45 * 60,
+    transfer_count: 0,
+    transit_step_count: 1,
+    steps: [{ transit_vehicle: "BUS" }],
+  }, {
+    originEndpoint: { latitude: 60.17, longitude: 24.94 },
+    destinationEndpoint: { latitude: 60.31, longitude: 24.96 },
+    requestedMode: "train",
+  });
+  assert.equal(result.passed, false);
+  assert.ok(result.reasons.includes("ROUTE_TRAIN_MODE_MISMATCH"));
+});
+
 test("Pinecone missing namespaces are treated as an idempotent deletion result", () => {
   assert.equal(vectorStore._test.isMissingNamespaceError({ status: 404 }), true);
   assert.equal(vectorStore._test.isMissingNamespaceError(new Error("request returned HTTP status 404")), true);
@@ -91,6 +148,22 @@ test("response verifier removes unsupported venue accessibility claims", () => {
   assert.equal(verification.modified, true);
   assert.doesNotMatch(answer, /suitable viewpoints|with an elevator|flat promenade|easily accessible|accessible with minimal walking|accessible by public|located in a flat area/i);
   assert.match(answer, /direct confirmation/i);
+});
+
+test("response verifier preserves evidence-backed itinerary names and markdown", () => {
+  const { answer } = verifyResponse({
+    answer: "- **Start: Pantheon** — Piazza della Rotonda, Roma. Check the exact accessible route before leaving.",
+    toolResults: [{
+      result: {
+        recommendations: [{ name: "Pantheon", address: "Piazza della Rotonda, Roma" }],
+        data_quality: { status: "verified" },
+      },
+    }],
+    requestConstraints: { accessible: true, minimalWalking: true },
+  });
+
+  assert.match(answer, /\*\*Start: Pantheon\*\*/);
+  assert.doesNotMatch(answer, /live place candidate/i);
 });
 
 test("viewpoint requests exclude similarly ranked museums without viewpoint evidence", () => {

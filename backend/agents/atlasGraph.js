@@ -23,6 +23,7 @@ import {
   retrieveEvidenceNode,
   routeAfterGuardrail,
   routeAfterQualityGate,
+  routeAfterRepair,
   routeToolsNode,
   shortCircuitNode,
   supervisorNode,
@@ -129,7 +130,10 @@ function buildAuthoritativeGraph() {
     .addEdge("compose_response", "verify_response")
     .addEdge("verify_response", "quality_gate")
     .addEdge("quality_gate", "repair_response")
-    .addEdge("repair_response", "finalize")
+    .addConditionalEdges("repair_response", routeAfterRepair, {
+      finalize: "finalize",
+      repair: "repair_response",
+    })
     .addEdge("finalize", END)
     // This graph intentionally has no checkpointer. Provider responses, document
     // excerpts and guest inputs remain request-scoped and are never duplicated
@@ -174,7 +178,10 @@ function buildHybridAuthoritativeGraph() {
       finalize: "finalize",
       repair: "repair_response",
     })
-    .addEdge("repair_response", "finalize")
+    .addConditionalEdges("repair_response", routeAfterRepair, {
+      finalize: "finalize",
+      repair: "repair_response",
+    })
     .addEdge("finalize", END)
     // Provider responses and document excerpts remain request-scoped. Durable
     // conversation memory is persisted by the controller after lease fencing.

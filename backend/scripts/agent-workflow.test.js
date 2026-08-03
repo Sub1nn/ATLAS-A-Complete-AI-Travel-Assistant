@@ -602,6 +602,64 @@ test("grounded itinerary renderer states constraints and only claims confirmed a
   assert.doesNotMatch(rendered, /accessible toilet/);
 });
 
+test("grounded itinerary headings use a readable locality instead of a postal code", () => {
+  const rendered = atlasResponseModelTestUtils.renderGroundedItinerary(
+    {
+      title: "Rome plan",
+      summary: "A compact day.",
+      days: [{
+        day: 1,
+        title: "Centre",
+        areaLogic: "",
+        stops: [{ name: "Pantheon", reason: "" }],
+        food: [],
+        practicalNote: "",
+      }],
+      nextStep: "",
+    },
+    [{
+      name: "Pantheon",
+      category: "activity",
+      address: "Piazza della Rotonda, 00186 Roma RM, Italy",
+      rating: 4.8,
+      latitude: 41.8986,
+      longitude: 12.4769,
+    }],
+    1,
+    "Plan one relaxed day in Rome.",
+  );
+
+  assert.match(rendered, /### Day 1: Roma/);
+  assert.doesNotMatch(rendered, /### Day 1: 00186/);
+});
+
+test("grounded itinerary states when a requested quiet meal setting is not verified", () => {
+  const rendered = atlasResponseModelTestUtils.renderGroundedItinerary(
+    {
+      title: "Rome plan",
+      summary: "A relaxed day.",
+      days: [{
+        day: 1,
+        title: "Centre",
+        areaLogic: "",
+        stops: [{ name: "Pantheon", reason: "" }],
+        food: [{ name: "Local Cafe", reason: "" }],
+        practicalNote: "",
+      }],
+      nextStep: "",
+    },
+    [
+      { name: "Pantheon", category: "activity", address: "00186 Rome, Italy", rating: 4.8 },
+      { name: "Local Cafe", category: "food", address: "00186 Rome, Italy", rating: 4.5 },
+    ],
+    1,
+    "Plan a relaxed day in Rome with a quiet lunch stop.",
+  );
+
+  assert.match(rendered, /Prefer a calm meal setting/);
+  assert.match(rendered, /does not confirm noise levels/);
+});
+
 test("grounded itinerary renderer trims unrequested accessibility detail and enforces a stop cap", () => {
   const rendered = atlasResponseModelTestUtils.renderGroundedItinerary(
     {
@@ -906,10 +964,34 @@ test("route parsing removes mode and timing phrases from endpoints", () => {
     destination: "Shinjuku",
     mode: "train",
     departureTime: "09:30",
+    arrivalTime: "",
     dateLabel: "tomorrow",
     targetDate: route.targetDate,
   });
   assert.match(route.targetDate, /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test("route tool arguments carry city context for relative endpoints", async () => {
+  const resolved = contextService.resolveContext(
+    "How do I get from Helsinki railway station to the airport by train?",
+    {},
+    [],
+  );
+  const args = await chatController._test.buildToolArgs("route_and_transport_planner", resolved);
+  assert.equal(args.origin, "Helsinki railway station");
+  assert.equal(args.destination, "the airport");
+  assert.equal(args.location_context.toLowerCase(), "helsinki");
+  assert.equal(args.mode, "train");
+});
+
+test("generic route endpoints never become a guessed city context", async () => {
+  const resolved = contextService.resolveContext(
+    "How do I get from central station to the airport?",
+    {},
+    [],
+  );
+  const args = await chatController._test.buildToolArgs("route_and_transport_planner", resolved);
+  assert.equal(args.location_context, "");
 });
 
 test("focused legal and weather responses do not show unrelated map cards", () => {
@@ -938,6 +1020,19 @@ test("focused legal and weather responses do not show unrelated map cards", () =
       "ATLAS sees a red-flag safety context.",
       { intent: { type: "safety_inquiry" } },
       "Give me a safety-only assessment.",
+    ),
+    [],
+  );
+});
+
+test("unresolved routes do not expose a map link that can repeat the provider guess", () => {
+  const actions = [{ name: "Open route in Google Maps", url: "https://maps.example/route", category: "route", is_search: true }];
+  assert.deepEqual(
+    chatController._test.filterLiveActionsForAnswer(
+      actions,
+      "ATLAS could not identify one of these endpoints precisely enough.",
+      { intent: { type: "route_planning" }, requestProfile: { constraints: {} } },
+      "How do I get from central station to the airport?",
     ),
     [],
   );
@@ -982,6 +1077,56 @@ test("future activity answers qualify unverified venue traits and scope weather 
   assert.doesNotMatch(answer, /09:00/);
   assert.match(answer, /18:00/);
   assert.match(answer, /21:00/);
+});
+
+test("indoor venue requests exclude clearly outdoor results and rank hall signals first", () => {
+  const answer = chatController._test.composeActivityAnswer(
+    {
+      currentUserMessage: "Find indoor tennis, not an outdoor court.",
+      enrichedUserMessage: "Find indoor tennis, not an outdoor court.",
+      destination: "Riihimäki",
+      activityRequest: { activity: "tennis", activityLabel: "tennis" },
+      memory: { interests: ["tennis"] },
+      requestProfile: { constraints: {} },
+    },
+    [{
+      tool: "local_experiences_and_attractions",
+      result: {
+        location: "Riihimäki, Finland",
+        recommendations: [
+          { name: "Urheilupuisto Outdoor Tennis", address: "Park", rating: 5 },
+          { name: "Example Sports Hall", address: "Centre", rating: 4.2 },
+          { name: "Local Tennis Club", address: "Centre", rating: 4.8 },
+          { name: "Urheilupuiston tenniskenttä", address: "Riihimäki", rating: 4.9 },
+        ],
+      },
+    }],
+  );
+
+  assert.doesNotMatch(answer, /Urheilupuisto Outdoor Tennis/);
+  assert.match(answer, /Example Sports Hall/);
+  assert.doesNotMatch(answer, /Local Tennis Club/);
+  assert.doesNotMatch(answer, /Urheilupuiston tenniskenttä/);
+  assert.doesNotMatch(answer, /current booking availability/i);
+});
+
+test("activity answers state when requested booking availability is not verified", () => {
+  const answer = chatController._test.composeActivityAnswer(
+    {
+      currentUserMessage: "Find a bookable indoor tennis court, not an outdoor court.",
+      enrichedUserMessage: "Find a bookable indoor tennis court, not an outdoor court.",
+      destination: "Riihimäki",
+      activityRequest: { activity: "tennis", activityLabel: "tennis" },
+      memory: { interests: ["tennis"] },
+      requestProfile: { constraints: {} },
+    },
+    [{
+      tool: "local_experiences_and_attractions",
+      result: { location: "Riihimäki, Finland", recommendations: [{ name: "Example Sports Hall", address: "Centre" }] },
+    }],
+  );
+
+  assert.match(answer, /current booking availability/i);
 });
 
 test("activity ranking follow-ups return only the requested shortlist and omit weather", () => {
@@ -1264,6 +1409,51 @@ test("route fallback does not claim a route was verified when providers return n
   assert.doesNotMatch(answer, /ATLAS checked this as/i);
 });
 
+test("route composition refuses to display provider routes rejected as geographically implausible", () => {
+  const answer = chatController._test.composeRouteAnswer(
+    {
+      intent: { type: "route_planning" },
+      routeRequest: { origin: "Helsinki railway station", destination: "the airport", mode: "train" },
+    },
+    [{
+      tool: "route_and_transport_planner",
+      result: {
+        origin: "Helsinki Central Railway Station",
+        destination: "Helsinki Airport",
+        mode: "train",
+        routes: [],
+        rejected_route_count: 1,
+        validation_warnings: ["ROUTE_GEOGRAPHIC_DETOUR"],
+        data_quality: { status: "limited", reason_code: "ROUTE_EVIDENCE_REJECTED" },
+      },
+    }],
+  );
+
+  assert.match(answer, /rejected the route returned/i);
+  assert.match(answer, /safer to show no itinerary/i);
+  assert.doesNotMatch(answer, /verified the route/i);
+  assert.doesNotMatch(answer, /42 hr|3131 km|FlixBus|Eurostar/i);
+});
+
+test("route quality review blocks verification claims when route evidence is unresolved", () => {
+  const quality = assessResponseQuality({
+    answer: "## Route\n\nATLAS verified the route. Take the train and follow the displayed itinerary to the airport.",
+    resolved: { intent: { type: "route_planning" } },
+    message: "How do I get from the station to the airport?",
+    toolResults: [{
+      tool: "route_and_transport_planner",
+      result: {
+        routes: [],
+        validation_warnings: ["ROUTE_ENDPOINT_UNRESOLVED"],
+        data_quality: { status: "limited", reason_code: "ROUTE_ENDPOINT_UNRESOLVED" },
+      },
+    }],
+  });
+  assert.equal(quality.passed, false);
+  assert.ok(quality.issueCodes.includes("ROUTE_ENDPOINT_UNRESOLVED_NOT_DISCLOSED"));
+  assert.ok(quality.issueCodes.includes("ROUTE_VERIFICATION_OVERCLAIM"));
+});
+
 test("route answer acknowledges requested time and excessive walking", () => {
   const answer = chatController._test.composeRouteAnswer(
     {
@@ -1295,8 +1485,88 @@ test("route answer acknowledges requested time and excessive walking", () => {
 
   assert.match(answer, /asked to leave at 07:30/i);
   assert.match(answer, /departs at 7:49 AM/i);
-  assert.match(answer, /Best match for less walking/i);
+  assert.match(answer, /Recommended route — least walking/i);
   assert.match(answer, /more than a minimal-walking request/i);
+});
+
+test("route answer acknowledges arrive-by timing and transfer preference", () => {
+  const answer = chatController._test.composeRouteAnswer(
+    {
+      currentUserMessage: "Arrive by 10:00 tomorrow with minimal transfers.",
+      routeRequest: { origin: "Helsinki Central Station", destination: "Porvoo Old Town", mode: "transit" },
+      requestProfile: { constraints: { minimalTransfers: true } },
+    },
+    [{
+      tool: "route_and_transport_planner",
+      result: {
+        origin: "Helsinki Central Station",
+        destination: "Porvoo Old Town",
+        requested_arrival: { date: "2026-08-04", time: "10:00", label: "tomorrow" },
+        routes: [{
+          summary: "Direct coach",
+          duration: "1 hr 5 min",
+          departure_time: "8:45 AM",
+          arrival_time: "9:50 AM",
+          transfer_count: 0,
+          transit_step_count: 1,
+          steps: [],
+        }],
+      },
+    }],
+  );
+
+  assert.match(answer, /asked to arrive by 10:00/i);
+  assert.match(answer, /arrives at 9:50 AM/i);
+  assert.match(answer, /Recommended route — fewest transfers/i);
+});
+
+test("layover answers prioritize connection safety over unverified airport attractions", () => {
+  const answer = chatController._test.composeLayoverAnswer({
+    destination: "Singapore",
+    requestProfile: {
+      layover: {
+        airport: "Singapore Changi",
+        durationMinutes: 360,
+        cabinLuggage: true,
+        checkedThrough: false,
+        sameTicket: false,
+      },
+    },
+  });
+
+  assert.match(answer, /3 hr 30 min–4 hr/);
+  assert.match(answer, /Jewel as a landside visit/i);
+  assert.match(answer, /arrival and departure terminals/i);
+  assert.doesNotMatch(answer, /free 4-D cinema|free guided walking tours|luggage storage lockers/i);
+});
+
+test("indoor activity searches do not add irrelevant weather calls", () => {
+  const resolved = contextService.resolveContext(
+    "Where can I play indoor tennis in Riihimäki tomorrow evening?",
+    {},
+    [],
+  );
+  const tools = chatController._test.relevantToolNames(
+    resolved.intent.type,
+    resolved.locations,
+    false,
+    resolved,
+  );
+
+  assert.deepEqual(tools, ["local_experiences_and_attractions"]);
+
+  const excludedOutdoor = contextService.resolveContext(
+    "Where can I play indoor tennis in Riihimäki tomorrow evening? I need a bookable court, not an outdoor court.",
+    {},
+    [],
+  );
+  const excludedOutdoorTools = chatController._test.relevantToolNames(
+    excludedOutdoor.intent.type,
+    excludedOutdoor.locations,
+    false,
+    excludedOutdoor,
+  );
+  assert.deepEqual(excludedOutdoorTools, ["local_experiences_and_attractions"]);
 });
 
 test("accommodation comparison states the no-booking and no-payment boundary", () => {
@@ -1311,6 +1581,33 @@ test("accommodation comparison states the no-booking and no-payment boundary", (
   );
   assert.match(answer, /cannot complete a booking or accept payment-card details/i);
   assert.match(answer, /secure checkout page/i);
+});
+
+test("accommodation comparison respects requested count and names unavailable requested fields", () => {
+  const answer = chatController._test.composeAccommodationAnswer(
+    {
+      currentUserMessage: "Compare three mid-range hotels in Paris. Show total stay price and cancellation terms, but do not book anything.",
+      destination: "Paris",
+      memory: { budget: "mid-range" },
+      requestProfile: { constraints: {} },
+    },
+    [{
+      tool: "smart_accommodation_finder",
+      result: {
+        location: "Paris",
+        properties: ["One", "Two", "Three", "Four", "Five"].map((name) => ({ name })),
+      },
+    }],
+  );
+
+  assert.match(answer, /verified these 3 properties/i);
+  assert.match(answer, /Mid-range hotels and stays in Paris/i);
+  assert.match(answer, /1\. \*\*One\*\*/);
+  assert.match(answer, /3\. \*\*Three\*\*/);
+  assert.doesNotMatch(answer, /\*\*Four\*\*/);
+  assert.match(answer, /total stay price was not available/i);
+  assert.match(answer, /cancellation terms were not available/i);
+  assert.doesNotMatch(answer, /cannot complete a booking/i);
 });
 
 test("destination weather timing respects a requested itinerary start time", () => {
@@ -1352,6 +1649,58 @@ test("reviewed-country base plans answer trip constraints before generic country
   assert.match(answer, /history and nature/);
   assert.match(answer, /dashi/i);
   assert.doesNotMatch(answer, /Customs and packing checks|Vibe and local context|Moderate caution/);
+});
+
+test("reviewed-country plans preserve explicitly requested bases on shorter trips", () => {
+  const resolved = contextService.resolveContext(
+    "Plan 5 relaxed days in Nepal, split between Kathmandu and Pokhara. We are vegetarian and have a mid-range budget.",
+    {},
+    [],
+  );
+  const answer = chatController._test.composeDestinationPipelineAnswer(resolved, []);
+
+  assert.match(answer, /Nepal — 5-day base plan/);
+  assert.match(answer, /Kathmandu — Days 1–3/);
+  assert.match(answer, /Pokhara — Days 4–5/);
+  assert.match(answer, /vegetarian/i);
+  assert.match(answer, /mid-range budget/i);
+  assert.doesNotMatch(answer, /Northfield Cafe|Pokhara Organic Cafe|UNESCO/);
+});
+
+test("focused city revisions update only the requested part of a multi-base plan", () => {
+  const first = contextService.resolveContext(
+    "Plan 5 relaxed days in Nepal, split between Kathmandu and Pokhara. We are vegetarian and have a mid-range budget.",
+    {},
+    [],
+  );
+  const resolved = contextService.resolveContext(
+    "Make Pokhara quieter and add one easy lake activity.",
+    first.memory,
+    [],
+  );
+  const tools = chatController._test.relevantToolNames(
+    resolved.intent.type,
+    resolved.locations,
+    false,
+    resolved,
+  );
+  const answer = chatController._test.composeDestinationPipelineAnswer(resolved, [{
+    tool: "local_experiences_and_attractions",
+    result: {
+      recommendations: [
+        { name: "Hill Hike", category: "hiking", address: "Pokhara", rating: 4.8 },
+        { name: "Phewa Lake View Point", category: "lake viewpoint", address: "Pokhara", rating: 4.6 },
+      ],
+    },
+  }]);
+
+  assert.deepEqual(tools, ["local_experiences_and_attractions"]);
+  assert.match(answer, /Pokhara update/);
+  assert.match(answer, /Slightly away from Lakeside/);
+  assert.match(answer, /Phewa Lake View Point/);
+  assert.match(answer, /does not verify effort level/);
+  assert.match(answer, /Keep Kathmandu as planned/);
+  assert.doesNotMatch(answer, /Hill Hike|Food strategy|Suggested flow|Day 5/);
 });
 
 test("authoritative canary assignment is deterministic", () => {
