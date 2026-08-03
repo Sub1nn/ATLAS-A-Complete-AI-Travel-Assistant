@@ -46,7 +46,8 @@ ATLAS is more than a prompt wrapped in a chat interface. It resolves travel inte
 | Contextual conversations | Destinations, origin, dates, pace, accessibility, budget and preferences survive appropriate follow-ups without leaking stale locations |
 | Document-aware chat | PDF, DOCX and TXT content is extracted in a constrained worker and retrieved through user-isolated Pinecone namespaces |
 | Structured responses | Intent-specific renderers produce clear routes, itineraries, dining, accommodation, activity, weather and safety sections |
-| Privacy controls | Users can export data, change retention, delete conversations and trigger durable account deletion across application stores |
+| Practical workspace | Responsive chat controls, focused starter prompts and styled multi-page PDF conversation exports support real planning workflows |
+| Privacy controls | Users can export account data, change retention, delete conversations and trigger durable account deletion across application stores |
 | Resilient providers | Timeouts, bounded retries, circuit breakers, caching, rate limits and daily cost budgets protect availability and spend |
 
 ## Architecture
@@ -69,10 +70,11 @@ flowchart TB
     Evidence --> ResponsePlan[Intent-specific response contract]
     ResponsePlan --> Compose[Grounded composition]
     Compose --> Verify[Claim verification]
-    Verify --> Quality{Quality gate}
+    Verify --> Quality{Deterministic quality gate<br>and optional critic}
     Quality -->|pass| Final[Final response]
-    Quality -->|one repair| Repair[Evidence-preserving repair]
-    Repair --> Final
+    Quality -->|repair required| Repair[Evidence-preserving repair]
+    Repair -->|pass or two attempts| Final
+    Repair -->|retry once| Repair
 
     Specialists --> Google[Google Maps Platform]
     Specialists --> Weather[OpenWeather]
@@ -102,7 +104,8 @@ flowchart TB
 5. Execute provider calls with timeouts, budgets, circuit breakers and bounded concurrency.
 6. Reconcile verified, limited and missing evidence before composition.
 7. Render an intent-specific response contract, then verify unsupported claims and required constraints.
-8. Run one evidence-preserving repair pass only when the quality gate finds a concrete defect.
+8. Optionally run one bounded, evidence-aware critic review after deterministic checks pass.
+9. Run no more than two evidence-preserving repair attempts when the quality gate identifies a concrete defect.
 
 Exact live facts such as route duration, weather observations and provider-backed place details remain deterministic. Language-model output is schema-controlled and cannot silently replace grounded provider data.
 
@@ -169,6 +172,13 @@ The routing is configurable with `GROQ_PLANNER_MODEL`, `GROQ_RESPONSE_MODEL`, `G
 - Places-derived content is not treated as durable user-owned data.
 - Accommodation results are comparison guidance only; ATLAS does not collect payment-card data or perform direct bookings.
 
+### Travel workspace experience
+
+- The responsive composer grows with the prompt while keeping document controls and keyboard submission accessible.
+- Starter prompts cover destination research, activities, stays, dining and route planning without preloading unsafe assumptions.
+- Conversation history shows compact previews and relative update times.
+- Chat exports are generated locally as styled, multi-page A4 PDFs; conversation content is not sent to another export service.
+
 ## Repository structure
 
 ~~~text
@@ -185,7 +195,7 @@ The routing is configurable with `GROQ_PLANNER_MODEL`, `GROQ_RESPONSE_MODEL`, `G
 ├── frontend/
 │   ├── public/
 │   ├── scripts/         # Frontend contract tests
-│   └── src/             # React components, hooks, API client and renderers
+│   └── src/             # React components, hooks, API client, renderers and PDF export
 ├── docs/images/
 ├── .github/workflows/
 ├── docker-compose.yml
@@ -293,6 +303,7 @@ Important rules:
 - **ATLAS_AGENT_CANARY_PERCENT** provides deterministic user-level rollout from 0 to 100.
 - **ATLAS_AGENT_FALLBACK_ENABLED** keeps the established response path available during rollout failures.
 - **ATLAS_AGENT_MAX_SPECIALISTS** and **CHAT_MAX_MULTI_DESTINATION_TOOL_CALLS** bound per-request fan-out and cost.
+- **ATLAS_AGENT_RESPONSE_REVIEW_ENABLED** adds one bounded evidence-aware critic pass after deterministic verification. It is opt-in because it consumes one additional model call.
 
 ## API overview
 

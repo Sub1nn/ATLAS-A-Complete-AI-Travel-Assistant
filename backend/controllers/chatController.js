@@ -24,6 +24,7 @@ import {
   generateGroundedItinerary,
   generateStructuredAtlasResponse,
   langChainResponseEnabled,
+  reviewAtlasResponseQuality,
 } from "../agents/models/atlasResponseModel.js";
 import { responsePlanPrompt } from "../agents/hybridWorkflow.js";
 import { postGroqChat } from "../services/groqModelService.js";
@@ -299,6 +300,7 @@ function relevantToolNames(intent, locations, documentFocused = false, resolved 
   if (documentFocused) return [];
   if (resolved.requestProfile?.customs) return [];
   if (resolved.requestProfile?.visa) return [];
+  if (resolved.requestProfile?.layover) return [];
   if (intent === "route_planning" && (resolved.routeRequest || resolved.memory?.route)) return ["route_and_transport_planner"];
   if (!locations?.length && !resolved.destination) return [];
 
@@ -306,9 +308,11 @@ function relevantToolNames(intent, locations, documentFocused = false, resolved 
   const currentText = contextService.normalize(`${resolved.enrichedUserMessage || ""} ${(resolved.memory?.interests || []).join(" ")}`);
   const currentTurnText = contextService.normalize(resolved.currentUserMessage || resolved.enrichedUserMessage || "");
   const constraints = resolved.requestProfile?.constraints || {};
-  const wantsFood = /\b(restaurant|restaurants|food|dining|eat|cafe|cafes|coffee|breakfast|lunch|dinner|cuisine|bar|bars|pub|pubs|nightlife|vegetarian|vegan|halal|kosher|gluten[-\s]?free)\b/.test(currentText)
-    || Boolean(constraints.breakfastPreferred)
-    || Boolean(constraints.dietary?.length);
+  const focusedItineraryRevision = Boolean(resolved.requestProfile?.itineraryContinuation)
+    && !/\b(day[-\s]?by[-\s]?day|full|whole|all|entire|itinerary)\b/.test(currentTurnText);
+  const explicitlyWantsFood = /\b(restaurant|restaurants|food|dining|eat|cafe|cafes|coffee|breakfast|lunch|dinner|cuisine|bar|bars|pub|pubs|nightlife|vegetarian|vegan|halal|kosher|gluten[-\s]?free)\b/.test(currentTurnText);
+  const wantsFood = explicitlyWantsFood
+    || (!focusedItineraryRevision && (Boolean(constraints.breakfastPreferred) || Boolean(constraints.dietary?.length)));
   const budgetOnlyStay = /\bstay\s+(?:under|below|within)\s*(?:[€$£¥]|eur\b|usd\b|gbp\b|jpy\b|\d)/.test(currentTurnText);
   const wantsStay = ["hotel", "hotels", "hostel", "hostels", "motel", "motels", "lodge", "lodges", "guesthouse", "guesthouses", "guest house", "resort", "resorts", "apartment", "apartments", "homestay", "accommodation", "room", "rooms", "lodging", "booking"]
     .some((term) => contextService.containsPositiveTerm?.(currentTurnText, term))
@@ -337,7 +341,12 @@ function relevantToolNames(intent, locations, documentFocused = false, resolved 
     activity_recommendations: isCountryScope
       ? ["cultural_and_travel_insights"]
       : isSportOrOutdoor
-      ? ["local_experiences_and_attractions", suppressWeather ? "" : "comprehensive_weather_analysis"].filter(Boolean)
+      ? [
+          "local_experiences_and_attractions",
+          suppressWeather || (/\bindoor\b/.test(currentTurnText) && !contextService.containsPositiveTerm?.(currentTurnText, "outdoor"))
+            ? ""
+            : "comprehensive_weather_analysis",
+        ].filter(Boolean)
       : ["local_experiences_and_attractions"],
     travel_logistics: ["cultural_and_travel_insights", "comprehensive_safety_intelligence"],
     route_planning: ["route_and_transport_planner"],
@@ -350,8 +359,8 @@ function relevantToolNames(intent, locations, documentFocused = false, resolved 
     if ([wantsFood, wantsStay, wantsPlaces, wantsWeather, wantsSafety, wantsCulture].some(Boolean)) {
       return uniqueTools([
         wantsSafety ? "comprehensive_safety_intelligence" : "",
-        wantsPlaces || wantsItinerary ? "local_experiences_and_attractions" : "",
-        wantsFood || wantsItinerary ? "intelligent_restaurant_discovery" : "",
+        wantsPlaces || (wantsItinerary && !focusedItineraryRevision) ? "local_experiences_and_attractions" : "",
+        wantsFood || (wantsItinerary && !focusedItineraryRevision) ? "intelligent_restaurant_discovery" : "",
         wantsStay ? "smart_accommodation_finder" : "",
         wantsWeather ? "comprehensive_weather_analysis" : "",
         wantsCulture ? "cultural_and_travel_insights" : "",
@@ -369,6 +378,17 @@ function relevantToolNames(intent, locations, documentFocused = false, resolved 
   }
 
   return plans[intent] || [];
+}
+
+function routeLocationContext(resolved = {}, route = {}) {
+  const endpoints = new Set([route.origin, route.destination].map((value) => contextService.normalize(value)).filter(Boolean));
+  const infrastructureOnly = /^(?:the\s+)?(?:(?:nearest|main|central|local|international)\s+)?(?:(?:railway|rail|train|bus|coach)\s+)?(?:airport|station|terminal|transit hub)$/i;
+  const candidates = [resolved.previousDestination, resolved.destination, ...(resolved.locations || []), resolved.memory?.destination];
+  return candidates.find((candidate) => {
+    const value = String(candidate || "").trim();
+    const normalized = contextService.normalize(value);
+    return normalized && !endpoints.has(normalized) && !infrastructureOnly.test(value);
+  }) || "";
 }
 
 async function buildToolArgs(toolName, resolved, signal, reserveProviderCall) {
@@ -435,8 +455,10 @@ async function buildToolArgs(toolName, resolved, signal, reserveProviderCall) {
       return {
         origin: route.origin,
         destination: route.destination,
+        location_context: routeLocationContext(resolved, route),
         mode: route.mode || "transit",
         departure_time: route.departureTime || "",
+        arrival_time: route.arrivalTime || "",
         target_date: route.targetDate || resolved.dateContext?.iso || "",
         date_label: route.dateLabel || resolved.dateContext?.label || "",
         minimal_walking: Boolean(resolved.requestProfile?.constraints?.minimalWalking),
@@ -528,6 +550,9 @@ async function buildToolArgs(toolName, resolved, signal, reserveProviderCall) {
         /\b(museum|museums)\b/.test(combinedText) ? "museums" : "",
         /\b(viewpoint|viewpoints)\b/.test(combinedText) ? "viewpoints" : "",
         /\b(garden|gardens)\b/.test(combinedText) ? "gardens" : "",
+        /\b(lake|lakes|boating|boat ride)\b/.test(currentTurnText) ? "lake waterfront boating" : "",
+        /\b(park|parks)\b/.test(currentTurnText) ? "parks" : "",
+        /\b(beach|beaches)\b/.test(currentTurnText) ? "beaches waterfront" : "",
         /\b(architecture|architectural)\b/.test(combinedText) ? "architecture landmarks" : "",
       ].filter(Boolean).join(" ");
       const recognizedActivity = contextService.extractPrimaryActivity?.(activityText || activityContext);
@@ -708,6 +733,7 @@ function filterLiveActionsForAnswer(actions = [], answer = "", resolved = {}, me
   if (resolved.requestProfile?.customs || focusedWithoutPlaceResults.has(intent)) return [];
 
   if (intent === "route_planning") {
+    if (/could not identify|could not verify step-by-step|rejected the route|no trustworthy route/i.test(String(answer || ""))) return [];
     return dedupeLiveActions(actions.filter((item) => item.category === "route" || item.is_search), 2);
   }
 
@@ -759,6 +785,19 @@ function locationDisplay(resolved = {}, fallback = "your destination") {
 
 
 function displayDestinations(resolved = {}, limit = 3) {
+  const explicitCountries = Array.isArray(resolved.explicitLocations)
+    ? resolved.explicitLocations.filter((value) => contextService.isCountryLike?.(value))
+    : [];
+  const isCountryComparison = explicitCountries.length > 1
+    && (
+      resolved.intent?.type === "safety_inquiry"
+      || /\b(compare|comparison|versus|vs\.?|which (?:is|one)|safer)\b/i.test(resolved.currentUserMessage || "")
+    );
+  if (isCountryComparison) {
+    return [...new Set(explicitCountries.map((value) => (
+      contextService.canonicalDestination?.(value) || contextService.titleCase(value)
+    )))].slice(0, limit);
+  }
   if ((resolved.locationScope === "country" || contextService.isCountryLike?.(resolved.destination || "")) && resolved.destination) {
     return [contextService.canonicalDestination?.(resolved.destination) || contextService.titleCase(resolved.destination)];
   }
@@ -983,7 +1022,7 @@ function destinationProfile(destination = "your destination", resolved = {}) {
       reviewedCountry: true,
       intro: "Nepal is best planned around altitude, road time and weather. Kathmandu is the arrival/logistics hub, Pokhara is the easier lakeside base, and trekking areas need more preparation than ordinary sightseeing.",
       food: ["Momos, dal bhat and Newari dishes in Kathmandu", "Thukpa and Tibetan-influenced dishes in mountain areas", "Tea, bakeries and simple trekking meals where hygiene looks reliable"],
-      stay: ["Kathmandu: Thamel for first-time logistics, Lazimpat for quieter hotels, Boudha/Patan for cultural atmosphere", "Pokhara: Lakeside for restaurants and activity access", "Trekking routes: choose licensed operators and realistic acclimatisation plans"],
+      stay: ["Kathmandu: Thamel for first-time logistics, Lazimpat for quieter hotels, Boudha/Patan for cultural atmosphere", "Pokhara: Lakeside for restaurants and activity access"],
       experiences: ["Temple and old-city walks in Kathmandu/Patan", "Pokhara lake and sunrise viewpoints", "Trekking only with proper permits, weather checks and altitude planning"],
       customs: ["Usually permitted: personal travel items and normal electronics", "Declare or check: medicines, drones, satellite/radio equipment, cash and food items", "Restricted or prohibited: narcotics, weapons, wildlife products, some cultural/antique items and undeclared controlled equipment", "Check Nepal customs, aviation and trekking-permit rules before travel"],
       culture: ["Dress respectfully around temples", "Use your right hand or both hands when giving/receiving where appropriate", "Build buffer time for traffic, road delays and weather"],
@@ -1336,8 +1375,10 @@ function weatherTimingLines(weather = null, primaryDestination = "", destination
 }
 
 function wantsOneDayPlan(resolved = {}) {
-  return Number(resolved.requestProfile?.constraints?.dayCount) === 1
-    || /\b(one[-\s]?day|1[-\s]?day|day plan|simple plan|itinerary|morning\/afternoon|morning and afternoon)\b/i.test(
+  const dayCount = Number(resolved.requestProfile?.constraints?.dayCount || 0);
+  if (dayCount > 1) return false;
+  return dayCount === 1
+    || /\b(one[-\s]?day|1[-\s]?day|day plan|simple plan|morning\/afternoon|morning and afternoon)\b/i.test(
       String(resolved.enrichedUserMessage || resolved.intent?.topic || ""),
     );
 }
@@ -1471,8 +1512,10 @@ function composeActivityAnswer(resolved, toolResults = []) {
   const sportLabel = activityLabel || (/yoga/.test(text) ? "yoga" : /meditation|mindfulness/.test(text) ? "meditation" : /wellness|spa|massage|retreat/.test(text) ? "wellness" : /badminton/.test(text) ? "badminton" : /football|soccer/.test(text) ? "football/soccer" : /basketball/.test(text) ? "basketball" : /volleyball/.test(text) ? "volleyball" : /swimming|pool/.test(text) ? "swimming" : /gym|fitness/.test(text) ? "gym or fitness" : /padel/.test(text) ? "padel" : /pickleball/.test(text) ? "pickleball" : /squash/.test(text) ? "squash" : /golf/.test(text) ? "golf" : /climbing|bouldering/.test(text) ? "climbing" : /bowling/.test(text) ? "bowling" : /skating|skate/.test(text) ? "skating" : /running|track/.test(text) ? "running" : /tennis|court/.test(text) ? "tennis" : "sports");
   const isWellness = /yoga|meditation|mindfulness|wellness|spa|massage|retreat/.test(sportLabel);
   const wantFree = /free|public|municipal|cheap|low-cost|low cost/.test(text);
-  const wantsIndoor = /\bindoor|inside|covered\b/.test(text);
-  const wantsOutdoor = /\boutdoor|outside|open-air|open air\b/.test(text);
+  const wantsIndoor = ["indoor", "inside", "covered"].some((term) => contextService.containsPositiveTerm?.(text, term));
+  const wantsOutdoor = ["outdoor", "outside", "open-air", "open air"].some((term) => contextService.containsPositiveTerm?.(text, term));
+  const excludesOutdoor = contextService.isTermNegated?.(text, "outdoor") || contextService.isTermNegated?.(text, "outside");
+  const wantsBooking = /\b(bookable|booking|reserve|reservation|available court|court availability)\b/i.test(text);
   const futureDated = /\b(tomorrow|next\s+\w+|weekend|in\s+\d+\s+days?)\b/.test(text);
   const rawRecommendations = Array.isArray(activity.recommendations) ? [...activity.recommendations] : [];
   const wellnessPattern = /yoga/.test(sportLabel)
@@ -1482,18 +1525,28 @@ function composeActivityAnswer(resolved, toolResults = []) {
     : /wellness|retreat/.test(sportLabel)
     ? /\b(wellness|meditation|mindfulness|yoga|retreat)\b/i
     : null;
-  const relevantRecommendations = wellnessPattern
+  const activityRelevantRecommendations = wellnessPattern
     ? rawRecommendations.filter((place) => wellnessPattern.test(`${place.name || ""} ${place.category || ""} ${(place.types || []).join?.(" ") || ""}`))
     : rawRecommendations;
+  const indoorVenuePattern = /\b(hall|arena|indoor|sports centre|sports center|liikuntakeskus|urheilutalo|tennishalli|tennis hall|racquet centre|racquet center)\b/i;
+  const nonOutdoorRecommendations = excludesOutdoor
+    ? activityRelevantRecommendations.filter((place) => !/\b(outdoor|open[-\s]?air|urheilupuisto)\b/i.test(`${place.name || ""} ${place.category || ""} ${place.address || ""}`))
+    : activityRelevantRecommendations;
+  const indoorEvidenceRecommendations = wantsIndoor && excludesOutdoor
+    ? nonOutdoorRecommendations.filter((place) => indoorVenuePattern.test(`${place.name || ""} ${place.category || ""} ${(place.types || []).join?.(" ") || ""}`))
+    : nonOutdoorRecommendations;
+  const relevantRecommendations = indoorEvidenceRecommendations;
   const recs = relevantRecommendations.length
     ? relevantRecommendations
         .map((place) => {
           const evidence = `${place.name || ""} ${place.category || ""} ${place.address || ""}`;
           const exactSport = new RegExp(`\\b${String(resolved.activityRequest?.activity || sportLabel).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(evidence);
           const publicSignal = /\b(public|municipal|city|urheilupuisto|tenniskentt[aä]|park)\b/i.test(evidence);
-          const indoorSignal = /\b(hall|arena|indoor|sports centre|sports center|liikuntakeskus|urheilutalo)\b/i.test(evidence);
+          const indoorSignal = indoorVenuePattern.test(evidence);
           const fitScore = (exactSport ? 4 : 0)
             + (wantFree && publicSignal ? 4 : 0)
+            + (wantsIndoor && indoorSignal ? 6 : 0)
+            - (wantsIndoor && publicSignal && !indoorSignal ? 2 : 0)
             + (wantsOutdoor && publicSignal ? 2 : 0)
             - (wantsOutdoor && indoorSignal ? 3 : 0)
             + Math.min(Number(place.rating || 0) / 20, 0.25);
@@ -1514,7 +1567,7 @@ function composeActivityAnswer(resolved, toolResults = []) {
     const ranked = [...recs]
       .map((place) => {
         const evidence = `${place.name || ""} ${place.category || ""} ${place.address || ""}`;
-        const indoorSignal = /\b(hall|arena|indoor|sports centre|sports center|liikuntakeskus|urheilutalo)\b/i.test(evidence);
+        const indoorSignal = indoorVenuePattern.test(evidence);
         const activitySignal = new RegExp(`\\b${String(resolved.activityRequest?.activity || sportLabel).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(evidence);
         return { place, indoorSignal, score: (indoorSignal ? 2 : 0) + (activitySignal ? 1 : 0) + Math.min(Number(place.rating || 0) / 10, 0.5) };
       })
@@ -1552,12 +1605,14 @@ function composeActivityAnswer(resolved, toolResults = []) {
     ? `${contextService.titleCase(sportLabel)} venues to check near ${destination}`
     : `Live place suggestions for ${destination}`;
   const lines = [`**${heading}**`];
-  if (isSports && (wantsIndoor || wantFree)) {
+  if (isSports && (wantsIndoor || wantFree || wantsBooking)) {
     const unverifiedTraits = [
       wantsIndoor ? "indoor courts" : "",
       wantFree ? "public access or low pricing" : "",
+      wantsBooking ? "current booking availability" : "",
     ].filter(Boolean).join(" and ");
-    lines.push(`ATLAS found relevant ${sportLabel} or sports venues, but place-discovery data does not confirm ${unverifiedTraits} for every result. Use this as a shortlist and verify those details with each venue.`);
+    const venueLabel = sportLabel === "sports" ? "sports venues" : `${sportLabel} or sports venues`;
+    lines.push(`ATLAS found relevant ${venueLabel}, but place-discovery data does not confirm ${unverifiedTraits} for every result. Use this as a shortlist and verify those details with each venue.`);
   } else {
     lines.push("ATLAS found these options for your request. Use them as a shortlist, then confirm booking rules, opening hours and recent reviews before going.");
   }
@@ -1626,6 +1681,7 @@ function destinationConstraintLines(resolved = {}) {
   if (constraints.rainAlternative || constraints.indoorAlternative) {
     lines.push("Keep an indoor or covered alternative for poor weather.");
   }
+  if (constraints.indoorPreferred) lines.push("Keep the main activities indoors and minimize exposed walking between stops.");
   if (Number(constraints.maxBudget) > 0) {
     const currency = constraints.currency || "EUR";
     const amount = Number(constraints.maxBudget).toLocaleString("en-GB");
@@ -1665,20 +1721,34 @@ function fairDayAllocations(destinations = [], dayCount = 0) {
   });
 }
 
-function countryBaseChoices(profile = {}, constraints = {}) {
+function countryBaseChoices(profile = {}, constraints = {}, requestedBases = []) {
   const stays = Array.isArray(profile.stay) ? profile.stay : [];
   const requestedDays = Math.max(0, Number(constraints.dayCount || 0));
   const requestedMaximumBases = Number.isFinite(Number(constraints.maxHotelChanges))
     ? Math.max(1, Number(constraints.maxHotelChanges) + 1)
     : 3;
-  const sensibleBaseCount = requestedDays >= 6 ? 2 : 1;
-  return stays.slice(0, Math.min(sensibleBaseCount, requestedMaximumBases, 3)).map((entry) => {
+  const records = stays.map((entry) => {
     const [name, ...description] = String(entry).split(":");
     return {
       name: name.trim(),
       description: description.join(":").trim() || "Choose a well-connected area close to the main activities.",
     };
   }).filter((item) => item.name);
+  const requested = requestedBases
+    .map((value) => contextService.normalize(value))
+    .filter(Boolean);
+  const explicitlyRequested = requested
+    .map((value) => records.find((item) => {
+      const name = contextService.normalize(item.name);
+      return name === value || name.startsWith(`${value} `) || value.startsWith(`${name} `);
+    }))
+    .filter(Boolean);
+  if (explicitlyRequested.length) {
+    return [...new Map(explicitlyRequested.map((item) => [contextService.normalize(item.name), item])).values()]
+      .slice(0, Math.min(requestedMaximumBases, 3));
+  }
+  const sensibleBaseCount = requestedDays >= 6 ? 2 : 1;
+  return records.slice(0, Math.min(sensibleBaseCount, requestedMaximumBases, 3));
 }
 
 function composeReviewedCountryBaseAnswer(resolved = {}, profile = {}, safety = null) {
@@ -1690,7 +1760,9 @@ function composeReviewedCountryBaseAnswer(resolved = {}, profile = {}, safety = 
   if (!profile.reviewedCountry || !tailoredPlan) return "";
 
   const destination = locationDisplay(resolved);
-  const choices = countryBaseChoices(profile, constraints);
+  const requestedBases = (resolved.explicitLocations || [])
+    .filter((value) => !contextService.isCountryLike?.(value) && contextService.normalize(value) !== "split");
+  const choices = countryBaseChoices(profile, constraints, requestedBases);
   if (!choices.length) return "";
   const allocations = fairDayAllocations(choices.map((choice) => choice.name), requestedDays);
   const allocationByName = new Map(allocations.map((item) => [contextService.normalize(item.destination), item]));
@@ -1723,7 +1795,7 @@ function composeReviewedCountryBaseAnswer(resolved = {}, profile = {}, safety = 
 
   const fit = [];
   if (interests.length) fit.push(`Prioritise ${naturalJoin(interests)} when choosing day trips and neighbourhoods from each base.`);
-  if (budget) fit.push(`For a ${budget} trip, compare simple well-reviewed stays near rail or metro links and check the final total after taxes and breakfast.`);
+  if (budget) fit.push(`For a ${budget} trip, compare simple well-reviewed stays near the main area or dependable transport and check the final total after taxes and breakfast.`);
   if (Number.isFinite(Number(constraints.maxHotelChanges))) fit.push(`Keep hotel changes to no more than ${Number(constraints.maxHotelChanges)}.`);
   if (constraints.accessible || constraints.senior || constraints.minimalWalking) {
     fit.push("Choose step-free stations and hotels, favour direct routes, and keep one rest block each day; confirm lifts and accessible room details directly.");
@@ -1735,13 +1807,14 @@ function composeReviewedCountryBaseAnswer(resolved = {}, profile = {}, safety = 
 
   if (dietary.length) {
     lines.push("\n**Food strategy**");
-    lines.push(`• Search for explicitly ${naturalJoin(dietary)} menus near each base and confirm broths, sauces and shared cooking surfaces.`);
+    const foodStrategy = [`Search for explicitly ${naturalJoin(dietary)} menus near each base and confirm broths, sauces and shared cooking surfaces.`];
     if (/\bjapan\b/i.test(destination) && dietary.some((item) => /vegetarian|vegan/i.test(item))) {
-      lines.push("• In Japan, ask specifically about dashi because fish stock can appear in dishes that otherwise look meat-free.");
-      lines.push("• Shōjin ryōri, tofu dishes, vegetable tempura and clearly labelled vegetarian or vegan restaurants are useful starting points.");
+      foodStrategy.push("In Japan, ask specifically about dashi because fish stock can appear in dishes that otherwise look meat-free.");
+      foodStrategy.push("Shōjin ryōri, tofu dishes, vegetable tempura and clearly labelled vegetarian or vegan restaurants are useful starting points.");
     } else {
-      lines.push(`• Use the local-language wording for ${naturalJoin(dietary)} and keep one simple backup meal near the hotel.`);
+      foodStrategy.push(`Use the local-language wording for ${naturalJoin(dietary)} and keep one simple backup meal near the hotel.`);
     }
+    lines.push(foodStrategy.map((item) => `• ${item}`).join("\n"));
   }
 
   if (season) {
@@ -1756,6 +1829,59 @@ function composeReviewedCountryBaseAnswer(resolved = {}, profile = {}, safety = 
 
   lines.push("\n**Next decision**");
   lines.push(`Choose your arrival and departure points. ATLAS can then turn these bases into a day-by-day route with realistic transfers and ${dietary.length ? `${naturalJoin(dietary)} food stops` : "food stops"}.`);
+  return lines.join("\n\n");
+}
+
+function composeFocusedPlanRevision(resolved = {}, activities = null) {
+  if (!resolved.requestProfile?.itineraryContinuation) return "";
+  const message = String(resolved.currentUserMessage || "");
+  const asksForQuiet = /\b(quiet|quieter|calm|calmer|peaceful|less busy|less crowded)\b/i.test(message);
+  const asksForActivity = /\badd\b[\s\S]{0,80}\b(activity|experience|attraction|stop|visit|lake|boat|museum|park|beach|viewpoint)\b/i.test(message);
+  if (!asksForQuiet && !asksForActivity) return "";
+
+  const destination = locationDisplay(resolved);
+  const profile = destinationProfile(destination, resolved);
+  const lines = [`**${destination} update**`];
+
+  if (asksForQuiet) {
+    const quieterStay = (profile.stay || []).find((item) => /\b(quiet|quieter|calm|away from|less busy|less crowded)\b/i.test(item));
+    lines.push("\n**Quieter base**");
+    lines.push(quieterStay
+      ? `• ${quieterStay}.`
+      : "• Choose a stay just outside the busiest visitor strip, then confirm nighttime noise and transport access in recent reviews.");
+  }
+
+  if (asksForActivity) {
+    const recommendations = Array.isArray(activities?.recommendations) ? activities.recommendations : [];
+    const focusTerms = ["lake", "boat", "museum", "park", "beach", "viewpoint"]
+      .filter((term) => new RegExp(`\\b${term}s?\\b`, "i").test(message));
+    const focused = focusTerms.length
+      ? recommendations.find((item) => {
+          const haystack = `${item.name || ""} ${item.category || ""} ${Array.isArray(item.types) ? item.types.join(" ") : item.types || ""}`;
+          return focusTerms.some((term) => new RegExp(`\\b${term}s?\\b`, "i").test(haystack));
+        })
+      : null;
+    const selected = focusTerms.length ? (focused || null) : (recommendations[0] || null);
+    const focusLabel = focusTerms[0] ? `${contextService.titleCase(focusTerms[0])} option` : "Activity update";
+    lines.push(`\n**${focusLabel}**`);
+    if (selected) {
+      const activityLines = [`${fmtPlaceLine(selected, 0, { includeOpenStatus: false }).replace(/^1\.\s*/, "")}`];
+      if (/\b(easy|gentle|low[-\s]?effort|minimal walking)\b/i.test(message)) {
+        activityLines.push("The listing does not verify effort level or step-free access. Confirm the walking surface, entrance and seating before treating it as an easy option.");
+      }
+      lines.push(activityLines.map((item) => `• ${item}`).join("\n"));
+    } else {
+      lines.push("• ATLAS did not verify a matching live place in this search. Keep the slot open rather than adding an unverified venue.");
+    }
+  }
+
+  const otherBases = (resolved.memory?.locations || [])
+    .filter((value) => !contextService.isCountryLike?.(value) && contextService.normalize(value) !== contextService.normalize(destination))
+    .map((value) => contextService.canonicalDestination?.(value) || contextService.titleCase(value));
+  if (otherBases.length) {
+    lines.push("\n**What stays unchanged**");
+    lines.push(`• Keep ${naturalJoin([...new Set(otherBases)])} as planned; apply this revision only to the ${destination} part of the trip.`);
+  }
   return lines.join("\n\n");
 }
 
@@ -1844,6 +1970,9 @@ function composeDestinationPipelineAnswer(resolved, toolResults = []) {
     }
     return lines.join("\n\n");
   }
+
+  const focusedRevision = composeFocusedPlanRevision(resolved, activities);
+  if (focusedRevision) return focusedRevision;
 
   const lines = [`**${destination}**`];
   const requestedDays = Number(resolved.requestProfile?.constraints?.dayCount || 0);
@@ -2142,14 +2271,18 @@ function composeAccommodationAnswer(resolved, toolResults = []) {
   const stays = firstResult(toolResults, "smart_accommodation_finder");
   if (!stays) return "";
   const destination = stays.location || locationDisplay(resolved);
-  const props = Array.isArray(stays.properties) ? stays.properties.slice(0, 5) : [];
   const budget = resolved.memory?.budget || stays.budget_range || "mid-range";
   const area = resolved.memory?.area ? ` around ${resolved.memory.area}` : "";
   const scope = stays.request_scope || resolved.requestProfile?.constraints || {};
   const currency = scope.currency || "EUR";
   const maxBudget = Number(scope.max_total_budget ?? scope.maxBudget);
   const currentMessage = String(resolved.currentUserMessage || resolved.enrichedUserMessage || "");
-  const directBookingRequested = /\b(?:book|reserve|pay for|purchase)\b[\s\S]{0,50}\b(?:hotel|room|stay)\b/i.test(currentMessage);
+  const requestedCount = requestedShortlistCount(currentMessage, 5, 8);
+  const props = Array.isArray(stays.properties) ? stays.properties.slice(0, requestedCount) : [];
+  const directBookingRequested = /\b(?:book|reserve|pay for|purchase)\b[\s\S]{0,50}\b(?:hotel|room|stay)\b/i.test(currentMessage)
+    && !/\b(?:do\s+not|don['’]?t|dont|not\s+to|without)\s+(?:book|reserve|pay|purchase)\b/i.test(currentMessage);
+  const totalPriceRequested = /\b(?:total(?: stay)? price|full(?: stay)? (?:price|cost)|stay total|price|cost)\b/i.test(currentMessage);
+  const cancellationRequested = /\b(?:cancel(?:lation)?|refundable|refund)\b/i.test(currentMessage);
   const childAges = Array.isArray(scope.child_ages || scope.childAges) ? (scope.child_ages || scope.childAges) : [];
   const requestLines = [
     scope.check_in || scope.checkIn ? `Dates: ${scope.check_in || scope.checkIn} to ${scope.check_out || scope.checkOut || "checkout not supplied"}` : "",
@@ -2170,6 +2303,8 @@ function composeAccommodationAnswer(resolved, toolResults = []) {
     ? "Luxury hotels and stays"
     : /budget|cheap|hostel|guesthouse|homestay/i.test(String(budget))
     ? "Budget hotels and stays"
+    : /mid[-\s]?range|moderate/i.test(String(budget))
+    ? "Mid-range hotels and stays"
     : /hostel|guesthouse|motel|lodge|apartment|resort/i.test(String(stays.accommodation_type || ""))
     ? contextService.titleCase(stays.accommodation_type)
     : "Hotels and stays";
@@ -2184,7 +2319,7 @@ function composeAccommodationAnswer(resolved, toolResults = []) {
 
   if (props.length) {
     lines.push(`\n**Shortlist**`);
-    lines.push(`ATLAS verified these properties${area} as discovery options. This search did not return bookable room offers, so it does not prove availability, breakfast inclusion, room fit or the final price for your dates.`);
+    lines.push(`ATLAS verified these ${props.length} propert${props.length === 1 ? "y" : "ies"}${area} as discovery options. This search did not return bookable room offers, so it does not prove availability, breakfast inclusion, room fit or the final price for your dates.`);
     lines.push(props.map((place, index) => {
       const rating = place.rating ? ` · ${place.rating}/5${place.review_count ? ` from ${place.review_count} reviews` : ""}` : "";
       const address = place.address ? ` — ${place.address}` : "";
@@ -2195,16 +2330,27 @@ function composeAccommodationAnswer(resolved, toolResults = []) {
     lines.push(practicalDestinationFallback(destination, resolved).filter((line) => /stay|hotel|accommodation|Thamel|Lazimpat|Boudha|Patan|Lakeside/i.test(line)).map((line) => `• ${line}`).join("\n") || "• Compare central hotels, guesthouses and apartments with recent reviews near your main activities.");
   }
 
-  lines.push(`\n**Before choosing**`);
-  lines.push([
-    "Check the complete stay total after taxes, property charges and currency conversion.",
-    "Confirm that the room layout fits every adult and child; do not assume a family room from the property name.",
-    ...(scope.breakfast_preferred || scope.breakfastPreferred ? ["Verify that breakfast is included for every guest, not only available for an extra charge."] : []),
-    "Compare cancellation terms, check-in time and recent comments about noise and cleanliness.",
-    Number.isFinite(maxBudget) && maxBudget > 0
-      ? `Reject any option whose final payable total exceeds ${maxBudget.toLocaleString("en-GB")} ${currency}.`
-      : "Set a total-stay ceiling before comparing options.",
-  ].map((item) => `• ${item}`).join("\n"));
+  if (totalPriceRequested || cancellationRequested) {
+    lines.push(`\n**Requested details**`);
+    const unavailable = [];
+    if (totalPriceRequested) unavailable.push("The total stay price was not available from the live discovery data");
+    if (cancellationRequested) unavailable.push("Cancellation terms were not available from the live discovery data");
+    lines.push(unavailable.map((item) => `• ${item}.`).join("\n"));
+    lines.push("• Recheck both details for the same room and rate before choosing; cancellation conditions can differ between rates at one property.");
+  }
+
+  if (!totalPriceRequested && !cancellationRequested) {
+    lines.push(`\n**Before choosing**`);
+    lines.push([
+      "Check the complete stay total after taxes, property charges and currency conversion.",
+      "Confirm that the room layout fits every adult and child; do not assume a family room from the property name.",
+      ...(scope.breakfast_preferred || scope.breakfastPreferred ? ["Verify that breakfast is included for every guest, not only available for an extra charge."] : []),
+      "Compare cancellation terms, check-in time and recent comments about noise and cleanliness.",
+      Number.isFinite(maxBudget) && maxBudget > 0
+        ? `Reject any option whose final payable total exceeds ${maxBudget.toLocaleString("en-GB")} ${currency}.`
+        : "Set a total-stay ceiling before comparing options.",
+    ].map((item) => `• ${item}`).join("\n"));
+  }
 
   if (/kathmandu|nepal|pokhara/i.test(destination)) {
     lines.push(`\n**Typical planning range**`);
@@ -2217,15 +2363,17 @@ function composeAccommodationAnswer(resolved, toolResults = []) {
     lines.push("ATLAS found budget-style stay options, but place discovery does not provide confirmed room totals. Compare hostel dorms, simple private rooms and guesthouses on booking platforms for your exact dates before choosing.");
   }
 
-  lines.push(`\n**Price status**`);
-  lines.push(stays.booking_insights || "ATLAS has discovery data, not a live hotel offer. Recheck the exact dates, occupancy, taxes and cancellation terms on a booking platform or the property website.");
+  if (!totalPriceRequested && !cancellationRequested) {
+    lines.push(`\n**Price status**`);
+    lines.push(stays.booking_insights || "ATLAS has discovery data, not a live hotel offer. Recheck the exact dates, occupancy, taxes and cancellation terms on a booking platform or the property website.");
+  }
   return lines.join("\n\n");
 }
 
 function composeDiningAnswer(resolved, toolResults = []) {
   const dining = firstResult(toolResults, "intelligent_restaurant_discovery");
   if (!dining) return "";
-  const destination = dining.location || locationDisplay(resolved);
+  const destination = locationDisplay(resolved) || dining.location;
   const currentMessage = String(resolved.currentUserMessage || resolved.enrichedUserMessage || "");
   const requestedCount = requestedShortlistCount(currentMessage, 5);
   const restaurants = Array.isArray(dining.restaurants) ? dining.restaurants.slice(0, requestedCount) : [];
@@ -2245,6 +2393,16 @@ function composeDiningAnswer(resolved, toolResults = []) {
   const dietary = resolved.requestProfile?.constraints?.dietary || [];
   const displayLabel = dietary.length ? `${contextService.titleCase(naturalJoin(dietary))} ${diningLabel.toLowerCase()}` : diningLabel;
   const lines = [`**${displayLabel} in ${destination}**`];
+  const requestedStartTime = resolved.requestProfile?.constraints?.startTime || "";
+  const requestedBudget = Number(resolved.requestProfile?.constraints?.maxBudget);
+  const requestedCurrency = resolved.requestProfile?.constraints?.currency || "";
+  const requestSummary = [
+    requestedStartTime ? `after ${requestedStartTime}` : "",
+    Number.isFinite(requestedBudget) && requestedBudget > 0
+      ? `up to ${requestedCurrency ? `${requestedCurrency} ` : ""}${requestedBudget.toLocaleString("en-GB")} per person`
+      : "",
+  ].filter(Boolean);
+  if (requestSummary.length) lines.push(`Requested: ${requestSummary.join(" · ")}.`);
 
   if (restaurants.length) {
     lines.push(dietary.length
@@ -2258,7 +2416,7 @@ function composeDiningAnswer(resolved, toolResults = []) {
       : "ATLAS could not verify a reliable live restaurant shortlist for this exact request. Start with local restaurants close to your stay, then compare recent reviews and opening hours.");
   }
 
-  const maxBudget = Number(resolved.requestProfile?.constraints?.maxBudget);
+  const maxBudget = requestedBudget;
   if (Number.isFinite(maxBudget) && maxBudget > 0) {
     const currency = resolved.requestProfile?.constraints?.currency || "";
     lines.push(`ATLAS did not verify that every option stays under ${currency ? `${currency} ` : ""}${maxBudget.toLocaleString("en-GB")} per person; confirm menu prices before ordering.`);
@@ -2292,22 +2450,34 @@ function composeRouteAnswer(resolved, toolResults = []) {
   const routes = Array.isArray(route.routes) ? route.routes.slice(0, 2) : [];
   const constraints = resolved.requestProfile?.constraints || resolved.memory?.constraints || {};
   const requestedDeparture = route.requested_departure || {};
+  const requestedArrival = route.requested_arrival || {};
   const lines = [`**Route: ${origin} → ${destination}**`];
 
   if (routes.length) {
     const firstDeparture = routes.find((item) => item.departure_time)?.departure_time || "";
-    const timing = requestedDeparture.time
+    const firstArrival = routes.find((item) => item.arrival_time)?.arrival_time || "";
+    const timing = requestedArrival.time
+      ? firstArrival
+        ? `You asked to arrive by ${requestedArrival.time}; the first verified option arrives at ${firstArrival}.`
+        : `You asked to arrive by ${requestedArrival.time}; recheck the exact arrival in the live map before leaving.`
+      : requestedDeparture.time
       ? firstDeparture
         ? `You asked to leave at ${requestedDeparture.time}; the first verified option shown departs at ${firstDeparture}.`
         : `You asked to leave at ${requestedDeparture.time}; recheck the exact departure in the live map before leaving.`
       : "";
-    lines.push([`ATLAS verified the route summary for ${mode}.`, timing, "Confirm live service changes before leaving."].filter(Boolean).join(" "));
-    lines.push(`\n**Best route options**`);
-    lines.push(routes.map((item, index) => {
+    lines.push([`ATLAS matched both endpoints and checked this ${mode} route for geographic plausibility.`, timing].filter(Boolean).join(" "));
+    const primary = routes[0];
+    const primaryHeading = constraints.minimalWalking
+      ? "Recommended route — least walking"
+      : constraints.minimalTransfers
+      ? "Recommended route — fewest transfers"
+      : "Recommended route";
+    lines.push((() => {
+      const item = primary;
       const allSteps = Array.isArray(item.steps) ? item.steps : [];
       const transitSteps = allSteps.filter((step) => step.is_transit || /TRANSIT|TRAIN|RAIL/i.test(String(step.travel_mode || "")));
-      const displaySteps = transitSteps.length ? transitSteps.slice(0, 5) : allSteps.slice(0, 4);
-      const steps = displaySteps.length ? `\n${displaySteps.map((step) => `  • ${step.instruction}${step.distance && step.distance !== "distance unavailable" ? ` (${step.distance})` : ""}`).join("\n")}` : "";
+      const displaySteps = transitSteps.length ? transitSteps.slice(0, 4) : allSteps.slice(0, 3);
+      const steps = displaySteps.length ? `\n${displaySteps.map((step) => `• ${step.instruction}`).join("\n")}` : "";
       const details = [
         item.duration,
         item.distance,
@@ -2316,11 +2486,22 @@ function composeRouteAnswer(resolved, toolResults = []) {
         item.fare ? `estimated fare ${item.fare}` : "",
         item.departure_time && item.arrival_time ? `${item.departure_time} → ${item.arrival_time}` : "",
       ].filter(Boolean).join(" · ");
-      const preference = index === 0 && constraints.minimalWalking ? "Best match for less walking — " : "";
-      return `**Option ${index + 1}: ${preference}${item.summary || "Suggested route"}**\n${details}${steps}`;
-    }).join("\n\n"));
+      return `\n**${primaryHeading}: ${item.summary || "Suggested route"}**\n${details}${steps}`;
+    })());
+
+    if (routes[1]) {
+      const alternative = routes[1];
+      const alternativeDetails = [
+        alternative.duration,
+        alternative.distance,
+        Number.isFinite(Number(alternative.transfer_count)) ? `${alternative.transfer_count} transfer${Number(alternative.transfer_count) === 1 ? "" : "s"}` : "",
+        alternative.walking_distance ? `${alternative.walking_distance} walking` : "",
+        alternative.departure_time && alternative.arrival_time ? `${alternative.departure_time} → ${alternative.arrival_time}` : "",
+      ].filter(Boolean).join(" · ");
+      lines.push(`\n**Alternative: ${alternative.summary || "Another suitable route"}**\n${alternativeDetails}`);
+    }
     if (/train|transit/.test(String(mode).toLowerCase()) && !routes.some((item) => Number(item.transit_step_count || 0) > 0)) {
-      lines.push("\nATLAS verified the route summary, but detailed train or transit line steps were not available in the route response. Open the map link for live departures and platform details.");
+      lines.push("\nThe route provider did not return the train or transit line details, so ATLAS is not presenting this as a complete step-by-step journey. Open the live route for departures and platform information.");
     }
     if (constraints.minimalWalking) {
       const walkingMeters = Number(routes[0]?.walking_meters || 0);
@@ -2355,14 +2536,85 @@ function composeRouteAnswer(resolved, toolResults = []) {
       ].map((item) => `• ${item}`).join("\n"));
     }
   } else {
-    lines.push(`ATLAS could not verify step-by-step ${mode} data from the route provider. Open the live Maps route below to check current departures, transfers and platform details.`);
+    const reasonCode = route.data_quality?.reason_code || "";
+    const rejected = Number(route.rejected_route_count || 0) > 0 || reasonCode === "ROUTE_EVIDENCE_REJECTED";
+    const unresolved = reasonCode === "ROUTE_ENDPOINT_UNRESOLVED" || route.validation_warnings?.includes("ROUTE_ENDPOINT_UNRESOLVED");
+    if (unresolved) {
+      lines.push(`ATLAS could not identify one of these endpoints precisely enough to calculate a trustworthy ${mode} route. Give the exact airport, station, terminal or address and I’ll try again.`);
+    } else if (rejected) {
+      lines.push(`ATLAS rejected the route returned by the provider because it did not match the requested local journey or transport mode. It is safer to show no itinerary than an incorrect one. Use the live map link below while ATLAS rechecks the endpoints.`);
+    } else {
+      lines.push(`ATLAS could not verify step-by-step ${mode} data from the route provider. Open the live Maps route below to check current departures, transfers and platform details.`);
+    }
   }
 
   const tips = Array.isArray(route.practical_tips) ? route.practical_tips.slice(0, 3) : [];
-  if (tips.length) {
+  if (tips.length && routes.length) {
     lines.push(`\n### Before you go`);
     lines.push(tips.map((tip) => `• ${tip}`).join("\n"));
   }
+  return lines.join("\n\n");
+}
+
+function composeLayoverAnswer(resolved) {
+  const layover = resolved.requestProfile?.layover || resolved.layoverRequest;
+  if (!layover) return "";
+  const airport = contextService.titleCase(layover.airport || resolved.destination || "the airport");
+  const durationMinutes = Number(layover.durationMinutes || 0);
+  const durationLabel = durationMinutes
+    ? durationMinutes % 60
+      ? Math.floor(durationMinutes / 60) + " hr " + (durationMinutes % 60) + " min"
+      : (durationMinutes / 60) + "-hour"
+    : "";
+  const usableLow = durationMinutes ? Math.max(0, durationMinutes - 150) : 0;
+  const usableHigh = durationMinutes ? Math.max(0, durationMinutes - 120) : 0;
+  const formatWindow = (minutes) => minutes >= 60
+    ? Math.floor(minutes / 60) + " hr" + (minutes % 60 ? " " + (minutes % 60) + " min" : "")
+    : minutes + " min";
+  const enoughForRelaxedAirportPlan = durationMinutes >= 240;
+  const lines = ["**A safe " + (durationLabel ? durationLabel + " " : "") + "layover plan for " + airport + "**"];
+
+  if (durationMinutes) {
+    lines.push(enoughForRelaxedAirportPlan
+      ? "You have enough time for a relaxed airport-based plan. I would not plan a city trip until the airline confirms your terminals, baggage transfer and re-entry requirements."
+      : "Keep this connection close to the departure gate. The scheduled layover is not the same as usable free time.");
+    lines.push("\n**Your realistic free-time window**");
+    lines.push("Allow roughly 45–60 minutes to leave the arriving aircraft and orient yourself, then be back near the departure gate 75–90 minutes before departure. That leaves about **" + formatWindow(usableLow) + "–" + formatWindow(usableHigh) + "** before any immigration, security queue or terminal-transfer delay.");
+  } else {
+    lines.push("Share the scheduled arrival and departure times so ATLAS can calculate a safe activity window rather than guessing from the word “layover.”");
+  }
+
+  lines.push("\n**Best default plan**");
+  lines.push([
+    "After landing, confirm the onward gate, boarding time and any terminal change before starting an activity.",
+    enoughForRelaxedAirportPlan
+      ? "Choose one airside activity near your departure terminal, then allow about an hour for a meal or quiet break. Avoid trying to cover several terminals."
+      : "Use only facilities close to the onward gate and monitor the flight screens.",
+    layover.cabinLuggage
+      ? "Keep the cabin bag with you unless the airport confirms a storage location whose opening hours and collection time fit the connection."
+      : "Do not assume checked bags transfer automatically; confirm this with the airline or your baggage receipt.",
+    "Set your return alarm from the boarding time—not the departure time—and recheck the gate before moving away.",
+  ].map((item) => "• " + item).join("\n"));
+
+  const isChangi = /\b(changi|singapore)\b/i.test(airport + " " + (resolved.destination || ""));
+  lines.push("\n**If you want to leave the transit area**");
+  const landsideNotes = [
+    "Do it only if you can enter the country, your baggage is checked through, your onward boarding pass is ready and the airline confirms enough connection time.",
+    "Include immigration, transport, security screening and a delay margin. With a six-hour connection, central-city sightseeing is usually not worth the missed-flight risk.",
+  ];
+  if (isChangi) {
+    landsideNotes.push("Treat Jewel as a landside visit: confirm immigration eligibility, current access from your terminals and re-entry time before leaving transit.");
+  }
+  lines.push(landsideNotes.map((item) => "• " + item).join("\n"));
+
+  const missing = [
+    !layover.arrivalTerminal || !layover.departureTerminal ? "arrival and departure terminals" : "",
+    !layover.sameTicket ? "whether both flights are on one ticket" : "",
+    !layover.checkedThrough ? "whether checked baggage is transferred through" : "",
+    "your passport/entry eligibility",
+  ].filter(Boolean);
+  lines.push("\n**To make this exact**");
+  lines.push("Tell me " + naturalJoin(missing) + ". Then ATLAS can decide whether to stay airside, visit a landside facility or rule out leaving the airport.");
   return lines.join("\n\n");
 }
 
@@ -2644,6 +2896,7 @@ function composeVisaAnswer(message = "", resolved = {}) {
 function composeGroundedAnswer(message, resolved, toolResults = []) {
   if (isCustomsPackingQuestion(message)) return composeCustomsPackingAnswer(message, resolved);
   if (resolved.requestProfile?.visa) return composeVisaAnswer(message, resolved);
+  if (resolved.requestProfile?.layover) return composeLayoverAnswer(resolved);
   if (isBudgetDietRefinement(message, resolved)) return composeBudgetDietRefinementAnswer(message, resolved);
   if (resolved.intent.type === "weather_inquiry") return composeWeatherAnswer(resolved, toolResults, message);
   if (resolved.intent.type === "activity_recommendations") return composeActivityAnswer(resolved, toolResults);
@@ -3160,10 +3413,18 @@ async function repairWorkflowAnswer({
     "WALKING_CONSTRAINT_MISSING",
     "TRANSFER_CONSTRAINT_MISSING",
     "WEATHER_BACKUP_MISSING",
+    "INDOOR_FOCUS_MISSING",
     "START_TIME_MISSING",
     "BUDGET_CONSTRAINT_MISSING",
     "BREAKFAST_CONSTRAINT_MISSING",
     "TRIP_DURATION_MISSING",
+    "ROUTE_ENDPOINT_UNRESOLVED_NOT_DISCLOSED",
+    "ROUTE_REJECTION_NOT_DISCLOSED",
+    "ROUTE_VERIFICATION_OVERCLAIM",
+    "IMPLAUSIBLE_ROUTE_PRESENTED",
+    "RESPONSE_NOT_ACTIONABLE",
+    "UNNECESSARY_CONTENT",
+    "UNCLEAR_HIERARCHY",
   ]);
   if (issues.has("DUPLICATE_HEADINGS")) repaired = removeDuplicateHeadings(repaired);
   if (issues.has("INTERNAL_LANGUAGE")) {
@@ -3397,6 +3658,12 @@ async function runAuthoritativeChatWorkflow({
       ...state,
       successfulToolResults: state.toolResults,
     }).then((verificationResult) => ({ answer: verificationResult.answer, verificationResult })),
+    reviewResponseQuality: async (state) => {
+      if (process.env.ATLAS_AGENT_RESPONSE_REVIEW_ENABLED !== "true") return { skipped: true, reason: "disabled" };
+      const budget = await usageService.reserveProviderUsage(req.user._id, { llmCalls: 1 });
+      if (!budget.allowed) return { skipped: true, reason: "usage_budget" };
+      return reviewAtlasResponseQuality({ ...state, signal });
+    },
   };
   // Verification metadata needs the resolved intent. Keep it request-scoped in
   // the closure instead of adding controller functions to serializable graph state.
@@ -3761,6 +4028,7 @@ export const chatController = {
     composeActivityAnswer,
     composeDiningAnswer,
     composeRouteAnswer,
+    composeLayoverAnswer,
     requestedShortlistCount,
     buildToolArgs,
     repairWorkflowAnswer,

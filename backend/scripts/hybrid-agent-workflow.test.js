@@ -241,6 +241,7 @@ test("hybrid graph routes, reconciles and composes through selected specialists"
   process.env.ATLAS_AGENT_GRAPH_ENABLED = "true";
   process.env.ATLAS_AGENT_HYBRID_ENABLED = "true";
   const captured = [];
+  let reviewCalls = 0;
   const resolved = resolvedRequest("activity_recommendations", "Riihimäki", {
     dateContext: { iso: "2026-08-04", label: "tomorrow" },
     enrichedUserMessage: "Where can I play tennis in Riihimäki tomorrow?",
@@ -281,6 +282,12 @@ test("hybrid graph routes, reconciles and composes through selected specialists"
     },
     verifyResponse: async ({ answer: value }) => ({ answer: value, verification: { modified: false, notes: [] } }),
     repairResponse: async ({ answer: value }) => ({ answer: value }),
+    reviewResponseQuality: async ({ answer: value, toolResults }) => {
+      reviewCalls += 1;
+      assert.equal(value, answer);
+      assert.equal(toolResults.length, 2);
+      return { passed: true, issueCodes: [], reviewer: "bounded_llm_critic" };
+    },
   };
 
   try {
@@ -294,6 +301,7 @@ test("hybrid graph routes, reconciles and composes through selected specialists"
     assert.equal(result.supervisor.specialists.includes("stays"), false);
     assert.equal(result.evidence.coverage.verifiedSources, 2);
     assert.equal(result.quality.passed, true);
+    assert.equal(reviewCalls, 1);
   } finally {
     if (previous.graph === undefined) delete process.env.ATLAS_AGENT_GRAPH_ENABLED;
     else process.env.ATLAS_AGENT_GRAPH_ENABLED = previous.graph;

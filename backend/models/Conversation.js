@@ -17,6 +17,7 @@ const RouteMemorySchema = new mongoose.Schema(
     destination: { type: String, default: "" },
     mode: { type: String, default: "transit" },
     departureTime: { type: String, default: "" },
+    arrivalTime: { type: String, default: "" },
     dateLabel: { type: String, default: "" },
     targetDate: { type: String, default: "" },
   },
@@ -31,6 +32,7 @@ const RequestConstraintsSchema = new mongoose.Schema(
     minimalTransfers: Boolean,
     noCar: Boolean,
     indoorAlternative: Boolean,
+    indoorPreferred: Boolean,
     rainAlternative: Boolean,
     dietary: { type: [String], default: undefined },
     maxBudget: Number,
@@ -61,6 +63,19 @@ const PendingActivitySchema = new mongoose.Schema(
   { _id: false },
 );
 
+const LayoverMemorySchema = new mongoose.Schema(
+  {
+    airport: { type: String, default: "" },
+    durationMinutes: Number,
+    arrivalTerminal: { type: String, default: "" },
+    departureTerminal: { type: String, default: "" },
+    cabinLuggage: Boolean,
+    checkedThrough: Boolean,
+    sameTicket: Boolean,
+  },
+  { _id: false },
+);
+
 const ConversationMemorySchema = new mongoose.Schema(
   {
     destination: String,
@@ -80,6 +95,7 @@ const ConversationMemorySchema = new mongoose.Schema(
     lastAcceptedOffer: String,
     route: { type: RouteMemorySchema, default: undefined },
     pendingActivitySearch: { type: PendingActivitySchema, default: undefined },
+    layover: { type: LayoverMemorySchema, default: undefined },
     constraints: { type: RequestConstraintsSchema, default: undefined },
   },
   { _id: false },
@@ -110,6 +126,7 @@ export function normalizeConversationMemory(memory = {}) {
       destination: String(source.route.destination),
       mode: String(source.route.mode || "transit"),
       departureTime: String(source.route.departureTime || ""),
+      arrivalTime: String(source.route.arrivalTime || ""),
       dateLabel: String(source.route.dateLabel || ""),
       targetDate: String(source.route.targetDate || ""),
     };
@@ -125,9 +142,21 @@ export function normalizeConversationMemory(memory = {}) {
     };
   }
 
+  if (source.layover && typeof source.layover === "object" && source.layover.airport) {
+    normalized.layover = {
+      airport: String(source.layover.airport).slice(0, 160),
+      durationMinutes: Number.isFinite(Number(source.layover.durationMinutes)) ? Number(source.layover.durationMinutes) : undefined,
+      arrivalTerminal: String(source.layover.arrivalTerminal || "").slice(0, 40),
+      departureTerminal: String(source.layover.departureTerminal || "").slice(0, 40),
+      cabinLuggage: Boolean(source.layover.cabinLuggage),
+      checkedThrough: Boolean(source.layover.checkedThrough),
+      sameTicket: Boolean(source.layover.sameTicket),
+    };
+  }
+
   if (source.constraints && typeof source.constraints === "object") {
     const constraints = {};
-    const booleanFields = ["accessible", "senior", "minimalWalking", "minimalTransfers", "noCar", "indoorAlternative", "rainAlternative", "breakfastPreferred"];
+    const booleanFields = ["accessible", "senior", "minimalWalking", "minimalTransfers", "noCar", "indoorAlternative", "indoorPreferred", "rainAlternative", "breakfastPreferred"];
     for (const field of booleanFields) {
       if (typeof source.constraints[field] === "boolean") constraints[field] = source.constraints[field];
     }

@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { FileText, Files, Loader2, Paperclip, RefreshCw, Send, Trash2, X } from "lucide-react";
 
 const CHAT_MESSAGE_MAX_LENGTH = 3000;
@@ -20,6 +20,7 @@ const InputArea = ({
 }) => {
   const disabled = isLoading || !inputMessage.trim();
   const fileInputRef = useRef(null);
+  const textareaRef = useRef(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [showDocuments, setShowDocuments] = useState(false);
@@ -31,6 +32,13 @@ const InputArea = ({
         .filter(Boolean),
     [documents, selectedDocumentIds],
   );
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 144)}px`;
+  }, [inputMessage]);
 
   const handleFileUpload = async (event) => {
     const file = event.target.files?.[0];
@@ -56,9 +64,9 @@ const InputArea = ({
   };
 
   return (
-    <footer className="bg-[#171817] px-4 pb-4 pt-2 sm:px-6 sm:pb-5">
+    <footer className="border-t border-transparent bg-[#171817] px-4 pb-4 pt-2 sm:px-6 sm:pb-5">
       <div className="mx-auto w-full max-w-4xl">
-        <div className="rounded-2xl border border-[#3a3c3a] bg-[#272927] p-2 shadow-[0_12px_40px_rgba(0,0,0,0.2)] transition focus-within:border-[#555854]">
+        <div className="atlas-composer rounded-2xl border border-[#414441] bg-[#252725] p-2 shadow-[0_14px_44px_rgba(0,0,0,0.24)] transition-[border-color,box-shadow] duration-200 focus-within:border-[#769581] focus-within:shadow-[0_14px_44px_rgba(0,0,0,0.28),0_0_0_3px_rgba(159,200,178,0.10)]">
           {showDocuments && (
             <div className="mb-2 rounded-xl border border-[#3a3c3a] bg-[#1e201e] p-3">
               <div className="mb-3 flex items-center justify-between gap-3">
@@ -189,11 +197,13 @@ const InputArea = ({
             />
 
             <textarea
+              id="atlas-chat-input"
+              ref={textareaRef}
               value={inputMessage}
               onChange={(event) => setInputMessage(event.target.value)}
               onKeyDown={onKeyPress}
               placeholder="Ask about destinations, hotels, safety, weather, food, sports, routes or uploaded documents..."
-              className="max-h-36 min-h-[48px] flex-1 resize-none border-0 bg-transparent px-2 py-3 text-[15px] leading-6 text-[#f0f0ec] outline-none placeholder:text-[#737570] disabled:cursor-not-allowed disabled:opacity-70 sm:px-3"
+              className="max-h-36 min-h-[48px] flex-1 resize-none overflow-y-auto border-0 bg-transparent px-2 py-3 text-[15px] leading-6 text-[#f0f0ec] outline-none placeholder:text-[#888a84] disabled:cursor-not-allowed disabled:opacity-70 sm:px-3"
               rows="1"
               disabled={isLoading}
               maxLength={CHAT_MESSAGE_MAX_LENGTH}
@@ -205,8 +215,8 @@ const InputArea = ({
               disabled={disabled}
               className={`mb-0.5 inline-flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl transition focus:outline-none ${
                 disabled
-                  ? "cursor-not-allowed bg-[#343634] text-[#6f716c]"
-                  : "bg-[#e7e8e3] text-[#222422] hover:bg-white"
+                  ? "cursor-not-allowed border border-[#3b3d3a] bg-[#303230] text-[#71736e]"
+                  : "bg-[#b9ddc8] text-[#1c231f] shadow-[0_4px_16px_rgba(159,200,178,0.12)] hover:bg-[#cce9d8] active:scale-95"
               }`}
               aria-label="Send message"
             >
@@ -219,7 +229,7 @@ const InputArea = ({
           </div>
         </div>
 
-        <div className="mt-2 flex items-center justify-between gap-3 px-2 text-[11px] text-[#6f716c]">
+        <div className="mt-2 flex items-center justify-between gap-3 px-2 text-[11px] text-[#858782]">
           <span>
             {uploadError ? (
               <span className="text-rose-300">{uploadError}</span>

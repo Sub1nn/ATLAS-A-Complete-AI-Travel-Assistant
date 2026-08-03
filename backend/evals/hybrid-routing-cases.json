@@ -1,5 +1,6 @@
 [
   { "id": "fi-weather", "destination": "Helsinki", "intent": "weather_inquiry", "message": "Will it rain in Helsinki tomorrow?", "expectedSpecialists": ["weather"] },
+  { "id": "fi-relative-airport-route", "destination": "Helsinki", "intent": "route_planning", "message": "How do I get from Helsinki railway station to the airport by train?", "route": { "origin": "Helsinki railway station", "destination": "the airport" }, "expectedSpecialists": ["mobility"] },
   { "id": "fi-tennis", "destination": "Riihimäki", "intent": "activity_recommendations", "message": "Where can I play tennis in Riihimäki tomorrow?", "date": "2026-08-04", "expectedSpecialists": ["experiences", "weather"] },
   { "id": "fr-accessible-stay", "destination": "Paris", "intent": "accommodation_search", "message": "Compare accessible hotels in Paris", "expectedSpecialists": ["stays"] },
   { "id": "jp-dining", "destination": "Osaka", "intent": "dining_recommendations", "message": "Find vegetarian dinner in Osaka", "expectedSpecialists": ["dining"] },

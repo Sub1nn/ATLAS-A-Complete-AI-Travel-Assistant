@@ -12,7 +12,11 @@ const deleteAccountDialogSource = fs.readFileSync(new URL("../src/components/sid
 const indexHtmlSource = fs.readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const authPageSource = fs.readFileSync(new URL("../src/components/auth/AuthPage.jsx", import.meta.url), "utf8");
 const travelAssistantSource = fs.readFileSync(new URL("../src/components/TravelAssistant.jsx", import.meta.url), "utf8");
+const inputAreaSource = fs.readFileSync(new URL("../src/components/chat/InputArea.jsx", import.meta.url), "utf8");
+const suggestionsSource = fs.readFileSync(new URL("../src/components/features/TripSuggestions.jsx", import.meta.url), "utf8");
+const indexCssSource = fs.readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
 const authHookSource = fs.readFileSync(new URL("../src/hooks/useAuth.js", import.meta.url), "utf8");
+const pdfExportSource = fs.readFileSync(new URL("../src/utils/exportConversationPdf.js", import.meta.url), "utf8");
 
 test("document retry is exposed by documentAPI and consumed by useChat", () => {
   const conversationBlock = apiSource.slice(apiSource.indexOf("export const conversationAPI"), apiSource.indexOf("export const documentAPI"));
@@ -55,6 +59,28 @@ test("public preview is clearly labelled without offering sandbox verification",
   assert.match(authPageSource, /mode === "login" && passwordRecoveryEnabled/);
   assert.match(apiSource, /async config\(\)/);
   assert.match(authHookSource, /Promise\.allSettled\(\[authAPI\.config\(\), authAPI\.restoreSession\(\)\]\)/);
+});
+
+test("travel workspace keeps prompts actionable and the composer focus treatment responsive", () => {
+  assert.match(suggestionsSource, /Start with an idea/);
+  assert.match(suggestionsSource, /atlas-chat-input/);
+  assert.match(suggestionsSource, /requestAnimationFrame/);
+  assert.match(inputAreaSource, /className="atlas-composer/);
+  assert.match(inputAreaSource, /id="atlas-chat-input"/);
+  assert.match(inputAreaSource, /textarea\.style\.height/);
+  assert.match(indexCssSource, /\.atlas-composer textarea:focus-visible/);
+  assert.match(indexCssSource, /max-height: 820px/);
+  assert.match(indexCssSource, /max-width: 639px/);
+});
+
+test("conversation export produces a styled PDF instead of a text download", () => {
+  assert.match(travelAssistantSource, /downloadConversationPdf\(visibleMessages\)/);
+  assert.match(travelAssistantSource, /\{isExporting \? "Exporting…" : "Export PDF"\}/);
+  assert.doesNotMatch(travelAssistantSource, /atlas-chat-.*\.txt/);
+  assert.match(pdfExportSource, /type: "application\/pdf"/);
+  assert.match(pdfExportSource, /atlas-conversation-\$\{date\}\.pdf/);
+  assert.match(pdfExportSource, /parseBlocks\(message\.content\)/);
+  assert.match(pdfExportSource, /Page \$\{pages\.length \+ 1\}/);
 });
 
 test("social sharing metadata uses deploy-time absolute URLs and a LinkedIn-sized PNG", () => {
