@@ -166,7 +166,19 @@ export function assertProductionEnvironment() {
 }
 
 export function assertAgentEnvironment() {
+  if (process.env.GROQ_MODEL_FALLBACK_ENABLED
+    && !["true", "false"].includes(process.env.GROQ_MODEL_FALLBACK_ENABLED)) {
+    throw new Error("GROQ_MODEL_FALLBACK_ENABLED must be true or false.");
+  }
+  for (const key of ["GROQ_MODEL", "GROQ_PLANNER_MODEL", "GROQ_RESPONSE_MODEL", "GROQ_FALLBACK_MODEL"]) {
+    const value = String(process.env[key] || "").trim();
+    if (value && !/^[a-z0-9][a-z0-9._/-]+$/i.test(value)) {
+      throw new Error(`${key} must be a valid Groq model identifier.`);
+    }
+  }
+
   const graphEnabled = process.env.ATLAS_AGENT_GRAPH_ENABLED === "true";
+  const hybridEnabled = process.env.ATLAS_AGENT_HYBRID_ENABLED === "true";
   const canaryPercent = Number(process.env.ATLAS_AGENT_CANARY_PERCENT ?? (process.env.NODE_ENV === "production" ? 0 : 100));
   if (!Number.isFinite(canaryPercent) || canaryPercent < 0 || canaryPercent > 100) {
     throw new Error("ATLAS_AGENT_CANARY_PERCENT must be between 0 and 100.");
@@ -176,6 +188,19 @@ export function assertAgentEnvironment() {
   }
   if (graphEnabled && process.env.NODE_ENV === "production" && process.env.ATLAS_AGENT_FALLBACK_ENABLED === "false") {
     throw new Error("ATLAS_AGENT_FALLBACK_ENABLED cannot be false during the production canary.");
+  }
+  if (hybridEnabled && !graphEnabled) {
+    throw new Error("ATLAS_AGENT_GRAPH_ENABLED must be true when ATLAS_AGENT_HYBRID_ENABLED=true.");
+  }
+
+  const maxSpecialists = Number(process.env.ATLAS_AGENT_MAX_SPECIALISTS || 6);
+  if (!Number.isInteger(maxSpecialists) || maxSpecialists < 1 || maxSpecialists > 8) {
+    throw new Error("ATLAS_AGENT_MAX_SPECIALISTS must be an integer between 1 and 8.");
+  }
+
+  const maxMultiDestinationToolCalls = Number(process.env.CHAT_MAX_MULTI_DESTINATION_TOOL_CALLS || 12);
+  if (!Number.isInteger(maxMultiDestinationToolCalls) || maxMultiDestinationToolCalls < 2 || maxMultiDestinationToolCalls > 24) {
+    throw new Error("CHAT_MAX_MULTI_DESTINATION_TOOL_CALLS must be an integer between 2 and 24.");
   }
 
   const agentTimeout = Number(process.env.ATLAS_AGENT_REQUEST_TIMEOUT_MS || 60000);

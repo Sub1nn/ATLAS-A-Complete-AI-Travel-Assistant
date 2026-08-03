@@ -10,6 +10,10 @@ export const AuthoritativeAtlasState = Annotation.Root({
     reducer: (_current, next) => next,
     default: () => 2,
   }),
+  graphVersion: Annotation({
+    reducer: (_current, next) => next,
+    default: () => "travel-orchestrator-v2",
+  }),
   message: Annotation({
     reducer: (_current, next) => next,
     default: () => "",
@@ -29,11 +33,21 @@ export const AuthoritativeAtlasState = Annotation.Root({
   baseResolved: Annotation(replace),
   planner: Annotation(replace),
   resolved: Annotation(replace),
+  guardrail: Annotation(replace),
+  supervisor: Annotation(replace),
   retrievedDocs: Annotation({
     reducer: (_current, next) => next,
     default: () => [],
   }),
   toolsToUse: Annotation({
+    reducer: (_current, next) => next,
+    default: () => [],
+  }),
+  specialistPlan: Annotation({
+    reducer: (_current, next) => next,
+    default: () => [],
+  }),
+  specialistResults: Annotation({
     reducer: (_current, next) => next,
     default: () => [],
   }),
@@ -45,6 +59,8 @@ export const AuthoritativeAtlasState = Annotation.Root({
     reducer: (_current, next) => next,
     default: () => [],
   }),
+  evidence: Annotation(replace),
+  responsePlan: Annotation(replace),
   answer: Annotation({
     reducer: (_current, next) => next,
     default: () => "",

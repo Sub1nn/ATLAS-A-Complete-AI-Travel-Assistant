@@ -15,6 +15,7 @@ dotenv.config({
 
 const { contextService } = await import("../services/contextService.js");
 const { travelPlannerService } = await import("../services/travelPlannerService.js");
+const { isPlausibleLocationResult, sanitizeLocationQuery } = await import("../utils/locationUtils.js");
 
 test("does not extract conversational filler as a location", () => {
   assert.deepEqual(
@@ -252,6 +253,43 @@ test("a half-day follow-up overrides an inherited multi-day duration", () => {
   assert.equal(resolved.requestProfile.constraints.endTime, "19:00");
   assert.equal(resolved.requestProfile.constraints.maxStops, 2);
   assert.deepEqual(resolved.requestProfile.constraints.exclusions || [], []);
+});
+
+test("budget wording with 'stay under' remains a destination plan instead of accommodation search", () => {
+  const resolved = contextService.resolveContext(
+    "Now make it an accessible vegetarian afternoon in Tallinn instead. Keep walking minimal and stay under €150.",
+    {
+      destination: "Riihimäki",
+      locations: ["Riihimäki"],
+      lastIntent: "activity_recommendations",
+      interests: ["tennis"],
+      constraints: { startTime: "18:00", indoorAlternative: true },
+    },
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "destination_planning");
+  assert.equal(contextService.normalize(resolved.destination), "tallinn");
+  assert.deepEqual(resolved.explicitLocations.map(contextService.normalize), ["tallinn"]);
+  assert.deepEqual(resolved.locations.map(contextService.normalize), ["tallinn"]);
+  assert.equal(resolved.requestProfile.constraints.maxBudget, 150);
+  assert.equal(resolved.requestProfile.constraints.currency, "EUR");
+  assert.equal(resolved.requestProfile.constraints.accessible, true);
+  assert.equal(resolved.requestProfile.constraints.minimalWalking, true);
+  assert.deepEqual(resolved.requestProfile.constraints.dietary, ["vegetarian"]);
+  assert.equal(resolved.requestProfile.constraints.startTime, undefined);
+  assert.equal(resolved.activityRequest, null);
+});
+
+test("the verb 'split' is not treated as Split, Croatia in multi-city planning", () => {
+  const resolved = contextService.resolveContext(
+    "Plan 5 days across Kathmandu and Pokhara, split the time fairly. No strenuous trekking.",
+    {},
+    [],
+  );
+
+  assert.deepEqual(resolved.explicitLocations.map(contextService.normalize), ["kathmandu", "pokhara"]);
+  assert.equal(resolved.explicitLocations.some((location) => contextService.normalize(location) === "split"), false);
 });
 
 test("planning focus phrases are not extracted as extra destinations", () => {
@@ -550,4 +588,126 @@ test("detects flexible accommodation categories and budget", () => {
   assert.equal(luxury.intent.type, "accommodation_search");
   assert.equal(luxury.memory.budget, "luxury");
   assert.equal(luxury.memory.stayType, "resort");
+});
+
+test("country planning does not mistake timing or interests for destinations", () => {
+  const resolved = contextService.resolveContext(
+    "I have 8 days in Japan in late October. First visit, moderate budget, vegetarian, interested in history and nature.",
+    {},
+    [],
+  );
+
+  assert.deepEqual(resolved.explicitLocations.map(contextService.canonicalDestination), ["Japan"]);
+  assert.equal(resolved.destination.toLowerCase(), "japan");
+  assert.equal(resolved.memory.budget, "mid-range");
+  assert.deepEqual(resolved.requestProfile.constraints.dietary, ["vegetarian"]);
+  assert.equal(resolved.requestProfile.constraints.dayCount, 8);
+  assert.ok(resolved.memory.interests.includes("history"));
+  assert.ok(resolved.memory.interests.includes("nature"));
+});
+
+test("activity requests preserve a between-time window", () => {
+  const resolved = contextService.resolveContext(
+    "Can I play outdoor tennis in Riihimäki tomorrow between 16:00 and 19:00? I need public courts.",
+    {},
+    [],
+    { clientLocalDate: "2026-08-03" },
+  );
+
+  assert.equal(resolved.intent.type, "activity_recommendations");
+  assert.equal(resolved.requestProfile.constraints.startTime, "16:00");
+  assert.equal(resolved.requestProfile.constraints.endTime, "19:00");
+});
+
+test("visa questions separate passport residence from the trip destination", () => {
+  const resolved = contextService.resolveContext(
+    "I am a Nepalese citizen living in Finland. Do I need a visa for an 8-day tourist trip to Japan?",
+    {},
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "travel_logistics");
+  assert.equal(contextService.canonicalDestination(resolved.destination), "Japan");
+  assert.deepEqual(resolved.locations.map(contextService.canonicalDestination), ["Japan"]);
+  assert.equal(resolved.requestProfile.visa.nationality, "Nepalese");
+  assert.equal(resolved.requestProfile.visa.residence, "Finland");
+  assert.equal(contextService.canonicalDestination(resolved.memory.destination), "Japan");
+});
+
+test("step-free accessibility does not become a free-activity interest", () => {
+  const resolved = contextService.resolveContext(
+    "Refine that for step-free transport and minimal walking.",
+    { destination: "Japan", locations: ["Japan"], interests: ["history", "nature"], lastIntent: "destination_planning", constraints: {} },
+    [],
+  );
+
+  assert.deepEqual(resolved.memory.interests, ["history", "nature"]);
+  assert.equal(resolved.requestProfile.constraints.accessible, true);
+});
+
+test("requested result counts are preserved for viewpoints and options", () => {
+  const resolved = contextService.resolveContext(
+    "Suggest two viewpoints in Valparaíso suitable for someone avoiding steep walking.",
+    {},
+    [],
+  );
+
+  assert.equal(resolved.requestProfile.constraints.maxStops, 2);
+  assert.equal(resolved.requestProfile.constraints.minimalWalking, true);
+});
+
+test("city-country qualifiers remain one destination instead of separate trip bases", () => {
+  const resolved = contextService.resolveContext(
+    "Give me exactly two viewpoints in Valparaíso, Chile, with brief history and geography context.",
+    {},
+    [],
+  );
+
+  assert.deepEqual(resolved.explicitLocations, ["Valparaíso"]);
+  assert.deepEqual(resolved.locations, ["Valparaíso"]);
+  assert.equal(resolved.destination, "Valparaíso");
+});
+
+test("geocoder results must match the requested place rather than a similar spelling", () => {
+  assert.equal(sanitizeLocationQuery("Valparaíso"), "Valparaíso");
+  assert.equal(isPlausibleLocationResult("Valparaíso", {
+    city: "Valparaíso",
+    country: "Chile",
+    formatted_address: "Valparaíso, Chile",
+  }), true);
+  assert.equal(isPlausibleLocationResult("Valparaíso", {
+    city: "Valparai",
+    country: "India",
+    formatted_address: "Valparai, Tamil Nadu, India",
+  }), false);
+});
+
+test("follow-up constraints capture a maximum number of hotel changes", () => {
+  const resolved = contextService.resolveContext(
+    "Avoid changing hotels more than twice and keep walking minimal.",
+    { destination: "Japan", locations: ["Japan"], lastIntent: "destination_planning", constraints: {} },
+    [],
+  );
+
+  assert.equal(resolved.requestProfile.constraints.maxHotelChanges, 2);
+  assert.equal(resolved.requestProfile.constraints.minimalWalking, true);
+});
+
+test("revision wording keeps a country itinerary follow-up out of hotel-only intent", () => {
+  const resolved = contextService.resolveContext(
+    "Please revise that answer. Keep the same two bases, minimal walking, and no more than two hotel changes.",
+    {
+      destination: "Japan",
+      locations: ["Japan"],
+      lastIntent: "destination_planning",
+      lastTopic: "8-day Japan base plan",
+      constraints: { dayCount: 8, dietary: ["vegetarian"] },
+    },
+    [],
+  );
+
+  assert.equal(resolved.intent.type, "destination_planning");
+  assert.equal(resolved.requestProfile.itineraryContinuation, true);
+  assert.equal(resolved.requestProfile.constraints.dayCount, 8);
+  assert.deepEqual(resolved.requestProfile.constraints.dietary, ["vegetarian"]);
 });

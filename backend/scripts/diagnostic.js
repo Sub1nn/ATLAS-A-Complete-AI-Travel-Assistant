@@ -12,6 +12,7 @@ dotenv.config({
 });
 
 const { networkTest } = await import("../utils/networkTest.js");
+const { groqFallbackModel, groqModelFor } = await import("../services/groqModelService.js");
 
 console.log("🔍 ATLAS Diagnostic Tool");
 console.log("=".repeat(50));
@@ -95,6 +96,12 @@ async function runDiagnostics() {
       "   Network tests may fail until backend/.env contains real values.",
     );
   }
+
+  console.log("\n🤖 Groq Model Routing:");
+  console.log(`✅ Planner: ${groqModelFor("planner")}`);
+  console.log(`✅ Response: ${groqModelFor("response")}`);
+  console.log(`✅ Compatibility fallback: ${groqFallbackModel()}`);
+  console.log(`✅ Model fallback: ${process.env.GROQ_MODEL_FALLBACK_ENABLED === "false" ? "disabled" : "enabled"}`);
 
   console.log("\n🌐 Network Connectivity Test:");
 

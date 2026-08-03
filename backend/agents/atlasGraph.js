@@ -4,6 +4,7 @@ import { END, MemorySaver, START, StateGraph } from "@langchain/langgraph";
 import { MongoDBSaver } from "@langchain/langgraph-checkpoint-mongodb";
 import { databaseReady } from "../db/mongoose.js";
 import { logger } from "../utils/logger.js";
+import { groqFallbackModel, groqModelFor } from "../services/groqModelService.js";
 import { AtlasState } from "./atlasState.js";
 import { AuthoritativeAtlasState } from "./authoritativeState.js";
 import { withAgentRuntime } from "./agentRuntime.js";
@@ -12,12 +13,19 @@ import {
   composeResponseNode,
   executeToolsNode,
   finalizeAuthoritativeNode,
+  guardrailNode,
   planRequestNode,
   qualityGateNode,
+  reconcileEvidenceNode,
   repairResponseNode,
+  responsePlanNode,
   resolveRequestNode,
   retrieveEvidenceNode,
+  routeAfterGuardrail,
+  routeAfterQualityGate,
   routeToolsNode,
+  shortCircuitNode,
+  supervisorNode,
   verifyResponseNode,
 } from "./nodes/orchestrationNodes.js";
 import { runWithoutAutomaticTracing, traceAtlasOperation } from "./monitoring/atlasTracing.js";
@@ -28,6 +36,7 @@ const CHECKPOINT_WRITES_COLLECTION = "atlas_agent_checkpoint_writes";
 let graphPromise;
 let checkpointPromise;
 let authoritativeGraph;
+let hybridAuthoritativeGraph;
 
 export function agentShadowModeEnabled() {
   return process.env.ATLAS_AGENT_SHADOW_MODE === "true";
@@ -35,6 +44,10 @@ export function agentShadowModeEnabled() {
 
 export function agentGraphEnabled() {
   return process.env.ATLAS_AGENT_GRAPH_ENABLED === "true";
+}
+
+export function agentHybridWorkflowEnabled() {
+  return process.env.ATLAS_AGENT_HYBRID_ENABLED === "true";
 }
 
 export function shouldUseAtlasAuthoritativeGraph(userId) {
@@ -61,6 +74,16 @@ export async function initializeAtlasGraph() {
         ? "memory"
         : "mongodb"
       : "disabled-for-authoritative-graph",
+    graphVersion: authoritativeEnabled && agentHybridWorkflowEnabled()
+      ? "travel-supervisor-v3"
+      : authoritativeEnabled
+      ? "travel-orchestrator-v2"
+      : "context-shadow-v1",
+    llmModels: {
+      planner: groqModelFor("planner"),
+      response: groqModelFor("response"),
+      fallback: process.env.GROQ_MODEL_FALLBACK_ENABLED === "false" ? "disabled" : groqFallbackModel(),
+    },
   });
   return { enabled: true, mode: authoritativeEnabled ? "authoritative-canary" : "shadow" };
 }
@@ -114,7 +137,55 @@ function buildAuthoritativeGraph() {
     .compile();
 }
 
+function buildHybridAuthoritativeGraph() {
+  return new StateGraph(AuthoritativeAtlasState)
+    .addNode("resolve_context", resolveRequestNode)
+    .addNode("plan_request", planRequestNode)
+    .addNode("apply_guardrails", guardrailNode)
+    .addNode("short_circuit", shortCircuitNode)
+    .addNode("supervise_request", supervisorNode)
+    .addNode("retrieve_evidence", retrieveEvidenceNode)
+    .addNode("route_tools", routeToolsNode)
+    .addNode("execute_specialists", executeToolsNode)
+    .addNode("reconcile_evidence", reconcileEvidenceNode)
+    .addNode("plan_response", responsePlanNode)
+    .addNode("compose_response", composeResponseNode)
+    .addNode("verify_response", verifyResponseNode)
+    .addNode("quality_gate", qualityGateNode)
+    .addNode("repair_response", repairResponseNode)
+    .addNode("finalize", finalizeAuthoritativeNode)
+    .addEdge(START, "resolve_context")
+    .addEdge("resolve_context", "plan_request")
+    .addEdge("plan_request", "apply_guardrails")
+    .addConditionalEdges("apply_guardrails", routeAfterGuardrail, {
+      supervise: "supervise_request",
+      short_circuit: "short_circuit",
+    })
+    .addEdge("short_circuit", "finalize")
+    .addEdge("supervise_request", "retrieve_evidence")
+    .addEdge("retrieve_evidence", "route_tools")
+    .addEdge("route_tools", "execute_specialists")
+    .addEdge("execute_specialists", "reconcile_evidence")
+    .addEdge("reconcile_evidence", "plan_response")
+    .addEdge("plan_response", "compose_response")
+    .addEdge("compose_response", "verify_response")
+    .addEdge("verify_response", "quality_gate")
+    .addConditionalEdges("quality_gate", routeAfterQualityGate, {
+      finalize: "finalize",
+      repair: "repair_response",
+    })
+    .addEdge("repair_response", "finalize")
+    .addEdge("finalize", END)
+    // Provider responses and document excerpts remain request-scoped. Durable
+    // conversation memory is persisted by the controller after lease fencing.
+    .compile();
+}
+
 function getAuthoritativeGraph() {
+  if (agentHybridWorkflowEnabled()) {
+    hybridAuthoritativeGraph ||= buildHybridAuthoritativeGraph();
+    return hybridAuthoritativeGraph;
+  }
   authoritativeGraph ||= buildAuthoritativeGraph();
   return authoritativeGraph;
 }
@@ -190,6 +261,7 @@ export async function runAtlasShadowWorkflow({
   memory,
   previousMessages,
   planner,
+  temporalContext,
   userId,
   conversationId,
   signal,
@@ -211,6 +283,7 @@ export async function runAtlasShadowWorkflow({
             memory: memory || {},
             previousMessages: compactHistory(previousMessages),
             planner: planner || null,
+            temporalContext: temporalContext || {},
           },
           {
             configurable: { thread_id: atlasThreadId(userId, conversationId) },
@@ -239,12 +312,13 @@ export async function runAtlasAuthoritativeWorkflow({
   if (!agentGraphEnabled()) return null;
   const timeoutMs = Math.max(5000, Number(process.env.ATLAS_AGENT_REQUEST_TIMEOUT_MS || 60000));
   const linked = linkedAbortSignal(signal, timeoutMs);
+  const graphVersion = agentHybridWorkflowEnabled() ? "travel-supervisor-v3" : "travel-orchestrator-v2";
 
   try {
     return await traceAtlasOperation(
       "atlas-agent-authoritative",
       {
-        graphVersion: "travel-orchestrator-v2",
+        graphVersion,
         environment: process.env.NODE_ENV || "development",
         documentFocused: Boolean(documentFocused),
       },
@@ -252,6 +326,7 @@ export async function runAtlasAuthoritativeWorkflow({
         const output = await runWithoutAutomaticTracing(() => getAuthoritativeGraph().invoke(
           {
             schemaVersion: 2,
+            graphVersion,
             message: String(message || "").slice(0, 3000),
             memory: memory || {},
             previousMessages: compactHistory(previousMessages),
@@ -261,7 +336,7 @@ export async function runAtlasAuthoritativeWorkflow({
             signal: linked.signal,
             callbacks: [],
             tags: ["atlas", "authoritative"],
-            metadata: { graphVersion: "travel-orchestrator-v2" },
+            metadata: { graphVersion },
           },
         ));
         return output.result;
@@ -300,5 +375,6 @@ export async function deleteAtlasUserThreads(userId, conversationIds = []) {
 export const atlasGraphTestUtils = {
   buildGraph,
   buildAuthoritativeGraph,
+  buildHybridAuthoritativeGraph,
   compactHistory,
 };

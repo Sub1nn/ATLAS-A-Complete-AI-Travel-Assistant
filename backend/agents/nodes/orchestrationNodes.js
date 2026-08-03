@@ -1,12 +1,23 @@
 import { getAgentRuntime } from "../agentRuntime.js";
 import { traceAtlasOperation } from "../monitoring/atlasTracing.js";
+import {
+  createResponsePlan,
+  createSpecialistPlan,
+  createSupervisorDecision,
+  evaluateTravelGuardrails,
+  reconcileSpecialistEvidence,
+  renderGuardrailResponse,
+} from "../hybridWorkflow.js";
 
 function tracedNode(name, state, operation) {
+  const graphVersion = process.env.ATLAS_AGENT_HYBRID_ENABLED === "true"
+    ? "travel-supervisor-v3"
+    : "travel-orchestrator-v2";
   return traceAtlasOperation(
     name,
     {
       phase: name.replace(/^atlas-agent-/, ""),
-      graphVersion: "travel-orchestrator-v2",
+      graphVersion,
       intent: state.resolved?.intent?.type || state.baseResolved?.intent?.type || "unknown",
       toolCount: state.toolResults?.length || state.toolsToUse?.length || 0,
     },
@@ -44,6 +55,50 @@ export function planRequestNode(state) {
   });
 }
 
+export function guardrailNode(state) {
+  return tracedNode("atlas-agent-guardrail", state, async () => ({
+    guardrail: evaluateTravelGuardrails({
+      message: state.message,
+      resolved: state.resolved,
+      documentFocused: state.documentFocused,
+    }),
+  }));
+}
+
+export function routeAfterGuardrail(state) {
+  return state.guardrail?.status === "allow" ? "supervise" : "short_circuit";
+}
+
+export function shortCircuitNode(state) {
+  return tracedNode("atlas-agent-short-circuit", state, async () => {
+    const answer = renderGuardrailResponse(state.guardrail);
+    return {
+      answer,
+      verificationResult: {
+        answer,
+        verification: { modified: false, notes: state.guardrail?.reasonCodes || [] },
+      },
+      quality: assessResponseQuality({
+        answer,
+        resolved: state.resolved,
+        memory: state.memory,
+        message: state.message,
+      }),
+    };
+  });
+}
+
+export function supervisorNode(state) {
+  return tracedNode("atlas-agent-supervisor", state, async () => ({
+    supervisor: createSupervisorDecision({
+      message: state.message,
+      resolved: state.resolved,
+      documentFocused: state.documentFocused,
+      guardrail: state.guardrail,
+    }),
+  }));
+}
+
 export function retrieveEvidenceNode(state) {
   return tracedNode("atlas-agent-retrieve", state, async () => {
     const runtime = getAgentRuntime();
@@ -64,22 +119,60 @@ export function routeToolsNode(state) {
       resolved: state.resolved,
       documentFocused: state.documentFocused,
     });
-    return { toolsToUse: toolsToUse || [] };
+    const selectedTools = toolsToUse || [];
+    if (!state.supervisor) return { toolsToUse: selectedTools };
+    const specialistPlan = createSpecialistPlan({
+      supervisor: state.supervisor,
+      toolsToUse: selectedTools,
+    });
+    return {
+      specialistPlan,
+      toolsToUse: specialistPlan.flatMap((item) => item.tools),
+    };
   });
 }
 
 export function executeToolsNode(state) {
   return tracedNode("atlas-agent-execute-tools", state, async () => {
     const runtime = getAgentRuntime();
-    const execution = await runtime.executeTools({
-      toolsToUse: state.toolsToUse,
-      resolved: state.resolved,
-    });
+    const execution = state.specialistPlan?.length && typeof runtime.executeSpecialists === "function"
+      ? await runtime.executeSpecialists({
+          specialistPlan: state.specialistPlan,
+          resolved: state.resolved,
+          supervisor: state.supervisor,
+        })
+      : await runtime.executeTools({
+          toolsToUse: state.toolsToUse,
+          resolved: state.resolved,
+        });
     return {
       toolResults: execution?.toolResults || [],
       successfulToolResults: execution?.successfulToolResults || [],
+      specialistResults: execution?.specialistResults || [],
     };
   });
+}
+
+export function reconcileEvidenceNode(state) {
+  return tracedNode("atlas-agent-reconcile-evidence", state, async () => ({
+    evidence: reconcileSpecialistEvidence({
+      specialistPlan: state.specialistPlan,
+      specialistResults: state.specialistResults,
+      toolResults: state.toolResults,
+      retrievedDocs: state.retrievedDocs,
+    }),
+  }));
+}
+
+export function responsePlanNode(state) {
+  return tracedNode("atlas-agent-response-plan", state, async () => ({
+    responsePlan: createResponsePlan({
+      message: state.message,
+      resolved: state.resolved,
+      supervisor: state.supervisor,
+      evidence: state.evidence,
+    }),
+  }));
 }
 
 export function composeResponseNode(state) {
@@ -92,6 +185,9 @@ export function composeResponseNode(state) {
       toolResults: state.toolResults,
       successfulToolResults: state.successfulToolResults,
       documentFocused: state.documentFocused,
+      supervisor: state.supervisor,
+      evidence: state.evidence,
+      responsePlan: state.responsePlan,
     });
     return { answer: answer || "" };
   });
@@ -120,7 +216,7 @@ function normalizedHeadings(answer = "") {
     .filter(Boolean);
 }
 
-export function assessResponseQuality({ answer = "", resolved = {}, memory = {}, message = "" } = {}) {
+export function assessResponseQuality({ answer = "", resolved = {}, memory = {}, message = "", responsePlan = {}, evidence = {} } = {}) {
   const issues = [];
   const text = String(answer || "").trim();
   const headings = normalizedHeadings(text);
@@ -134,6 +230,10 @@ export function assessResponseQuality({ answer = "", resolved = {}, memory = {},
   }
   if (/(?:\n\s*[•*-]\s*){9,}/.test(text)) issues.push("EXCESSIVE_LIST");
 
+  const wordCount = text.split(/\s+/).filter(Boolean).length;
+  const targetWords = Number(responsePlan?.targetWords || 0);
+  if (targetWords > 0 && wordCount > Math.max(targetWords + 120, targetWords * 1.35)) issues.push("OVERLONG_RESPONSE");
+
   const explicitLocations = Array.isArray(resolved.explicitLocations) ? resolved.explicitLocations : [];
   const previousDestination = String(resolved.previousDestination || memory.destination || "").trim();
   const currentDestination = String(resolved.destination || resolved.locations?.[0] || "").trim();
@@ -144,6 +244,17 @@ export function assessResponseQuality({ answer = "", resolved = {}, memory = {},
     && text.toLowerCase().includes(previousDestination.toLowerCase())
   ) {
     issues.push("STALE_DESTINATION");
+  }
+  if (explicitLocations.length > 1) {
+    const omitted = explicitLocations.filter((location) => !text.toLowerCase().includes(String(location).toLowerCase()));
+    if (omitted.length) issues.push("MULTI_DESTINATION_LOSS");
+  }
+
+  if (responsePlan?.omitRepeatedSafety && headings.some((heading) => /\b(safety|advisory|current context)\b/i.test(heading))) {
+    issues.push("REPEATED_SAFETY_CONTEXT");
+  }
+  if (evidence?.missingRequired?.length && !/\b(could not verify|couldn.t verify|unable to verify|confirm with|official)\b/i.test(text)) {
+    issues.push("EVIDENCE_GAP_NOT_DISCLOSED");
   }
 
   const asksForRoute = resolved.intent?.type === "route_planning";
@@ -197,7 +308,11 @@ export function assessResponseQuality({ answer = "", resolved = {}, memory = {},
     }
   }
   const requestedDays = String(message).match(/\b(\d{1,2})\s*(?:day|days)\b/i)?.[1];
-  if (requestedDays && Number(requestedDays) > 1 && !new RegExp(`\\bday\\s*${requestedDays}\\b`, "i").test(text)) {
+  const durationAcknowledged = requestedDays && new RegExp(
+    `(?:\\bday\\s*${requestedDays}\\b|\\b${requestedDays}[-\\s]?days?\\b)`,
+    "i",
+  ).test(text);
+  if (requestedDays && Number(requestedDays) > 1 && !durationAcknowledged) {
     issues.push("TRIP_DURATION_MISSING");
   }
 
@@ -216,8 +331,14 @@ export function qualityGateNode(state) {
       resolved: state.resolved,
       memory: state.memory,
       message: state.message,
+      responsePlan: state.responsePlan,
+      evidence: state.evidence,
     }),
   }));
+}
+
+export function routeAfterQualityGate(state) {
+  return state.quality?.passed ? "finalize" : "repair";
 }
 
 export function repairResponseNode(state) {
@@ -242,6 +363,8 @@ export function repairResponseNode(state) {
         resolved: state.resolved,
         memory: state.memory,
         message: state.message,
+        responsePlan: state.responsePlan,
+        evidence: state.evidence,
       }),
       repairCount: state.repairCount + 1,
     };
@@ -252,7 +375,7 @@ export function finalizeAuthoritativeNode(state) {
   return {
     result: {
       schemaVersion: 2,
-      graphVersion: "travel-orchestrator-v2",
+      graphVersion: state.graphVersion || (state.supervisor ? "travel-supervisor-v3" : "travel-orchestrator-v2"),
       mode: "authoritative",
       resolved: state.resolved,
       planner: state.planner,
@@ -263,6 +386,11 @@ export function finalizeAuthoritativeNode(state) {
       verificationResult: state.verificationResult,
       quality: state.quality,
       repairCount: state.repairCount,
+      guardrail: state.guardrail,
+      supervisor: state.supervisor,
+      specialistResults: state.specialistResults,
+      evidence: state.evidence,
+      responsePlan: state.responsePlan,
     },
   };
 }

@@ -1,39 +1,39 @@
-import { ChatGroq } from "@langchain/groq";
 import { z } from "zod";
 import { runWithoutAutomaticTracing } from "../monitoring/atlasTracing.js";
+import { invokeStructuredGroq } from "../../services/groqModelService.js";
 
 const ResponseSectionSchema = z.object({
   heading: z.string().min(2).max(80),
-  paragraph: z.string().max(900).default(""),
-  bullets: z.array(z.string().min(2).max(500)).max(7).default([]),
+  paragraph: z.string().max(900),
+  bullets: z.array(z.string().min(2).max(500)).max(7),
 });
 
 const AtlasResponseSchema = z.object({
   title: z.string().min(2).max(100),
   summary: z.string().min(2).max(900),
   sections: z.array(ResponseSectionSchema).min(1).max(7),
-  nextStep: z.string().max(350).default(""),
+  nextStep: z.string().max(350),
 });
 
 const ItineraryEntrySchema = z.object({
   name: z.string().min(2).max(180),
-  reason: z.string().max(350).default(""),
+  reason: z.string().max(350),
 });
 
 const ItineraryDaySchema = z.object({
   day: z.number().int().min(1).max(7),
   title: z.string().min(2).max(80),
   areaLogic: z.string().min(2).max(500),
-  stops: z.array(ItineraryEntrySchema).max(4).default([]),
-  food: z.array(ItineraryEntrySchema).max(2).default([]),
-  practicalNote: z.string().max(300).default(""),
+  stops: z.array(ItineraryEntrySchema).max(4),
+  food: z.array(ItineraryEntrySchema).max(2),
+  practicalNote: z.string().max(300),
 });
 
 const GroundedItinerarySchema = z.object({
   title: z.string().min(2).max(100),
   summary: z.string().min(2).max(700),
   days: z.array(ItineraryDaySchema).min(1).max(7),
-  nextStep: z.string().max(300).default(""),
+  nextStep: z.string().max(300),
 });
 
 function normalizeLine(value = "") {
@@ -381,19 +381,6 @@ export async function generateGroundedItinerary({
       : null,
   }));
   const allowedNames = new Set(compactEvidence.map((item) => normalizedName(item.name)));
-  const model = new ChatGroq({
-    apiKey: process.env.GROQ_API_KEY,
-    model: process.env.GROQ_RESPONSE_MODEL || process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
-    temperature: 0.1,
-    maxTokens: 1400,
-    maxRetries: 0,
-    timeout: 30000,
-    callbacks: [],
-  });
-  const structuredModel = model.withStructuredOutput(
-    GroundedItinerarySchema,
-    { name: "atlas_grounded_itinerary", method: "functionCalling" },
-  );
   const prompt = `Build the concise itinerary the user requested using only the evidence list.
 - Use exactly ${requestedDays || "the appropriate number of"} day sections.
 - Preserve every stated preference, dietary need, pace and transport constraint.
@@ -409,8 +396,12 @@ export async function generateGroundedItinerary({
 Evidence:
 ${JSON.stringify(compactEvidence)}`;
 
-  const response = await runWithoutAutomaticTracing(() => structuredModel.invoke(
-    [
+  const response = await runWithoutAutomaticTracing(() => invokeStructuredGroq({
+    role: "response",
+    operation: "grounded_itinerary",
+    schema: GroundedItinerarySchema,
+    schemaName: "atlas_grounded_itinerary",
+    messages: [
       { role: "system", content: prompt },
       ...recentMessages.slice(-4).map((item) => ({
         role: item.role === "assistant" ? "assistant" : "user",
@@ -418,13 +409,16 @@ ${JSON.stringify(compactEvidence)}`;
       })),
       { role: "user", content: String(userMessage || "").slice(0, 3000) },
     ],
-    {
-      signal,
+    signal,
+    temperature: 0.1,
+    maxTokens: 1400,
+    timeout: 30000,
+    invokeOptions: {
       callbacks: [],
       tags: ["atlas", "itinerary", "langchain"],
       metadata: { operation: "grounded_itinerary", graphVersion: "travel-orchestrator-v2" },
     },
-  ));
+  }));
 
   // Do not trust model-selected names. Filter every entry against the exact
   // request-scoped evidence set before user-visible rendering.
@@ -449,19 +443,6 @@ export async function generateStructuredAtlasResponse({
 } = {}) {
   if (!langChainResponseEnabled()) return null;
 
-  const model = new ChatGroq({
-    apiKey: process.env.GROQ_API_KEY,
-    model: process.env.GROQ_RESPONSE_MODEL || process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
-    temperature: 0.2,
-    maxTokens: 1200,
-    maxRetries: 0,
-    timeout: 30000,
-    callbacks: [],
-  });
-  const structuredModel = model.withStructuredOutput(
-    AtlasResponseSchema,
-    { name: "atlas_travel_response", method: "functionCalling" },
-  );
   const allowedNames = [...new Set(allowedPlaceNames.map(normalizeLine).filter(Boolean))].slice(0, 40);
   const evidenceRules = allowedNames.length
     ? `The only named venues, properties, restaurants or attractions you may mention are:\n${allowedNames.map((name) => `- ${name}`).join("\n")}\nDo not add any other named place. If this list is too short, use an unnamed category such as "a nearby temple" instead.`
@@ -478,12 +459,17 @@ export async function generateStructuredAtlasResponse({
 - Preserve legally required attribution and source links present in the evidence.
 - If evidence is incomplete, state the practical limitation naturally as ATLAS and give the safest useful next action.
 - Do not add a generic packing, safety or customs section unless the user asked for it or it materially changes the trip.
+- For history or geography, avoid exact founding dates and precise historical claims unless the supplied evidence supports them; prefer careful century- or era-level wording.
 - Group an itinerary geographically only when the supplied address or evidence supports that grouping. Never invent opening hours, admission prices, awards, historical labels or dietary suitability.
 
 ${evidenceRules}`;
 
-  const response = await runWithoutAutomaticTracing(() => structuredModel.invoke(
-    [
+  const response = await runWithoutAutomaticTracing(() => invokeStructuredGroq({
+    role: "response",
+    operation: "response_composition",
+    schema: AtlasResponseSchema,
+    schemaName: "atlas_travel_response",
+    messages: [
       { role: "system", content: `${String(systemPrompt || "")}\n\n${formattingRules}` },
       ...(toolContext ? [{ role: "system", content: String(toolContext).slice(0, 7000) }] : []),
       ...recentMessages.slice(-6).map((item) => ({
@@ -492,13 +478,16 @@ ${evidenceRules}`;
       })),
       { role: "user", content: String(userMessage || "").slice(0, 3000) },
     ],
-    {
-      signal,
+    signal,
+    temperature: 0.2,
+    maxTokens: 1200,
+    timeout: 30000,
+    invokeOptions: {
       callbacks: [],
       tags: ["atlas", "response", "langchain"],
       metadata: { operation: "response_composition", graphVersion: "travel-orchestrator-v2" },
     },
-  ));
+  }));
 
   return renderStructuredAtlasResponse(response);
 }

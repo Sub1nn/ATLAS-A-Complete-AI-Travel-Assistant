@@ -215,11 +215,21 @@ export const documentAPI = {
 
 export const chatAPI = {
   async sendMessage({ message, conversationId, documentIds = [], clientRequestId, signal }) {
+    const timeZone = window.Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    const localDateParts = new window.Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date());
+    const part = (type) => localDateParts.find((item) => item.type === type)?.value || "";
     const { data } = await apiClient.post("/chat", {
       clientRequestId,
       message,
       conversationId,
       documentIds,
+      clientLocalDate: `${part("year")}-${part("month")}-${part("day")}`,
+      clientTimeZone: timeZone,
     }, { signal, timeout: CHAT_TIMEOUT_MS });
     return data;
   },

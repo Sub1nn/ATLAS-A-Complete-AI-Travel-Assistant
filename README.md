@@ -41,7 +41,7 @@ ATLAS is more than a prompt wrapped in a chat interface. It resolves travel inte
 
 | Capability | What it provides |
 | --- | --- |
-| Agentic planning | LangGraph coordinates context resolution, planning, tool selection, composition, verification and one bounded repair pass |
+| Agentic planning | A conditional LangGraph supervisor applies guardrails, selects only relevant specialists, reconciles their evidence and runs a bounded quality-repair loop |
 | Live travel intelligence | Places, routes, geocoding, local time, weather, news and local discovery are gathered only when relevant |
 | Contextual conversations | Destinations, origin, dates, pace, accessibility, budget and preferences survive appropriate follow-ups without leaking stale locations |
 | Document-aware chat | PDF, DOCX and TXT content is extracted in a constrained worker and retrieved through user-isolated Pinecone namespaces |
@@ -58,19 +58,27 @@ flowchart TB
     Web --> API[Express API]
 
     API --> Auth[Auth, sessions, CSRF<br>privacy controls]
-    API --> Graph[Authoritative LangGraph workflow]
+    API --> Graph[LangGraph travel supervisor v3]
 
-    Graph --> Context[Context and memory resolution]
-    Context --> Planner[Structured LangChain planner]
-    Planner --> Tools[Bounded specialist tools]
-    Tools --> Compose[Evidence-grounded composition]
-    Compose --> Verify[Quality verification<br>and one repair pass]
+    Graph --> Context[Deterministic context resolution<br>and optional structured planner]
+    Context --> Guardrails{Input guardrails}
+    Guardrails -->|needs clarification| Short[Safe short-circuit response]
+    Guardrails -->|allowed| Supervisor[Intent-aware supervisor]
+    Supervisor --> Specialists[Bounded specialist plan]
+    Specialists --> Evidence[Evidence reconciliation]
+    Evidence --> ResponsePlan[Intent-specific response contract]
+    ResponsePlan --> Compose[Grounded composition]
+    Compose --> Verify[Claim verification]
+    Verify --> Quality{Quality gate}
+    Quality -->|pass| Final[Final response]
+    Quality -->|one repair| Repair[Evidence-preserving repair]
+    Repair --> Final
 
-    Tools --> Google[Google Maps Platform]
-    Tools --> Weather[OpenWeather]
-    Tools --> News[NewsAPI]
-    Tools --> Yelp[Yelp]
-    Planner --> Groq[Groq]
+    Specialists --> Google[Google Maps Platform]
+    Specialists --> Weather[OpenWeather]
+    Specialists --> News[NewsAPI]
+    Specialists --> Yelp[Yelp]
+    Context --> Groq[Groq role-routed planning and composition]
 
     API --> Mongo[(MongoDB replica set)]
     API --> Redis[(Redis)]
@@ -87,13 +95,30 @@ flowchart TB
 
 ### Response workflow
 
-1. Resolve the current intent, destination changes and inherited constraints.
-2. Build a structured plan and select only the tools needed for that request.
-3. Execute provider calls with timeouts, budgets and bounded concurrency.
-4. Compose an answer from retrieved evidence using intent-specific layouts.
-5. Verify location relevance, required constraints, unsupported claims and response quality.
+1. Resolve intent, destinations, local dates and only the constraints that still belong to the current trip.
+2. Apply guardrails before provider spend, including missing-route clarification, prompt-exfiltration blocking and comparison-only payment boundaries.
+3. Let the supervisor choose focused specialists for stays, dining, experiences, mobility, weather, safety, culture, logistics or documents.
+4. Fan out destination-scoped work when a comparison or multi-city request needs independent evidence.
+5. Execute provider calls with timeouts, budgets, circuit breakers and bounded concurrency.
+6. Reconcile verified, limited and missing evidence before composition.
+7. Render an intent-specific response contract, then verify unsupported claims and required constraints.
+8. Run one evidence-preserving repair pass only when the quality gate finds a concrete defect.
 
 Exact live facts such as route duration, weather observations and provider-backed place details remain deterministic. Language-model output is schema-controlled and cannot silently replace grounded provider data.
+
+### Model strategy
+
+ATLAS assigns models by responsibility instead of sending every task to one large model:
+
+| Role | Default model | Purpose |
+| --- | --- | --- |
+| Planner | `openai/gpt-oss-20b` | Fast intent, date, destination and specialist selection |
+| Response composer | `openai/gpt-oss-120b` | Stronger synthesis, instruction following and polished final structure |
+| Compatibility fallback | `llama-3.3-70b-versatile` | One bounded fallback when the primary model is temporarily unavailable |
+
+LangChain planner and response-composer calls use Groq native strict JSON Schema output with GPT-OSS. Authentication failures are never retried against another model. Transient quota, availability and structured-output failures may attempt the single configured fallback, after which ATLAS returns its deterministic grounded response instead of inventing content.
+
+The routing is configurable with `GROQ_PLANNER_MODEL`, `GROQ_RESPONSE_MODEL`, `GROQ_FALLBACK_MODEL` and `GROQ_MODEL_FALLBACK_ENABLED`. Model changes should pass the workflow evaluation suite before rollout.
 
 ## Technology stack
 
@@ -112,7 +137,8 @@ Exact live facts such as route duration, weather observations and provider-backe
 ### Context and memory
 
 - Short-term conversation state is stored with each MongoDB conversation.
-- LangGraph checkpoints use deterministic, pseudonymous thread identifiers.
+- The authoritative graph keeps provider results, document excerpts and guest inputs request-scoped instead of duplicating them in checkpoints.
+- The optional shadow-evaluation graph uses deterministic pseudonymous thread identifiers and expiring checkpoints.
 - Destination switches clear stale place and activity context.
 - Same-trip follow-ups retain relevant dates, origins, accessibility needs, exclusions and travel mode.
 - Conversation reset, retention and deletion also remove related agent checkpoints.
@@ -262,6 +288,11 @@ Important rules:
 - Redis is required by the production Compose services.
 - Mailtrap Sandbox is staging-only; production email delivery uses Resend with a verified domain.
 - LangSmith tracing is optional and should use low sampling with the repository’s sanitized trace payloads.
+- **ATLAS_AGENT_GRAPH_ENABLED** enables authoritative graph execution.
+- **ATLAS_AGENT_HYBRID_ENABLED** selects the supervisor/specialist v3 graph.
+- **ATLAS_AGENT_CANARY_PERCENT** provides deterministic user-level rollout from 0 to 100.
+- **ATLAS_AGENT_FALLBACK_ENABLED** keeps the established response path available during rollout failures.
+- **ATLAS_AGENT_MAX_SPECIALISTS** and **CHAT_MAX_MULTI_DESTINATION_TOOL_CALLS** bound per-request fan-out and cost.
 
 ## API overview
 

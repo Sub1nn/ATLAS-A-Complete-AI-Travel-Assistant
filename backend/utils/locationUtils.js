@@ -72,6 +72,28 @@ function cacheKey(location = "") {
   return stripDiacritics(location).toLowerCase();
 }
 
+export function isPlausibleLocationResult(requestedLocation = "", result = {}) {
+  const requested = stripDiacritics(requestedLocation)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+  const returned = stripDiacritics([
+    result.city,
+    result.region,
+    result.country,
+    result.formatted_address,
+  ].filter(Boolean).join(" "))
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+  if (!requested || !returned) return false;
+  if (returned.includes(requested)) return true;
+
+  const requestedTokens = requested.split(/\s+/).filter((token) => token.length > 1);
+  const returnedTokens = new Set(returned.split(/\s+/));
+  return requestedTokens.length > 0 && requestedTokens.every((token) => returnedTokens.has(token));
+}
+
 function isAmbiguousCountryOrRegion(location = "") {
   const key = cacheKey(location);
   // Do not block clearly city-specific input such as "Palestine, Texas".
@@ -116,9 +138,9 @@ export function sanitizeLocationQuery(location = "") {
 
   // Remove trailing request words, dates, and explanations after the likely place name.
   text = text
-    .replace(/\b(?:today|tomorrow|tonight|this weekend|next weekend|this week|next week|right now|currently)\b.*$/i, "")
-    .replace(/\b(?:with|for|about|because|so|and|but|please|pls|just)\b.*$/i, "")
-    .replace(/\b(?:weather|forecast|hourly|temperature|rain|hotels?|restaurants?|prices?)\b.*$/i, "")
+    .replace(/\s+(?:today|tomorrow|tonight|this weekend|next weekend|this week|next week|right now|currently)\b.*$/iu, "")
+    .replace(/\s+(?:with|for|about|because|so|and|but|please|pls|just)\b.*$/iu, "")
+    .replace(/\s+(?:weather|forecast|hourly|temperature|rain|hotels?|restaurants?|prices?)\b.*$/iu, "")
     .replace(/^[\s,.;:!?()\[\]{}]+|[\s,.;:!?()\[\]{}]+$/g, "")
     .trim();
 
@@ -194,7 +216,7 @@ async function geocodeWithGoogle(query, signal, reserveProviderCall) {
   const key = getGoogleKey();
   if (!key) return null;
 
-  const cacheKey = buildCacheKey("geocode:google", { query });
+  const cacheKey = buildCacheKey("geocode:google:v2", { query });
   const { value } = await getOrSetCache(cacheKey, Number(process.env.CACHE_GEOCODE_TTL_SECONDS || 7 * 24 * 60 * 60), async () => {
     const budget = await reserveProviderCall?.("google_geocode");
     if (budget?.allowed === false) throw Object.assign(new Error("Daily external-provider call budget reached"), { code: "PROVIDER_BUDGET_EXCEEDED", status: 429 });
@@ -223,7 +245,7 @@ async function geocodeWithOpenWeather(query, signal, reserveProviderCall) {
   const key = getOpenWeatherKey();
   if (!key) return null;
 
-  const cacheKey = buildCacheKey("geocode:openweather", { query });
+  const cacheKey = buildCacheKey("geocode:openweather:v2", { query });
   const { value } = await getOrSetCache(cacheKey, Number(process.env.CACHE_GEOCODE_TTL_SECONDS || 7 * 24 * 60 * 60), async () => {
     const budget = await reserveProviderCall?.("openweather_geocode");
     if (budget?.allowed === false) throw Object.assign(new Error("Daily external-provider call budget reached"), { code: "PROVIDER_BUDGET_EXCEEDED", status: 429 });
@@ -258,10 +280,15 @@ export async function getLocationData(location, { signal, reserveProviderCall } 
   for (const query of variants) {
     try {
       const result = await geocodeWithGoogle(query, signal, reserveProviderCall);
-      if (Number.isFinite(Number(result?.lat)) && Number.isFinite(Number(result?.lon))) {
+      if (
+        Number.isFinite(Number(result?.lat))
+        && Number.isFinite(Number(result?.lon))
+        && isPlausibleLocationResult(cleaned, result)
+      ) {
         storeMemoryLocation(key, result);
         return result;
       }
+      if (result) errors.push(`Google: returned ${result.formatted_address || result.city || "a different place"} for ${cleaned}`);
     } catch (error) {
       if (signal?.aborted || ["ERR_CANCELED", "PROVIDER_BUDGET_EXCEEDED"].includes(error?.code)) throw error;
       errors.push(`Google: ${error.message}`);
@@ -271,10 +298,15 @@ export async function getLocationData(location, { signal, reserveProviderCall } 
   for (const query of variants) {
     try {
       const result = await geocodeWithOpenWeather(query, signal, reserveProviderCall);
-      if (Number.isFinite(Number(result?.lat)) && Number.isFinite(Number(result?.lon))) {
+      if (
+        Number.isFinite(Number(result?.lat))
+        && Number.isFinite(Number(result?.lon))
+        && isPlausibleLocationResult(cleaned, result)
+      ) {
         storeMemoryLocation(key, result);
         return result;
       }
+      if (result) errors.push(`OpenWeather: returned ${result.formatted_address || result.city || "a different place"} for ${cleaned}`);
     } catch (error) {
       if (signal?.aborted || ["ERR_CANCELED", "PROVIDER_BUDGET_EXCEEDED"].includes(error?.code)) throw error;
       errors.push(`OpenWeather: ${error.message}`);

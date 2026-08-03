@@ -17,6 +17,10 @@ export const AtlasState = Annotation.Root({
     reducer: (_current, next) => next,
     default: () => [],
   }),
+  temporalContext: Annotation({
+    reducer: (_current, next) => next,
+    default: () => ({}),
+  }),
   planner: Annotation({
     reducer: (_current, next) => next,
     default: () => null,

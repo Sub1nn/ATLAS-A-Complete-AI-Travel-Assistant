@@ -132,6 +132,8 @@ const tools = [
           departure_time: { type: "string", description: "Requested local departure time in HH:mm" },
           target_date: { type: "string", description: "Requested departure date in YYYY-MM-DD" },
           date_label: { type: "string", description: "Original human-readable date phrase" },
+          minimal_walking: { type: "boolean", description: "Prefer the verified option with the least walking" },
+          minimal_transfers: { type: "boolean", description: "Prefer the verified option with the fewest transfers" },
         },
         required: ["origin", "destination"],
       },
@@ -524,6 +526,19 @@ function placeSearchText(place = {}) {
     placeAddress(place),
     ...(place.types || []),
   ].filter(Boolean).join(" "));
+}
+
+function strictRequestedPlaceKind(places = [], interestType = "") {
+  const text = normalize(interestType);
+  let pattern = null;
+  if (/\bviewpoints?\b/.test(text)) pattern = /\b(view|viewpoint|lookout|observation|observatory|mirador|belvedere|panorama|panoramic|paseo|scenic)\b/;
+  else if (/\btemples?\b/.test(text)) pattern = /\b(temple|shrine|monastery|pagoda)\b/;
+  else if (/\bgardens?\b/.test(text)) pattern = /\b(garden|botanical|arboretum)\b/;
+  if (!pattern) return null;
+  return places.filter((place) => pattern.test(normalize([
+    placeName(place),
+    placeAddress(place),
+  ].filter(Boolean).join(" "))));
 }
 
 const SPORTS_ACTIVITY_PATTERNS = {
@@ -1033,6 +1048,13 @@ function activityPlan(interestType = "attractions", locationName = "", plannerQu
     add({ mode: "text", query: /\bin\s+/i.test(query) ? query : `${query} in ${locationName}`, radius: 16000 });
   }
 
+  if (/\bviewpoints?\b/.test(text)) {
+    add({ mode: "text", query: `scenic viewpoints in ${locationName}` });
+    add({ mode: "text", query: `observation decks in ${locationName}` });
+    add({ mode: "text", query: `mirador panoramic views in ${locationName}` });
+    return plan;
+  }
+
   if (/\b(accessible|accessibility|wheelchair|senior|minimal walking|limited walking)\b/.test(text)
     || (/\b(indoor|rain)\b/.test(text) && /\b(museum|library|cultural|attraction)\b/.test(text))) {
     add({ mode: "text", query: `accessible indoor museums in ${locationName}` });
@@ -1503,7 +1525,22 @@ async function restaurantTool({ lat, lon, location_name, cuisine_preference = "l
   }
   if (/budget|cheap/.test(budget)) restaurants = restaurants.filter((r) => !r.price_level || r.price_level <= 2);
   if (/premium|luxury/.test(budget)) restaurants = restaurants.filter((r) => !r.price_level || r.price_level >= 2);
-  restaurants = rankPlaces(restaurants).slice(0, 8);
+  restaurants = rankPlaces(restaurants);
+  if (/\b(vegetarian|vegan)\b/.test(cuisineText)) {
+    restaurants = restaurants
+      .map((place, index) => ({
+        place,
+        index,
+        dietaryScore: /\b(vegetarian|vegan|plant based|plant-based)\b/i.test(placeName(place))
+          ? 2
+          : place.servesVegetarianFood === true
+          ? 1
+          : 0,
+      }))
+      .sort((a, b) => b.dietaryScore - a.dietaryScore || a.index - b.index)
+      .map(({ place }) => place);
+  }
+  restaurants = restaurants.slice(0, 8);
 
   return {
     location: location_name,
@@ -1625,18 +1662,22 @@ async function attractionsTool({ lat, lon, location_name, interest_type = "attra
   const normalizedInterest = normalize(interest_type);
   const isSportsRequest = /tennis|court|sports|badminton|football|soccer|basketball|volleyball|swimming|gym|fitness|padel|pickleball|squash|golf|climbing|bowling|skating|running|sauna/.test(normalizedInterest);
   const needsIndoorEvidence = /\bindoor\b/.test(normalizedInterest);
-  const needsCompactArea = /\b(minimal walking|limited walking|compact)\b/.test(normalizedInterest);
   const localCandidates = spatiallyRelevantPlaces(raw, latitude, longitude, isSportsRequest ? 30 : 20);
-  const compactCandidates = needsCompactArea
-    ? spatiallyRelevantPlaces(localCandidates, latitude, longitude, 1.75)
-    : localCandidates;
-  const spatialPool = compactCandidates.length ? compactCandidates : localCandidates;
+  // A request for less walking concerns the route to and within each venue. It
+  // must not be approximated by distance from the geocoder's city-centre point,
+  // which can hide suitable places in another neighbourhood.
+  const spatialPool = localCandidates;
   const indoorCandidates = needsIndoorEvidence
     ? spatialPool.filter((place) => /\b(museum|library|art gallery|art_gallery|shopping mall|shopping_mall)\b/.test(placeSearchText(place)))
     : [];
-  const rankingPool = indoorCandidates.length ? indoorCandidates : spatialPool;
+  const strictKindCandidates = strictRequestedPlaceKind(spatialPool, interest_type);
+  const rankingPool = strictKindCandidates !== null
+    ? strictKindCandidates
+    : indoorCandidates.length
+    ? indoorCandidates
+    : spatialPool;
   const rankedPlaces = isSportsRequest ? rankSportsPlaces(rankingPool, interest_type) : rankAttractionPlaces(rankingPool);
-  if (!rankedPlaces.length && isSportsRequest) {
+  if (!rankedPlaces.length && (isSportsRequest || strictKindCandidates !== null)) {
     const suggestions = planner_map_searches.length ? planner_map_searches : activitySpecificSuggestions(interest_type, location_name);
     return {
       ...noPlacesResult(location_name, activityKeyFromText(interest_type) || "sports venue", suggestions),
@@ -1721,9 +1762,18 @@ function compactRouteLeg(route = {}, origin = "", destination = "") {
   const walkingMeters = (leg.steps || [])
     .filter((step) => step.travelMode === "WALK")
     .reduce((sum, step) => sum + Number(step.distanceMeters || 0), 0);
+  const transitSteps = steps.filter((step) => step.is_transit);
+  const transitLines = [...new Set(transitSteps.map((step) => step.transit_line).filter(Boolean))];
+  const firstTransitDetails = (leg.steps || []).find((step) => step.transitDetails)?.transitDetails || {};
+  const lastTransitDetails = [...(leg.steps || [])].reverse().find((step) => step.transitDetails)?.transitDetails || {};
+  const fallbackSummary = transitLines.length === 1
+    ? `${transitSteps.length === 1 ? "Direct " : ""}${transitLines[0]} service`
+    : transitLines.length > 1
+    ? `${transitLines.join(" → ")} services`
+    : "Suggested route";
 
   return {
-    summary: route.description || "Suggested route",
+    summary: route.description || fallbackSummary,
     distance: distanceText(route.distanceMeters),
     duration: durationText(route.duration),
     start_address: origin,
@@ -1732,6 +1782,10 @@ function compactRouteLeg(route = {}, origin = "", destination = "") {
     transit_step_count: transitStepCount,
     transfer_count: Math.max(0, transitStepCount - 1),
     walking_distance: walkingMeters ? distanceText(walkingMeters) : "",
+    walking_meters: walkingMeters,
+    duration_seconds: Number.parseFloat(String(route.duration || "").replace(/s$/, "")) || null,
+    departure_time: localizedTransitTime(firstTransitDetails.localizedValues?.departureTime),
+    arrival_time: localizedTransitTime(lastTransitDetails.localizedValues?.arrivalTime),
   };
 }
 
@@ -1766,8 +1820,14 @@ function compactLegacyRoute(route = {}, origin = "", destination = "") {
   const walkingMeters = (leg.steps || [])
     .filter((step) => step.travel_mode === "WALKING")
     .reduce((sum, step) => sum + Number(step.distance?.value || 0), 0);
+  const transitLines = [...new Set(steps.filter((step) => step.is_transit).map((step) => step.transit_line).filter(Boolean))];
+  const fallbackSummary = transitLines.length === 1
+    ? `${transitStepCount === 1 ? "Direct " : ""}${transitLines[0]} service`
+    : transitLines.length > 1
+    ? `${transitLines.join(" → ")} services`
+    : "Suggested public-transport route";
   return {
-    summary: route.summary || "Suggested public-transport route",
+    summary: route.summary || fallbackSummary,
     distance: leg.distance?.text || "distance unavailable",
     duration: leg.duration?.text || "duration unavailable",
     start_address: leg.start_address || origin,
@@ -1776,9 +1836,11 @@ function compactLegacyRoute(route = {}, origin = "", destination = "") {
     arrival_time: leg.arrival_time?.text || "",
     fare: route.fare?.text || "",
     walking_distance: walkingMeters ? distanceText(walkingMeters) : "",
+    walking_meters: walkingMeters,
     transfer_count: Math.max(0, transitStepCount - 1),
     steps: steps.slice(0, 12),
     transit_step_count: transitStepCount,
+    duration_seconds: Number(leg.duration?.value || 0) || null,
   };
 }
 
@@ -1827,6 +1889,8 @@ async function routeTool({
   departure_time = "",
   target_date = "",
   date_label = "",
+  minimal_walking = false,
+  minimal_transfers = false,
 }) {
   const from = String(origin || "").trim();
   const to = String(destination || "").trim();
@@ -1903,11 +1967,37 @@ async function routeTool({
 
     let routes = (data.routes || []).slice(0, 3).map((route) => compactRouteLeg(route, from, to));
     let routeSource = "google_routes_api_v2";
+    if (travelMode === "transit" && (minimal_walking || minimal_transfers)) {
+      try {
+        const alternatives = await legacyDirectionsRoute({ from, to, travelMode, departureEpoch, key });
+        routes = [...routes, ...alternatives.routes];
+        if (alternatives.routes.length) routeSource = "google_routes_api_v2_and_directions_alternatives";
+      } catch (preferenceError) {
+        logger.debug("Preferred transit alternatives unavailable", { reason: preferenceError.message });
+      }
+    }
     if (!routes.length && travelMode === "transit") {
       const legacy = await legacyDirectionsRoute({ from, to, travelMode, departureEpoch, key });
       routes = legacy.routes;
       if (routes.length) routeSource = "google_directions_api_legacy_fallback";
     }
+    const uniqueRoutes = [];
+    const seenRoutes = new Set();
+    for (const item of routes) {
+      const key = `${item.departure_time}|${item.arrival_time}|${item.transit_step_count}|${item.walking_meters}|${item.duration_seconds}`;
+      if (seenRoutes.has(key)) continue;
+      seenRoutes.add(key);
+      uniqueRoutes.push(item);
+    }
+    routes = uniqueRoutes.sort((left, right) => {
+      if (minimal_walking && Number(left.walking_meters || 0) !== Number(right.walking_meters || 0)) {
+        return Number(left.walking_meters || 0) - Number(right.walking_meters || 0);
+      }
+      if (minimal_transfers && Number(left.transfer_count || 0) !== Number(right.transfer_count || 0)) {
+        return Number(left.transfer_count || 0) - Number(right.transfer_count || 0);
+      }
+      return Number(left.duration_seconds || Number.MAX_SAFE_INTEGER) - Number(right.duration_seconds || Number.MAX_SAFE_INTEGER);
+    }).slice(0, 3);
     return {
       origin: from,
       destination: to,
@@ -2113,14 +2203,17 @@ function advisoryCaution(officialAdvisory = null) {
   if (/\b(terrorism|armed conflict|military|border|security|protest|unrest|kidnapping|detention|crime|state of emergency)\b/i.test(text)) {
     return { score: 58, label: "official advisory has active safety/security warnings" };
   }
-  return { score: 30, label: "official advisory retrieved without strong alert language" };
+  return { score: 20, label: "official advisory retrieved without strong alert language" };
 }
 
 function articleCaution(articles = [], coverage = {}) {
-  const haystack = articles.map((a) => `${a.title || a.headline || ""} ${a.description || a.summary || ""}`).join(" ");
+  // Score severity from headlines. Article summaries frequently mention a war,
+  // election or market event elsewhere and can otherwise make an ordinary
+  // destination look unsafe merely because it appeared in the same paragraph.
+  const haystack = articles.map((a) => `${a.title || a.headline || ""}`).join(" ");
   let score = coverage.news_attention_level === "high" ? 72
     : coverage.news_attention_level === "elevated" ? 52
-    : coverage.news_attention_level === "limited" ? 30
+    : coverage.news_attention_level === "limited" ? 18
     : 12;
   const drivers = [];
 
@@ -2153,10 +2246,15 @@ function calculateSafetyCaution({ location = "", country = "", articles = [], of
   const advisory = advisoryCaution(officialAdvisory);
   const news = articleCaution(articles, coverage);
   const strongOfficialWarning = advisory.score >= 58;
-  const severeNewsSignal = news.score >= 72;
-  const newsScore = baseline.score <= 40 && !strongOfficialWarning && !severeNewsSignal
-    ? Math.min(news.score, 48)
-    : news.score;
+  // News is useful situational evidence, but individual headlines and media
+  // volume are too noisy to create an avoid/defer rating on their own.
+  // Severe classifications require an authoritative warning or a severe
+  // destination baseline; otherwise recent news is capped as supporting risk.
+  const newsScore = strongOfficialWarning
+    ? Math.min(news.score, 78)
+    : baseline.score <= 40
+    ? Math.min(news.score, 36)
+    : Math.min(news.score, 65);
   const score = Math.max(baseline.score, advisory.score, newsScore);
   const label = cautionLabel(score);
   const drivers = [
@@ -2470,5 +2568,6 @@ export const toolService = {
     restaurantPlan,
     activityPlan,
     spatiallyRelevantPlaces,
+    strictRequestedPlaceKind,
   },
 };

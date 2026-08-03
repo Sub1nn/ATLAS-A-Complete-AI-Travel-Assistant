@@ -17,8 +17,98 @@ import {
   renderStructuredAtlasResponse,
 } from "../agents/models/atlasResponseModel.js";
 import { chatController } from "../controllers/chatController.js";
+import {
+  GROQ_MODEL_DEFAULTS,
+  groqModelCandidates,
+  groqModelFor,
+  runWithGroqModelFallback,
+  structuredOutputOptions,
+} from "../services/groqModelService.js";
 
 process.env.NODE_ENV = "test";
+
+const GROQ_MODEL_ENV_KEYS = [
+  "GROQ_MODEL",
+  "GROQ_PLANNER_MODEL",
+  "GROQ_RESPONSE_MODEL",
+  "GROQ_FALLBACK_MODEL",
+  "GROQ_MODEL_FALLBACK_ENABLED",
+];
+
+async function withGroqModelEnvironment(overrides, callback) {
+  const previous = Object.fromEntries(GROQ_MODEL_ENV_KEYS.map((key) => [key, process.env[key]]));
+  try {
+    for (const key of GROQ_MODEL_ENV_KEYS) delete process.env[key];
+    for (const [key, value] of Object.entries(overrides || {})) process.env[key] = value;
+    return await callback();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test("Groq model routing uses a fast planner and stronger response composer", async () => {
+  await withGroqModelEnvironment({}, async () => {
+    assert.equal(groqModelFor("planner"), GROQ_MODEL_DEFAULTS.planner);
+    assert.equal(groqModelFor("response"), GROQ_MODEL_DEFAULTS.response);
+    assert.deepEqual(groqModelCandidates("response"), [
+      GROQ_MODEL_DEFAULTS.response,
+      GROQ_MODEL_DEFAULTS.fallback,
+    ]);
+    assert.equal(structuredOutputOptions(GROQ_MODEL_DEFAULTS.planner, "plan").method, "jsonSchema");
+    assert.equal(structuredOutputOptions(GROQ_MODEL_DEFAULTS.fallback, "answer").method, "functionCalling");
+  });
+});
+
+test("Groq model routing attempts one controlled fallback for retryable failures", async () => {
+  await withGroqModelEnvironment({
+    GROQ_RESPONSE_MODEL: "primary-model",
+    GROQ_FALLBACK_MODEL: "fallback-model",
+  }, async () => {
+    const attempts = [];
+    const result = await runWithGroqModelFallback({
+      role: "response",
+      operation: "test_fallback",
+      invoke: async (model) => {
+        attempts.push(model);
+        if (model === "primary-model") {
+          const error = new Error("rate limit reached");
+          error.status = 429;
+          throw error;
+        }
+        return "fallback-result";
+      },
+    });
+
+    assert.equal(result, "fallback-result");
+    assert.deepEqual(attempts, ["primary-model", "fallback-model"]);
+  });
+});
+
+test("Groq model routing never retries authentication failures", async () => {
+  await withGroqModelEnvironment({
+    GROQ_RESPONSE_MODEL: "primary-model",
+    GROQ_FALLBACK_MODEL: "fallback-model",
+  }, async () => {
+    const attempts = [];
+    await assert.rejects(
+      runWithGroqModelFallback({
+        role: "response",
+        operation: "test_auth_failure",
+        invoke: async (model) => {
+          attempts.push(model);
+          const error = new Error("invalid API key");
+          error.status = 401;
+          throw error;
+        },
+      }),
+      /invalid API key/,
+    );
+    assert.deepEqual(attempts, ["primary-model"]);
+  });
+});
 
 test("agent thread IDs are deterministic and do not expose database IDs", () => {
   const first = atlasThreadId("user-123", "conversation-456");
@@ -110,6 +200,7 @@ test("agent environment validation fails clearly for unsafe tracing configuratio
     key: process.env.LANGSMITH_API_KEY,
     rate: process.env.LANGSMITH_TRACING_SAMPLING_RATE,
     ttl: process.env.ATLAS_AGENT_CHECKPOINT_TTL_SECONDS,
+    modelFallback: process.env.GROQ_MODEL_FALLBACK_ENABLED,
   };
 
   try {
@@ -137,6 +228,9 @@ test("agent environment validation fails clearly for unsafe tracing configuratio
 
     process.env.ATLAS_AGENT_CHECKPOINT_TTL_SECONDS = "3600";
     assert.doesNotThrow(() => assertAgentEnvironment());
+
+    process.env.GROQ_MODEL_FALLBACK_ENABLED = "sometimes";
+    assert.throws(() => assertAgentEnvironment(), /must be true or false/);
   } finally {
     for (const [key, value] of Object.entries({
       ATLAS_AGENT_GRAPH_ENABLED: previous.graph,
@@ -147,6 +241,7 @@ test("agent environment validation fails clearly for unsafe tracing configuratio
       LANGSMITH_API_KEY: previous.key,
       LANGSMITH_TRACING_SAMPLING_RATE: previous.rate,
       ATLAS_AGENT_CHECKPOINT_TTL_SECONDS: previous.ttl,
+      GROQ_MODEL_FALLBACK_ENABLED: previous.modelFallback,
     })) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -202,6 +297,30 @@ test("planner cannot expand an explicit city into an intent phrase", () => {
   });
   assert.equal(planned.destination, "Osaka");
   assert.deepEqual(planned.locations, ["Osaka"]);
+});
+
+test("planner cannot downgrade an accessible multi-day country revision to hotel search", () => {
+  const base = contextService.resolveContext(
+    "Make it accessible for my 70-year-old mother, keep walking minimal, and avoid changing hotels more than twice.",
+    {
+      destination: "Japan",
+      locations: ["Japan"],
+      lastIntent: "destination_planning",
+      lastTopic: "8-day Japan base plan",
+      constraints: { dayCount: 8, dietary: ["vegetarian"] },
+    },
+    [],
+  );
+  const planned = travelPlannerService.applyTravelPlan(base, {
+    intent: "accommodation_search",
+    confidence: 0.98,
+    destination: "Japan",
+    location_scope: "country",
+  });
+
+  assert.equal(planned.intent.type, "destination_planning");
+  assert.equal(planned.requestProfile.constraints.dayCount, 8);
+  assert.equal(planned.requestProfile.constraints.accessible, true);
 });
 
 test("authoritative graph owns planning, tool routing, composition and verification", async () => {
@@ -536,6 +655,21 @@ test("itinerary map actions are limited to places named in the final answer", ()
   assert.deepEqual(filtered.map((item) => item.name), ["Selected Temple"]);
 });
 
+test("named verified places take priority over generic map searches", () => {
+  const filtered = chatController._test.filterLiveActionsForAnswer(
+    [
+      { name: "Things To Do", url: "https://maps.example/search", is_search: true, verified: false },
+      { name: "Mirador Barón", url: "https://maps.example/baron", verified: true },
+      { name: "Mirador Marina Mercante", url: "https://maps.example/marina", verified: true },
+    ],
+    "Things to do\n- Mirador Barón\n- Mirador Marina Mercante",
+    { intent: { type: "destination_planning" }, requestProfile: { constraints: { maxStops: 2 } } },
+    "Give me exactly two viewpoints.",
+  );
+
+  assert.deepEqual(filtered.map((item) => item.name), ["Mirador Barón", "Mirador Marina Mercante"]);
+});
+
 test("complex itinerary constraints survive a relevant follow-up and exclusions remove stale activities", () => {
   const first = contextService.resolveContext(
     "Plan an accessible day in Helsinki tomorrow for me and my 72-year-old mother. Start after 10, keep walking minimal, include vegetarian lunch, and give an indoor alternative if it rains.",
@@ -734,6 +868,35 @@ test("customs requests use travel roles and never inherit itinerary constraints 
   assert.doesNotMatch(answer, /Tallinn|sauna/);
 });
 
+test("Japan customs guidance addresses cheese, power-bank capacity and transit explicitly", () => {
+  const message = "I am flying from Finland to Japan via Doha with prescription medicine, cheese and a 20,000 mAh power bank. What must I declare or check?";
+  const resolved = contextService.resolveContext(message, {}, []);
+  const answer = chatController._test.composeCustomsPackingAnswer(message, resolved);
+
+  assert.deepEqual(resolved.travelRoles, { origin: "Finland", destination: "Japan", transit: ["Doha"] });
+  assert.match(answer, /cheese carried in personal baggage is exempt/i);
+  assert.match(answer, /20,000 mAh alone does not prove/i);
+  assert.match(answer, /up to 100 Wh in carry-on only/i);
+  assert.match(answer, /Transit check: Doha/i);
+  assert.match(answer, /Animal Quarantine Service FAQ/i);
+});
+
+test("Japan visa guidance uses passport nationality and destination-specific official links", () => {
+  const resolved = contextService.resolveContext(
+    "I am a Nepalese citizen living in Finland. Do I need a visa for an 8-day tourist trip to Japan?",
+    {},
+    [],
+  );
+  const answer = chatController._test.composeVisaAnswer(resolved.currentUserMessage, resolved);
+
+  assert.match(answer, /Visa check: Japan/);
+  assert.match(answer, /Nepalese ordinary passport/);
+  assert.match(answer, /plan on obtaining a visa/i);
+  assert.match(answer, /residing in Finland with a residence permit may apply there/i);
+  assert.match(answer, /mofa\.go\.jp\/j_info\/visit\/visa\/short\/novisa\.html/);
+  assert.doesNotMatch(answer, /Finland — 8-day base plan/);
+});
+
 test("route parsing removes mode and timing phrases from endpoints", () => {
   const route = contextService.extractRouteRequest(
     "How do I get from Narita Airport to Shinjuku by train tomorrow at 09:30?",
@@ -852,6 +1015,119 @@ test("activity ranking follow-ups return only the requested shortlist and omit w
   assert.doesNotMatch(answer, /Weather timing/);
 });
 
+test("natural shortlist follow-ups honor 'which two' without requiring ranking language", () => {
+  const answer = chatController._test.composeActivityAnswer(
+    {
+      intent: { type: "activity_recommendations", selectionFollowUp: true },
+      currentUserMessage: "Which two look most suitable after 18:00? Do not repeat the weather.",
+      enrichedUserMessage: "Which two look most suitable after 18:00? Do not repeat the weather.",
+      destination: "Riihimäki",
+      activityRequest: { activity: "tennis", activityLabel: "tennis" },
+      memory: { interests: ["tennis"] },
+      requestProfile: { constraints: { startTime: "18:00" } },
+    },
+    [{
+      tool: "local_experiences_and_attractions",
+      result: {
+        location: "Riihimäki, Finland",
+        recommendations: [
+          { name: "Example Sports Hall", address: "Centre", rating: 4.4 },
+          { name: "Outdoor Tennis Court", address: "Park", rating: 4.8 },
+          { name: "Community Arena", address: "North", rating: 4.1 },
+          { name: "Fourth Venue", address: "South", rating: 4.0 },
+        ],
+      },
+    }],
+  );
+
+  assert.match(answer, /Best 2 tennis options/i);
+  assert.equal((answer.match(/^\d+\. \*\*/gm) || []).length, 2);
+  assert.doesNotMatch(answer, /Weather timing/);
+  assert.match(answer, /from your starting point/);
+  assert.doesNotMatch(answer, /railway station/);
+});
+
+test("shortlist count parser supports common ranking phrases and clamps large requests", () => {
+  assert.equal(chatController._test.requestedShortlistCount("Show me the best three restaurants", 5), 3);
+  assert.equal(chatController._test.requestedShortlistCount("Compare top 4 options", 5), 4);
+  assert.equal(chatController._test.requestedShortlistCount("List ten venues", 5), 8);
+  assert.equal(chatController._test.requestedShortlistCount("Which looks best?", 5), 5);
+});
+
+test("quality repair preserves verified evidence and explicit itinerary constraints", async () => {
+  const resolved = contextService.resolveContext(
+    "Make it an accessible vegetarian afternoon in Tallinn. Keep walking minimal and stay under €150.",
+    {},
+    [],
+  );
+  const toolResults = [
+    {
+      tool: "local_experiences_and_attractions",
+      status: "success",
+      result: {
+        location: "Tallinn, Estonia",
+        recommendations: [
+          { name: "Kumu Art Museum", address: "Valge 1", rating: 4.7 },
+          { name: "Telliskivi Creative City", address: "Telliskivi 60a", rating: 4.6 },
+        ],
+      },
+    },
+    {
+      tool: "intelligent_restaurant_discovery",
+      status: "success",
+      result: {
+        location: "Tallinn, Estonia",
+        restaurants: [{ name: "Vegan Restoran V", address: "Rataskaevu 12", rating: 4.5 }],
+      },
+    },
+  ];
+  const repaired = await chatController._test.repairWorkflowAnswer({
+    answer: "**Travel guidance for Riihimäki**\n\nCheck hotels and carry cash.",
+    quality: { issueCodes: ["STALE_DESTINATION", "ACCESSIBILITY_CONSTRAINT_MISSING", "DIETARY_CONSTRAINT_MISSING", "BUDGET_CONSTRAINT_MISSING"] },
+    message: "Make it an accessible vegetarian afternoon in Tallinn. Keep walking minimal and stay under €150.",
+    resolved,
+    retrievedDocs: [],
+    successfulToolResults: toolResults,
+    documentFocused: false,
+    responsePlan: { targetWords: 320 },
+  });
+
+  assert.match(repaired.answer, /Tallinn/);
+  assert.doesNotMatch(repaired.answer, /Riihimäki/);
+  assert.match(repaired.answer, /step-free access/i);
+  assert.match(repaired.answer, /vegetarian/i);
+  assert.match(repaired.answer, /€150/);
+  assert.match(repaired.answer, /Kumu Art Museum/);
+  assert.match(repaired.answer, /Vegan Restoran V/);
+});
+
+test("multi-city composition gives every explicit destination its own grounded section", () => {
+  const resolved = contextService.resolveContext(
+    "Plan 5 days across Kathmandu and Pokhara, split the time fairly. No strenuous trekking. My ground budget is €700 excluding flights.",
+    {},
+    [],
+  );
+  const scoped = (tool, city, result) => ({ tool, scopeDestination: city, status: "success", result: { location: `${city}, Nepal`, ...result } });
+  const answer = chatController._test.composeDestinationPipelineAnswer(resolved, [
+    scoped("local_experiences_and_attractions", "Kathmandu", { recommendations: [{ name: "Kathmandu Museum", address: "Kathmandu" }] }),
+    scoped("intelligent_restaurant_discovery", "Kathmandu", { restaurants: [{ name: "Kathmandu Kitchen", address: "Kathmandu" }] }),
+    scoped("smart_accommodation_finder", "Kathmandu", { properties: [{ name: "Kathmandu Guest House", address: "Kathmandu" }] }),
+    scoped("local_experiences_and_attractions", "Pokhara", { recommendations: [{ name: "Pokhara Museum", address: "Pokhara" }] }),
+    scoped("intelligent_restaurant_discovery", "Pokhara", { restaurants: [{ name: "Pokhara Kitchen", address: "Pokhara" }] }),
+    scoped("smart_accommodation_finder", "Pokhara", { properties: [{ name: "Pokhara Guest House", address: "Pokhara" }] }),
+  ]);
+
+  assert.match(answer, /Days 1–3: Kathmandu/);
+  assert.match(answer, /Days 4–5: Pokhara/);
+  assert.match(answer, /Kathmandu Museum/);
+  assert.match(answer, /Pokhara Museum/);
+  assert.match(answer, /Kathmandu Kitchen/);
+  assert.match(answer, /Pokhara Kitchen/);
+  assert.match(answer, /ground plan within €700, excluding flights/i);
+  assert.match(answer, /Avoid strenuous trekking/i);
+  assert.doesNotMatch(answer, /\bSplit\b/);
+});
+
 test("destination planning does not request accommodation excluded from the trip scope", () => {
   const resolved = contextService.resolveContext(
     "Plan four days in Lisbon with a €900 ground budget excluding flights and hotel. Include architecture, food and viewpoints.",
@@ -899,6 +1175,44 @@ test("focused safety composition excludes unrelated destination sections", () =>
   assert.match(answer, /Safety check: Iran/);
   assert.match(answer, /Defer non-essential travel/);
   assert.doesNotMatch(answer, /Food|Where to stay|Weather|Best next step/);
+});
+
+test("multi-destination safety comparison keeps evidence and scores separate", () => {
+  const resolved = {
+    currentUserMessage: "Compare travel safety in Tehran and Kathmandu",
+    destination: "Tehran",
+    locations: ["Tehran", "Kathmandu"],
+    explicitLocations: ["Tehran", "Kathmandu"],
+    intent: { type: "safety_inquiry", isFollowUp: false },
+    requestProfile: { constraints: {} },
+    memory: {},
+  };
+  const safetyResult = (location, score, label) => ({
+    location,
+    safety_assessment: {
+      caution_score: score,
+      caution_label: label,
+      caution_drivers: [score >= 80 ? "official advisory includes against-all-travel language" : "ordinary travel baseline"],
+      coverage_confidence: "medium-high",
+      news_attention_label: "Normal-attention recent news coverage",
+      checked_at: "2026-08-03T00:00:00.000Z",
+    },
+    current_situation: [],
+    official_advisory_links: [{ name: `WHO health profile for ${location}`, url: `https://example.com/${location}` }],
+  });
+  const answer = chatController._test.composeDestinationPipelineAnswer(resolved, [
+    { tool: "comprehensive_safety_intelligence", scopeDestination: "Tehran", result: safetyResult("Tehran", 95, "Red-flag") },
+    { tool: "comprehensive_safety_intelligence", scopeDestination: "Kathmandu", result: safetyResult("Kathmandu", 42, "Moderate") },
+  ]);
+
+  assert.match(answer, /Safety comparison: Tehran and Kathmandu/);
+  assert.match(answer, /### Tehran/);
+  assert.match(answer, /95\/100/);
+  assert.match(answer, /### Kathmandu/);
+  assert.match(answer, /42\/100/);
+  assert.match(answer, /Tehran needs clearly more caution than Kathmandu/);
+  assert.match(answer, /International checks/);
+  assert.doesNotMatch(answer, /Tehran and Kathmandu is a red-flag/);
 });
 
 test("dining composition honors result counts, dietary labels and future timing", () => {
@@ -950,6 +1264,55 @@ test("route fallback does not claim a route was verified when providers return n
   assert.doesNotMatch(answer, /ATLAS checked this as/i);
 });
 
+test("route answer acknowledges requested time and excessive walking", () => {
+  const answer = chatController._test.composeRouteAnswer(
+    {
+      currentUserMessage: "Public transport tomorrow at 07:30. Keep walking minimal.",
+      routeRequest: { origin: "Helsinki Central Station", destination: "Helsinki Airport", mode: "transit" },
+      requestProfile: { constraints: { minimalWalking: true } },
+    },
+    [{
+      tool: "route_and_transport_planner",
+      result: {
+        origin: "Helsinki Central Station",
+        destination: "Helsinki Airport",
+        requested_departure: { date: "2026-08-04", time: "07:30", label: "tomorrow" },
+        routes: [{
+          summary: "Direct I service",
+          duration: "35 min",
+          distance: "25 km",
+          departure_time: "7:49 AM",
+          arrival_time: "8:13 AM",
+          walking_distance: "803 m",
+          walking_meters: 803,
+          transfer_count: 0,
+          transit_step_count: 1,
+          steps: [{ instruction: "Take I to Lentoasema", distance: "24 km", is_transit: true }],
+        }],
+      },
+    }],
+  );
+
+  assert.match(answer, /asked to leave at 07:30/i);
+  assert.match(answer, /departs at 7:49 AM/i);
+  assert.match(answer, /Best match for less walking/i);
+  assert.match(answer, /more than a minimal-walking request/i);
+});
+
+test("accommodation comparison states the no-booking and no-payment boundary", () => {
+  const answer = chatController._test.composeAccommodationAnswer(
+    {
+      currentUserMessage: "Book a hotel in Paris",
+      destination: "Paris",
+      memory: {},
+      requestProfile: { constraints: {} },
+    },
+    [{ tool: "smart_accommodation_finder", result: { location: "Paris", properties: [{ name: "Example Hotel" }] } }],
+  );
+  assert.match(answer, /cannot complete a booking or accept payment-card details/i);
+  assert.match(answer, /secure checkout page/i);
+});
+
 test("destination weather timing respects a requested itinerary start time", () => {
   const lines = chatController._test.weatherTimingLines(
     {
@@ -972,6 +1335,23 @@ test("destination weather timing respects a requested itinerary start time", () 
   assert.doesNotMatch(lines, /06:00|09:00/);
   assert.match(lines, /12:00/);
   assert.match(lines, /15:00/);
+});
+
+test("reviewed-country base plans answer trip constraints before generic country notes", () => {
+  const resolved = contextService.resolveContext(
+    "I have 8 days in Japan in late October. First visit, moderate budget, vegetarian, interested in history and nature. Which bases should I choose?",
+    {},
+    [],
+  );
+  const answer = chatController._test.composeDestinationPipelineAnswer(resolved, []);
+
+  assert.match(answer, /Japan — 8-day base plan/);
+  assert.match(answer, /Tokyo — Days 1–4/);
+  assert.match(answer, /Kyoto — Days 5–8/);
+  assert.match(answer, /mid-range budget/);
+  assert.match(answer, /history and nature/);
+  assert.match(answer, /dashi/i);
+  assert.doesNotMatch(answer, /Customs and packing checks|Vibe and local context|Moderate caution/);
 });
 
 test("authoritative canary assignment is deterministic", () => {
