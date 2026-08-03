@@ -29,6 +29,18 @@ export const chatRequestSchema = z.object({
     .max(5, "Attach at most 5 documents to one request")
     .optional()
     .default([]),
+  clientLocalDate: z
+    .string()
+    .regex(/^(?:|\d{4}-\d{2}-\d{2})$/, "Invalid client local date")
+    .optional()
+    .default(""),
+  clientTimeZone: z
+    .string()
+    .trim()
+    .max(80, "Invalid client time zone")
+    .regex(/^(?:|[A-Za-z0-9_+./-]+)$/, "Invalid client time zone")
+    .optional()
+    .default(""),
 });
 
 export const authSignupSchema = z.object({
