@@ -12,6 +12,19 @@ const plainPreview = (value = "") => String(value || "")
   .replace(/\s+/g, " ")
   .trim();
 
+const relativeTime = (value) => {
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return "";
+  const elapsedMinutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60000));
+  if (elapsedMinutes < 1) return "now";
+  if (elapsedMinutes < 60) return `${elapsedMinutes}m`;
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) return `${elapsedHours}h`;
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  if (elapsedDays < 7) return `${elapsedDays}d`;
+  return new Date(timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+};
+
 const HistorySidebar = ({
   user,
   conversations,
@@ -80,20 +93,20 @@ const HistorySidebar = ({
       )}
       <aside className={`${isMobileOpen ? "fixed inset-y-0 left-0 z-50 flex" : "hidden"} h-full w-[280px] shrink-0 flex-col border-r border-[#303230] bg-[#202220] lg:relative lg:inset-auto lg:z-auto lg:flex`}>
 
-      <div className="p-3">
+      <div className="p-3 pb-2">
         <button
           type="button"
           onClick={() => { onNewChat?.(); onClose?.(); }}
-          className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium text-[#e7e8e3] transition hover:bg-[#2b2d2b]"
+          className="flex w-full items-center gap-2.5 rounded-xl border border-[#353835] bg-[#242624] px-3 py-2.5 text-sm font-medium text-[#ecece8] shadow-sm transition hover:border-[#454a46] hover:bg-[#2a2d2a] focus-visible:border-[#769581]"
         >
-          <MessageSquarePlus className="h-4 w-4 text-[#aeb0aa]" />
+          <MessageSquarePlus className="h-4 w-4 text-[#a9d0ba]" />
           New chat
         </button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         <div className="mb-2 flex items-center justify-between gap-2 px-3 pt-2">
-          <p className="text-xs font-medium text-[#777a75]">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#858782]">
             Recent
           </p>
 
@@ -132,10 +145,10 @@ const HistorySidebar = ({
           {conversations.map((item) => (
             <div
               key={item.id}
-              className={`group relative rounded-lg px-3 py-2.5 transition ${
+              className={`group relative rounded-xl border px-3 py-2.5 transition ${
                 item.id === activeConversationId
-                  ? "bg-[#343634]"
-                  : "hover:bg-[#292b29]"
+                  ? "border-[#454b47] bg-[#313431] shadow-sm"
+                  : "border-transparent hover:border-[#303330] hover:bg-[#292b29]"
               }`}
             >
               <button
@@ -143,9 +156,10 @@ const HistorySidebar = ({
                 onClick={() => { onLoadConversation(item.id); onClose?.(); }}
                 className="block w-full text-left"
               >
-                <p className="line-clamp-1 pr-6 text-sm font-medium text-[#e5e6e1]">
-                  {item.title}
-                </p>
+                <div className="flex items-center gap-2 pr-6">
+                  <p className="min-w-0 flex-1 truncate text-sm font-medium text-[#e5e6e1]">{item.title}</p>
+                  <span className="shrink-0 text-[10px] text-[#898b85]">{relativeTime(item.updatedAt)}</span>
+                </div>
                 <p className="mt-1 line-clamp-1 pr-4 text-xs text-[#7f817c]">
                   {plainPreview(item.preview) || "No messages yet"}
                 </p>
@@ -173,7 +187,7 @@ const HistorySidebar = ({
       <div className="border-t border-[#303230] p-3">
         <div className="mb-2 px-2">
           <p className="truncate text-sm font-medium text-[#dedfda]">{user?.name}</p>
-          <p className="truncate text-xs text-[#747671]">
+          <p className="truncate text-xs text-[#898b85]">
             {user?.publicPreview && !user?.emailVerified ? "Public preview account" : user?.email}
           </p>
         </div>

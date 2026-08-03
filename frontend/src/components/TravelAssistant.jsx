@@ -1,17 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   ArrowDown,
-  CloudSun,
   Download,
   Globe2,
-  Hotel,
   Landmark,
-  Map,
+  Navigation,
   Menu,
   Info,
   ShieldCheck,
   Sparkles,
-  Utensils,
   X,
 } from "lucide-react";
 import MessageList from "./chat/MessageList";
@@ -20,37 +17,28 @@ import TripSuggestions from "./features/TripSuggestions";
 import HistorySidebar from "./sidebar/HistorySidebar";
 import { useChat } from "../hooks/useChat";
 import { chatAPI } from "../services/api";
+import { downloadConversationPdf } from "../utils/exportConversationPdf";
 
 const features = [
   {
-    icon: ShieldCheck,
-    title: "Safety-aware planning",
-    text: "Check current context, practical risks and travel precautions before committing.",
-  },
-  {
-    icon: Map,
+    icon: Globe2,
     title: "Live destination research",
-    text: "Compare places, routes and local options with context from weather, maps and travel sources.",
+    text: "Current places, local options and practical context.",
   },
   {
-    icon: Hotel,
-    title: "Stays and budget guidance",
-    text: "Plan accommodation areas, realistic price ranges and booking tradeoffs.",
+    icon: ShieldCheck,
+    title: "Safer decisions",
+    text: "Timely risks, precautions and grounded travel guidance.",
   },
   {
-    icon: Utensils,
-    title: "Food and culture",
-    text: "Understand local dining, etiquette and everyday travel expectations.",
+    icon: Navigation,
+    title: "Routes and timing",
+    text: "Weather-aware plans, transport options and useful tradeoffs.",
   },
   {
     icon: Landmark,
-    title: "Document-aware chat",
-    text: "Upload PDF, DOCX or TXT files and ask questions about bookings, itineraries or travel notes.",
-  },
-  {
-    icon: CloudSun,
-    title: "Weather-aware timing",
-    text: "Use forecasts to choose better times for outdoor plans, family trips and daily activities.",
+    title: "Your context, remembered",
+    text: "Saved trip history and answers grounded in your documents.",
   },
 ];
 
@@ -87,6 +75,8 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [serviceStatus, setServiceStatus] = useState("checking");
   const [verificationNotice, setVerificationNotice] = useState("");
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportNotice, setExportNotice] = useState("");
   const messagesContainerRef = useRef(null);
   const messagesEndRef = useRef(null);
   const landingContainerRef = useRef(null);
@@ -186,24 +176,20 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
     }
   };
 
-  const exportCurrentChat = () => {
-    const text = visibleMessages
-      .map((message) => `${message.type === "user" ? "You" : "ATLAS"}: ${message.content}`)
-      .join("\n\n");
+  const exportCurrentChat = async () => {
+    if (visibleMessages.length === 0 || isExporting) return;
 
-    const blob = new Blob(
-      [`ATLAS conversation export\n${new Date().toLocaleString()}\n\n${text}`],
-      { type: "text/plain" }
-    );
-
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-
-    anchor.href = url;
-    anchor.download = `atlas-chat-${new Date().toISOString().slice(0, 10)}.txt`;
-    anchor.click();
-
-    URL.revokeObjectURL(url);
+    setIsExporting(true);
+    setExportNotice("Preparing PDF…");
+    try {
+      await downloadConversationPdf(visibleMessages);
+      setExportNotice("PDF downloaded.");
+    } catch (error) {
+      console.error("Conversation PDF export failed", error);
+      setExportNotice("PDF export failed. Please try again.");
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   return (
@@ -271,13 +257,14 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
                 <button
                   type="button"
                   onClick={exportCurrentChat}
-                  disabled={visibleMessages.length === 0}
+                  disabled={visibleMessages.length === 0 || isExporting}
                   className="flex items-center gap-2 rounded-lg border border-[#343634] bg-[#222422] px-3 py-2 text-xs font-medium text-[#b3b5af] transition hover:bg-[#2a2c2a] hover:text-[#f2f2ee] disabled:cursor-not-allowed disabled:opacity-40"
-                  title="Export current chat"
+                  title={isExporting ? "Preparing PDF" : "Export current chat as PDF"}
                 >
                   <Download className="h-3.5 w-3.5" />
-                  Export
+                  {isExporting ? "Exporting…" : "Export PDF"}
                 </button>
+                <span className="sr-only" aria-live="polite">{exportNotice}</span>
               </div>
             </div>
           </header>
@@ -322,38 +309,38 @@ const TravelAssistant = ({ user, onLogout, onResendVerification }) => {
           <main className="relative min-h-0 flex-1 overflow-hidden">
             {!hasStartedChat ? (
               <div ref={landingContainerRef} className="h-full overflow-y-auto">
-                <section className="mx-auto w-full max-w-4xl px-5 pb-5 pt-14 sm:px-8 sm:pt-20">
-                  <div className="border-b border-[#303230] pb-10 sm:pb-12">
+                <section className="atlas-landing-shell mx-auto w-full max-w-4xl px-5 pb-2 pt-8 sm:px-8 sm:pt-10 lg:pt-12">
+                  <div className="border-b border-[#343634] pb-7 sm:pb-8">
                     <div className="max-w-3xl">
-                      <div className="mb-5 flex h-9 w-9 items-center justify-center rounded-lg border border-[#3c3e3c] bg-[#232523]">
+                      <div className="mb-4 flex h-9 w-9 items-center justify-center rounded-lg border border-[#414441] bg-[#242624] shadow-[0_8px_24px_rgba(0,0,0,0.12)]">
                         <Sparkles className="h-4 w-4 text-[#b9ddc8]" />
                       </div>
 
-                      <p className="mb-3 text-xs font-medium uppercase tracking-[0.18em] text-[#858782]">
+                      <p className="mb-2.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-[#9a9c96]">
                         ATLAS travel workspace
                       </p>
-                      <h2 className="max-w-2xl text-3xl font-semibold leading-[1.08] tracking-[-0.035em] text-[#f3f3ef] sm:text-5xl">
+                      <h2 className="max-w-2xl text-3xl font-semibold leading-[1.06] tracking-[-0.04em] text-[#f5f5f1] sm:text-[44px]">
                         Make every trip feel considered.
                       </h2>
 
-                      <p className="mt-5 max-w-2xl text-base leading-7 text-[#a6a8a2] sm:text-lg">
+                      <p className="mt-4 max-w-2xl text-[15px] leading-6 text-[#b2b4ae] sm:text-base sm:leading-7">
                         Research destinations, compare stays, check routes and shape
                         a practical plan with live travel context in one conversation.
                       </p>
                     </div>
 
-                    <div className="mt-10 grid border-y border-[#303230] sm:grid-cols-2">
+                    <div className="atlas-capabilities mt-7 grid overflow-hidden rounded-xl border border-[#343634] bg-[#1a1b1a] sm:grid-cols-2">
                       {features.map(({ icon: Icon, title, text }) => (
                         <div
                           key={title}
-                          className="group flex gap-4 border-b border-[#303230] px-1 py-5 last:border-b-0 sm:[&:nth-child(odd)]:border-r sm:[&:nth-last-child(-n+2)]:border-b-0 sm:[&:nth-child(odd)]:pr-6 sm:[&:nth-child(even)]:pl-6"
+                          className="group flex gap-3 border-b border-[#343634] p-4 transition-colors hover:bg-[#1e201e] last:border-b-0 sm:[&:nth-child(odd)]:border-r sm:[&:nth-last-child(-n+2)]:border-b-0"
                         >
-                          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[#252725] text-[#9fc8b2] transition group-hover:bg-[#2b2e2b]">
+                          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[#343734] bg-[#252725] text-[#a9d0ba] transition group-hover:border-[#465049] group-hover:bg-[#29302c]">
                             <Icon className="h-4 w-4" />
                           </div>
                           <div>
-                            <h3 className="text-sm font-medium text-[#e4e5e0]">{title}</h3>
-                            <p className="mt-1.5 text-sm leading-6 text-[#858782]">{text}</p>
+                            <h3 className="text-sm font-medium text-[#e9eae5]">{title}</h3>
+                            <p className="mt-1 text-xs leading-5 text-[#969892]">{text}</p>
                           </div>
                         </div>
                       ))}
