@@ -71,6 +71,59 @@ test("response verifier adds caution for unsupported prices and availability", (
   assert.doesNotMatch(answer, /completely safe/i);
 });
 
+test("response verifier does not label generic planning instructions as unverified venues", () => {
+  const { answer } = verifyResponse({
+    answer: "Choose step-free stations and hotels, favour direct routes, and confirm accessible room details directly.",
+    toolResults: [],
+    documentMatches: [],
+  });
+
+  assert.doesNotMatch(answer, /Verification note/);
+});
+
+test("response verifier removes unsupported venue accessibility claims", () => {
+  const { answer, verification } = verifyResponse({
+    answer: "Two suitable viewpoints are Mirador Example and Paseo Example. Both viewpoints are easily accessible and are accessible with minimal walking.\n- Mirador Example: a viewpoint with an elevator, offering city views and is accessible by public transportation.\n- Paseo Example: a flat promenade with port views and is located in a flat area, making it easily accessible on foot.",
+    toolResults: [{ result: { recommendations: [{ name: "Mirador Example" }, { name: "Paseo Example" }], data_quality: { status: "verified" } } }],
+    requestConstraints: { accessible: true, minimalWalking: true },
+  });
+
+  assert.equal(verification.modified, true);
+  assert.doesNotMatch(answer, /suitable viewpoints|with an elevator|flat promenade|easily accessible|accessible with minimal walking|accessible by public|located in a flat area/i);
+  assert.match(answer, /direct confirmation/i);
+});
+
+test("viewpoint requests exclude similarly ranked museums without viewpoint evidence", () => {
+  const filtered = toolService._test.strictRequestedPlaceKind([
+    { displayName: { text: "National Maritime Museum" }, formattedAddress: "Valparaíso", types: ["museum"] },
+    { displayName: { text: "Mirador Barón" }, formattedAddress: "Valparaíso", types: ["tourist_attraction"] },
+    { displayName: { text: "Paseo 21 de Mayo" }, formattedAddress: "Valparaíso", types: ["tourist_attraction"] },
+    { displayName: { text: "Saint Louis Square" }, formattedAddress: "Valparaíso", types: ["scenic_spot", "historical_landmark"] },
+  ], "accessible viewpoints minimal walking");
+
+  assert.deepEqual(filtered.map((place) => place.displayName.text), ["Mirador Barón", "Paseo 21 de Mayo"]);
+});
+
+test("response verifier softens unsupported exact founding dates", () => {
+  const { answer, verification } = verifyResponse({
+    answer: "Valparaíso was founded in 1536 and later became a major port.",
+    toolResults: [],
+  });
+
+  assert.equal(verification.modified, true);
+  assert.doesNotMatch(answer, /founded in 1536/i);
+  assert.match(answer, /early history/i);
+});
+
+test("flight-safety wording does not trigger an unrelated destination-safety note", () => {
+  const { answer } = verifyResponse({
+    answer: "Power banks are a flight-safety item. Keep them in carry-on baggage.",
+    toolResults: [],
+    documentMatches: [],
+  });
+  assert.doesNotMatch(answer, /Safety information should be checked against official travel advisories/i);
+});
+
 test("response verifier preserves an explicit user budget while removing invented prices", () => {
   const { answer, verification } = verifyResponse({
     answer: "Keep the total plan within €180. Reject any option above 180 EUR. A ticket should cost €47.",
@@ -129,6 +182,16 @@ test("news safety classification separates evidence coverage from ATLAS caution 
 
   assert.ok(iran.score > nepal.score + 30);
   assert.match(iran.label, /Red-flag|High caution/);
+
+  const nepalWithSevereHeadline = toolService._test.calculateSafetyCaution({
+    location: "Nepal",
+    country: "Nepal",
+    articles: [{ title: "Clashes and curfew reported in one district", description: "Local disruption was reported" }],
+    officialAdvisory: { alert_status: [] },
+    coverage: { news_attention_level: "high", main_signals: ["civil disruption in recent coverage"] },
+  });
+  assert.ok(nepalWithSevereHeadline.score < 50);
+  assert.doesNotMatch(nepalWithSevereHeadline.label, /Red-flag|High caution/);
 });
 
 test("destination follow-ups avoid repeating same-country safety sections", () => {
@@ -588,7 +651,7 @@ test("fallback advisory links are country-specific global sources", () => {
   assert.deepEqual(toolService._test.officialAdvisoryLinks("Unknown Place", ""), []);
 });
 
-test("visible advisory notes prefer country-specific global links over one government board", () => {
+test("ordinary country plans suppress advisory links when current caution is low", () => {
   const resolved = {
     intent: { type: "destination_planning" },
     destination: "Japan",
@@ -619,10 +682,10 @@ test("visible advisory notes prefer country-specific global links over one gover
       },
     },
   ]);
-  assert.match(answer, /WHO health profile for Japan/);
-  assert.match(answer, /https:\/\/www\.who\.int\/countries\/jpn/);
-  assert.match(answer, /ReliefWeb updates for Japan/);
-  assert.match(answer, /https:\/\/reliefweb\.int\/country\/jpn/);
+  assert.doesNotMatch(answer, /WHO health profile for Japan/);
+  assert.doesNotMatch(answer, /https:\/\/www\.who\.int\/countries\/jpn/);
+  assert.doesNotMatch(answer, /ReliefWeb updates for Japan/);
+  assert.doesNotMatch(answer, /https:\/\/reliefweb\.int\/country\/jpn/);
   assert.doesNotMatch(answer, /IATA Travel Centre/);
   assert.doesNotMatch(answer, /Foreign, Commonwealth|FCDO|Finland MFA|State Department/);
 });
@@ -886,15 +949,31 @@ test("refresh sessions use HttpOnly cookies and email actions use URL fragments"
 
 test("Routes API v2 responses are converted to compact route guidance", () => {
   const route = toolService._test.compactRouteLeg({
-    description: "Fast route",
     distanceMeters: 12500,
     duration: "3900s",
-    legs: [{ steps: [{ distanceMeters: 800, staticDuration: "600s", travelMode: "WALK", navigationInstruction: { instructions: "Walk north" } }] }],
+    legs: [{ steps: [
+      { distanceMeters: 800, staticDuration: "600s", travelMode: "WALK", navigationInstruction: { instructions: "Walk north" } },
+      {
+        distanceMeters: 11700,
+        staticDuration: "3300s",
+        travelMode: "TRANSIT",
+        transitDetails: {
+          transitLine: { nameShort: "I" },
+          localizedValues: {
+            departureTime: { time: { text: "7:49 AM" } },
+            arrivalTime: { time: { text: "8:13 AM" } },
+          },
+        },
+      },
+    ] }],
   }, "Helsinki", "Porvoo");
-  assert.equal(route.summary, "Fast route");
+  assert.equal(route.summary, "Direct I service");
   assert.equal(route.distance, "13 km");
   assert.equal(route.duration, "1 hr 5 min");
   assert.equal(route.steps[0].instruction, "Walk north");
+  assert.equal(route.walking_meters, 800);
+  assert.equal(route.departure_time, "7:49 AM");
+  assert.equal(route.arrival_time, "8:13 AM");
 });
 
 test("tool execution stops immediately for an aborted request", async () => {

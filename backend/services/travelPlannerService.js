@@ -1,12 +1,8 @@
-import axios from "axios";
-import { ChatGroq } from "@langchain/groq";
 import { z } from "zod";
 import { contextService } from "./contextService.js";
+import { invokeStructuredGroq, postGroqChat } from "./groqModelService.js";
 import { logger } from "../utils/logger.js";
 import { runWithoutAutomaticTracing } from "../agents/monitoring/atlasTracing.js";
-
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const MODEL = process.env.GROQ_PLANNER_MODEL || process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
 
 const ALLOWED_INTENTS = new Set([
   "destination_planning",
@@ -24,20 +20,20 @@ const ALLOWED_INTENTS = new Set([
 const TravelPlanSchema = z.object({
   intent: z.enum([...ALLOWED_INTENTS]),
   confidence: z.number().min(0).max(1),
-  destination: z.string().default(""),
-  location_scope: z.enum(["city", "country", "region", "unknown"]).default("unknown"),
-  activity: z.string().default(""),
-  date_text: z.string().default(""),
-  target_date: z.string().default(""),
+  destination: z.string(),
+  location_scope: z.enum(["city", "country", "region", "unknown"]),
+  activity: z.string(),
+  date_text: z.string(),
+  target_date: z.string(),
   route: z.object({
-    origin: z.string().default(""),
-    destination: z.string().default(""),
-    mode: z.string().default("transit"),
-  }).nullable().default(null),
-  required_tools: z.array(z.string()).max(7).default([]),
-  place_search_queries: z.array(z.string()).max(10).default([]),
-  map_searches: z.array(z.string()).max(8).default([]),
-  answer_style: z.string().default("destination_overview"),
+    origin: z.string(),
+    destination: z.string(),
+    mode: z.string(),
+  }).nullable(),
+  required_tools: z.array(z.string()).max(7),
+  place_search_queries: z.array(z.string()).max(10),
+  map_searches: z.array(z.string()).max(8),
+  answer_style: z.string(),
 });
 
 function plannerEnabled() {
@@ -98,13 +94,15 @@ function sanitizePlan(plan = {}) {
   };
 }
 
-export async function createTravelPlan({ message = "", memory = {}, previousMessages = [], signal } = {}) {
+export async function createTravelPlan({ message = "", memory = {}, previousMessages = [], clientLocalDate = "", clientTimeZone = "", signal } = {}) {
   if (!plannerEnabled()) return null;
 
   const history = previousMessages.slice(-6).map((m) => ({ role: m.role, content: String(m.content || "").slice(0, 420) }));
-  const today = new Date().toISOString().slice(0, 10);
+  const today = /^\d{4}-\d{2}-\d{2}$/.test(clientLocalDate)
+    ? clientLocalDate
+    : new Date().toISOString().slice(0, 10);
 
-  const system = `You are ATLAS's travel intent planner. Return only compact JSON. Your job is not to answer the user. Extract intent, location, activity, date, budget, place category and tool needs for a travel assistant. Resolve relative dates using today's UTC date ${today}. Never invent venue names. Treat exclusions and negative preferences such as "do not", "without", "avoid" and "dislike" as constraints, never as requested tools or interests. Clock ranges such as "from 10:30 to 18:00" are itinerary times, not route endpoints. A pool, gym or spa mentioned in a hotel request is an amenity and must not replace accommodation_search. Multi-day trips, day plans and requests for several bases remain destination_planning even when they mention food, hotels or activities. Use place_search_queries for Google Places/Maps searches whenever the user asks for venues, sports, attractions, restaurants, cafes, bars, nightlife, hotels, motels, lodges, hostels, routes or local activities. Safety-sensitive travel plans should request news plus official-advisory style caution, but never mark a place as 100% safe just because news is quiet.`;
+  const system = `You are ATLAS's travel intent planner. Return only compact JSON. Your job is not to answer the user. Extract intent, location, activity, date, budget, place category and tool needs for a travel assistant. Resolve relative dates using the user's local date ${today}${clientTimeZone ? ` in ${clientTimeZone}` : ""}. Never invent venue names. Treat exclusions and negative preferences such as "do not", "without", "avoid" and "dislike" as constraints, never as requested tools or interests. Clock ranges such as "from 10:30 to 18:00" are itinerary times, not route endpoints. A pool, gym or spa mentioned in a hotel request is an amenity and must not replace accommodation_search. Multi-day trips, day plans and requests for several bases remain destination_planning even when they mention food, hotels or activities. Use place_search_queries for Google Places/Maps searches whenever the user asks for venues, sports, attractions, restaurants, cafes, bars, nightlife, hotels, motels, lodges, hostels, routes or local activities. Safety-sensitive travel plans should request news plus official-advisory style caution, but never mark a place as 100% safe just because news is quiet.`;
   const user = JSON.stringify({
     message,
     memory: {
@@ -116,6 +114,7 @@ export async function createTravelPlan({ message = "", memory = {}, previousMess
       lastIntent: memory.lastIntent || "",
     },
     recentConversation: history,
+    userTemporalContext: { localDate: today, timeZone: clientTimeZone || "unknown" },
     requiredJsonShape: {
       intent: "destination_planning | activity_recommendations | weather_inquiry | accommodation_search | dining_recommendations | safety_inquiry | cultural_inquiry | route_planning | travel_logistics | document_chat",
       confidence: "0..1",
@@ -134,37 +133,32 @@ export async function createTravelPlan({ message = "", memory = {}, previousMess
 
   try {
     if (langChainPlannerEnabled()) {
-      const model = new ChatGroq({
-        apiKey: process.env.GROQ_API_KEY,
-        model: MODEL,
-        temperature: 0,
-        maxTokens: 650,
-        maxRetries: 0,
-        timeout: 7000,
-      });
-      const structuredPlanner = model.withStructuredOutput(
-        TravelPlanSchema,
-        { name: "atlas_travel_plan", method: "functionCalling" },
-      );
-      const plan = await runWithoutAutomaticTracing(() => structuredPlanner.invoke(
-        [
+      const plan = await runWithoutAutomaticTracing(() => invokeStructuredGroq({
+        role: "planner",
+        operation: "travel_planning",
+        schema: TravelPlanSchema,
+        schemaName: "atlas_travel_plan",
+        messages: [
           { role: "system", content: system },
           { role: "user", content: user },
         ],
-        {
-          signal,
+        signal,
+        temperature: 0,
+        maxTokens: 650,
+        timeout: 7000,
+        invokeOptions: {
           callbacks: [],
           tags: ["atlas", "planner", "langchain"],
           metadata: { operation: "travel_planning", graphVersion: "travel-orchestrator-v2" },
         },
-      ));
+      }));
       return sanitizePlan(plan);
     }
 
-    const response = await axios.post(
-      GROQ_URL,
-      {
-        model: MODEL,
+    const response = await postGroqChat({
+      role: "planner",
+      operation: "travel_planning_json",
+      payload: {
         messages: [
           { role: "system", content: system },
           { role: "user", content: user },
@@ -173,16 +167,12 @@ export async function createTravelPlan({ message = "", memory = {}, previousMess
         max_tokens: 650,
         response_format: { type: "json_object" },
       },
-      {
-        headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-        timeout: 7000,
-        signal,
-        validateStatus: (status) => status < 500,
-      }
-    );
+      timeout: 7000,
+      signal,
+    });
 
     const content = response.data?.choices?.[0]?.message?.content || "";
-    if (!content || response.status >= 400) return null;
+    if (!content) return null;
     return sanitizePlan(JSON.parse(content));
   } catch (error) {
     if (signal?.aborted || error?.code === "ERR_CANCELED") throw error;
@@ -202,7 +192,11 @@ export function applyTravelPlan(resolved = {}, plan = null) {
     && /\b(budget|cheap|affordable|low[-\s]?cost|vegetarian|vegan|halal|kosher|gluten[-\s]?free|dietary|no meat|plant[-\s]?based)\b/i.test(String(resolved.enrichedUserMessage || ""));
   const keepItineraryDestinationIntent = resolved.intent?.type === "destination_planning"
     && Boolean(resolved.destination || resolved.memory?.destination)
-    && /\b(plan|itinerary|one[-\s]?day|1[-\s]?day|day plan|whole day|same requirements|morning|lunch|afternoon|evening|start after|replace|focus (?:on|around)|stay base|base area)\b/i.test(String(resolved.enrichedUserMessage || ""));
+    && (
+      resolved.requestProfile?.itineraryContinuation
+      || Number(resolved.requestProfile?.constraints?.dayCount || 0) > 0
+      || /\b(plan|itinerary|revise|refine|adjust|update|one[-\s]?day|1[-\s]?day|day plan|whole day|same requirements|morning|lunch|afternoon|evening|start after|replace|focus (?:on|around)|stay base|base area)\b/i.test(String(resolved.enrichedUserMessage || ""))
+    );
   const keepHighConfidenceDeterministicIntent = Number(resolved.intent?.confidence || 0) >= 0.9
     && [
       "route_planning",
@@ -217,8 +211,10 @@ export function applyTravelPlan(resolved = {}, plan = null) {
     || keepRefinementDestinationIntent
     || keepItineraryDestinationIntent
     || keepHighConfidenceDeterministicIntent;
-  const keepExplicitDestination = Boolean(resolved.destination && resolved.locations?.length)
-    && !contextSwitchPrompt;
+  const keepExplicitDestination = Boolean(
+    resolved.destination
+    && (resolved.explicitLocations?.length || resolved.locations?.length),
+  );
 
   const next = {
     ...resolved,
@@ -247,7 +243,9 @@ export function applyTravelPlan(resolved = {}, plan = null) {
       ? [next.destination]
       : [next.destination, ...(resolved.locations || []).filter((loc) => contextService.normalize(loc) !== contextService.normalize(next.destination))].slice(0, 3);
     next.memory.destination = next.destination;
-    next.memory.locations = [...new Set([next.destination, ...(next.memory.locations || [])])].slice(0, 8);
+    next.memory.locations = contextSwitch
+      ? [next.destination]
+      : [...new Set([next.destination, ...(next.memory.locations || [])])].slice(0, 8);
     next.memory.locationScope = next.locationScope;
   }
 
