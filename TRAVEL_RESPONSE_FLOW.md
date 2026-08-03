@@ -1,154 +1,137 @@
-# ATLAS Travel Response Flow
+# ATLAS Hybrid Travel Workflow
 
-ATLAS is now designed around an intent-first travel pipeline. The backend should not answer every travel message with the same destination template. It should first identify what the user is trying to do, call only the tools needed for that intent, then compose a grounded response with a UI payload that matches the request.
+ATLAS uses an intent-aware LangGraph supervisor around deterministic travel logic. The graph coordinates specialists, but it does not give a language model unrestricted control over providers, memory, payments or final factual claims.
 
-## 1. Intent-first pipeline
-
-The main flow is:
+## Authoritative graph
 
 ```text
-User message
-→ deterministic context resolver
-→ optional Groq planner for structured intent refinement
-→ validated tool plan
-→ API orchestration
-→ grounded response composer
-→ response verifier
-→ UI live actions
-→ message and memory storage
+User request
+→ deterministic context resolution
+→ optional schema-constrained LangChain planner
+→ input guardrails
+   ├─ clarification or safe short-circuit
+   └─ supervisor decision
+      → document retrieval when relevant
+      → bounded specialist routing
+      → parallel provider execution
+      → evidence reconciliation
+      → intent-specific response plan
+      → grounded composition
+      → claim verifier
+      → quality gate
+         ├─ pass → final response
+         └─ one evidence-preserving repair → final response
 ```
 
-The LLM planner is used to structure the user request, not to directly invent travel facts. The backend still controls tool execution and response verification.
+The authoritative graph is request-scoped. Provider payloads, document excerpts and user inputs are not duplicated into LangGraph checkpoint storage. Durable conversation memory is saved by the chat controller only after lease-ownership and fencing checks pass.
 
-## 2. Dynamic intent families
+## Guardrails before provider spend
 
-ATLAS should classify requests into these broad families:
+The guardrail node handles boundaries that should not wait for an external API:
 
-- Destination planning: country, city, weekend trip, first-time visit, itinerary.
-- Accommodation: hotels, hostels, motels, lodges, guesthouses, homestays, resorts, apartments, cheap vs luxury.
-- Dining and nightlife: restaurants, cafes, coffee, street food, local cuisine, bars, pubs, night clubs and nightlife.
-- Activities and attractions: museums, parks, shopping, culture, nature, family-friendly options, sports and local venues.
-- Sports and games: tennis, badminton, football, basketball, volleyball, swimming, gyms, padel, pickleball, squash, golf, climbing, bowling, skating and running.
-- Route planning: origin, destination, preferred transport mode, walking, driving, transit or cycling.
-- Safety: current news signal, official advisory reminder and practical precautions.
-- Weather: current conditions, hourly forecast and weather-aware planning.
-- Document chat: uploaded PDF, DOCX or TXT as the main source.
+- missing destinations or route endpoints;
+- prompt, credential and private-instruction extraction attempts;
+- payment-card data and direct-booking requests;
+- high-stakes customs, entry, health and safety signals that require authoritative sources.
 
-## 3. API orchestration rules
+ATLAS compares accommodation but does not collect card data, take payments or complete bookings.
 
-### Destination planning
+## Supervisor and specialists
 
-Use:
+The supervisor creates a request-scoped specialist plan. It selects only the domains needed by the current intent:
 
-- NewsAPI for safety/current context.
-- OpenWeather for city-level weather only.
-- Google Places API New for city-level attractions, restaurants and accommodation leads.
-- Cultural/practical guidance from the destination profile and available context.
+| Specialist | Responsibility |
+| --- | --- |
+| Experiences | Attractions, recreation, sports and local venues |
+| Dining | Food, restaurants, dietary needs and dining shortlists |
+| Stays | Accommodation discovery and comparison-only guidance |
+| Mobility | Routes, public transport, transfers and walking constraints |
+| Weather | Current and forecast conditions tied to the requested date |
+| Safety | Destination-specific news, baseline and advisory evidence |
+| Culture | Country and city context, etiquette and practical norms |
+| Logistics | Customs, packing, transit and official-source checks |
+| Documents | User-isolated retrieval from uploaded travel documents |
 
-For country-level queries, ATLAS should not pick one random city. It should ask for the base city before city-level weather and venue searches.
+Specialists do not act as free-running chatbots. They are bounded orchestration lanes over validated tool arguments, provider budgets and deterministic composers.
 
-### Accommodation
+## Multi-destination behaviour
 
-Use Google Places API New with query expansion based on stay type and budget:
+ATLAS keeps destination evidence separate. A request comparing two cities or countries can fan out weather, safety, dining, stays and experience work per destination. Results carry a destination scope and are reconciled before composition.
 
-- budget: hostels, guesthouses, cheap hotels, homestays.
-- mid-range: hotels, serviced apartments, well-rated hotels.
-- luxury: luxury hotels, resorts, five-star hotels.
-- type-specific: motel, lodge, apartment, resort, guesthouse.
+This prevents one place’s weather, safety score, venue list or accommodation context from being applied to another. Per-request fan-out is capped by `CHAT_MAX_MULTI_DESTINATION_TOOL_CALLS`.
 
-ATLAS must not claim live booking prices or room availability from Google Places. It should present verified property leads and ask the user to confirm prices on booking platforms or property websites.
+## Context and memory
 
-### Dining and nightlife
+The context resolver separates:
 
-Use Google Places API New and Yelp when configured:
+- explicit destinations in the current message;
+- origin, destination and transit roles;
+- portable preferences such as diet, accessibility and pace;
+- location-specific details that must be cleared after a destination switch;
+- relative dates resolved from the browser’s local calendar and time zone;
+- follow-up selections such as “which two” without rerunning unrelated sections.
 
-- local/traditional food: local restaurants, traditional restaurants, street food.
-- cafes: cafes, coffee shops, local cafes.
-- nightlife: bars, pubs, night clubs, nightlife areas.
-- family/budget/vegetarian preferences should modify the query plan.
+Short conversation history and structured memory are stored in MongoDB. Redis supports caches, distributed limits and operational state. User-uploaded document vectors remain isolated in a Pinecone namespace derived from the user identity.
 
-### Sports and local activities
+## Evidence and factual boundaries
 
-When the user asks to play a sport, ATLAS should search venues immediately. It should not ask permission first.
+Provider output is classified as verified, limited, unavailable or missing. Required specialist failures become visible evidence warnings rather than silent invention.
 
-Example for tennis:
+- Google Places supplies discovery, not hotel availability or confirmed prices.
+- Routes results preserve departure times, transfers and walking distance; preferences are ranked with their trade-offs shown.
+- Customs answers keep border rules, airport security and airline battery rules separate.
+- Safety comparisons calculate and display a separate caution score for every destination. News attention alone cannot create a severe rating.
+- Required Google and third-party attribution remains visible.
+- Exact prices, opening status, accessibility and availability are stated only when supported by request-scoped evidence.
 
-```text
-tennis courts
-public tennis courts
-indoor tennis courts
-tennis club
-sports centre tennis
-local-language variants where useful
+## Response contracts and UI
+
+The response planner chooses an intent-specific contract rather than one generic destination template. The final renderer uses one clear title, progressive headings, short paragraphs and bounded lists.
+
+Examples include:
+
+- route: timing, ranked options, transfer/walking trade-offs, live map action;
+- customs: usually permitted, declare or check, restricted, transit and official sources;
+- safety comparison: one evidence block per destination and a plain conclusion;
+- accommodation: requirements, discovery shortlist, total-price checks and booking boundary;
+- multi-city itinerary: fair day split and separate activity, food and stay evidence per city.
+
+Stored legacy answers retain their dedicated v1 renderer. New responses use the current structured response envelope and UI action contract.
+
+## Resilience, cost and observability
+
+- provider-specific timeouts and bounded retries with jitter;
+- circuit breakers and Redis-backed caching;
+- per-user and global provider/LLM budgets;
+- role-specific Groq routing: GPT-OSS 20B for planning and GPT-OSS 120B for final composition;
+- native strict JSON Schema output for GPT-OSS planner and response calls;
+- at most one Llama 3.3 70B compatibility fallback for retryable model failures, followed by deterministic ATLAS rendering;
+- bounded specialist and multi-destination concurrency;
+- idempotent requests and ownership-fenced conversation persistence;
+- sanitized LangSmith structural traces without raw prompts, secrets or provider payloads;
+- deterministic canary rollout and fallback to the established response path.
+
+## Rollout flags
+
+```env
+ATLAS_AGENT_GRAPH_ENABLED=true
+ATLAS_AGENT_HYBRID_ENABLED=true
+ATLAS_AGENT_CANARY_PERCENT=10
+ATLAS_AGENT_FALLBACK_ENABLED=true
+ATLAS_AGENT_MAX_SPECIALISTS=6
+CHAT_MAX_MULTI_DESTINATION_TOOL_CALLS=12
 ```
 
-Weather should support the answer if the activity is outdoor or time-sensitive. Venue leads should appear before generic fallback map searches.
+Start with the evaluation suite and a small canary. Increase traffic only after response-quality, provider-error, latency and cost metrics remain within the release thresholds.
 
-### Route planning
+## Verification
 
-Use Google Directions where possible, plus a Google Maps route link. Always explain that live traffic and transit disruption should be checked before leaving.
+The repository includes regression coverage for guardrails, specialist routing, evidence reconciliation, long-context destination changes, relative dates, multi-city balance, safety comparisons, customs, accommodation boundaries and UI response contracts.
 
-### Safety
+Run:
 
-Safety is not a percentage guarantee. ATLAS uses a news-signal score from 0 to 100 to describe the strength of current safety/disruption signals found in the configured news feed.
-
-- Low current-news signal does not mean a destination is 100% safe.
-- Moderate/elevated/high signals should be explained with relevant headlines and official advisory links.
-- Official travel advisories should decide final go/no-go decisions.
-
-## 4. Response layout
-
-Responses should be short, clear and structured. Recommended layouts:
-
-### Destination overview
-
-```text
-Destination name
-Short vibe / context
-Safety and current context
-Weather and timing
-Food, stays and local experience
-Simple first-day flow
-Practical travel notes
-Best next step
+```bash
+cd backend && npm test
+cd ../frontend && npm test && npm run lint && npm run build
+cd .. && docker compose config -q
 ```
-
-### Activity or sport
-
-```text
-Activity options near location
-Verified venue leads
-Weather timing
-How to use this shortlist
-Booking/access note
-```
-
-### Hotels/stays
-
-```text
-Stay type in location
-Verified discovery leads
-How to compare
-Typical planning range when safe to give as rough guidance
-Price / availability note
-```
-
-### Dining/nightlife
-
-```text
-Dining or nightlife type in location
-Verified discovery leads
-What to prioritize
-Data note
-```
-
-## 5. UI payload rules
-
-`liveActions` should show verified places first. Fallback map-search cards should be intent-specific:
-
-- tennis query → tennis courts, public tennis courts, indoor tennis courts, tennis club.
-- broad city query → museums, parks, cafes, restaurants, shopping.
-- hotels query → hostels, budget hotels, luxury hotels, apartments depending on intent.
-- nightlife query → bars, pubs, night clubs, nightlife.
-
-Do not let stale activity memory leak into new destination queries.
