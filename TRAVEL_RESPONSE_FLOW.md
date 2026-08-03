@@ -20,7 +20,9 @@ User request
       → claim verifier
       → quality gate
          ├─ pass → final response
-         └─ one evidence-preserving repair → final response
+         └─ evidence-preserving repair
+            ├─ pass → final response
+            └─ retry once → final response
 ```
 
 The authoritative graph is request-scoped. Provider payloads, document excerpts and user inputs are not duplicated into LangGraph checkpoint storage. Durable conversation memory is saved by the chat controller only after lease-ownership and fencing checks pass.
@@ -98,6 +100,8 @@ Examples include:
 
 Stored legacy answers retain their dedicated v1 renderer. New responses use the current structured response envelope and UI action contract.
 
+The web client can export the visible conversation as a styled, multi-page A4 PDF. Export rendering stays in the browser and does not introduce another server-side data processor.
+
 ## Resilience, cost and observability
 
 - provider-specific timeouts and bounded retries with jitter;
@@ -105,6 +109,8 @@ Stored legacy answers retain their dedicated v1 renderer. New responses use the 
 - per-user and global provider/LLM budgets;
 - role-specific Groq routing: GPT-OSS 20B for planning and GPT-OSS 120B for final composition;
 - native strict JSON Schema output for GPT-OSS planner and response calls;
+- deterministic answer checks followed by one optional, bounded evidence-aware critic pass;
+- no more than two evidence-preserving repair attempts for concrete quality failures;
 - at most one Llama 3.3 70B compatibility fallback for retryable model failures, followed by deterministic ATLAS rendering;
 - bounded specialist and multi-destination concurrency;
 - idempotent requests and ownership-fenced conversation persistence;
@@ -119,6 +125,7 @@ ATLAS_AGENT_HYBRID_ENABLED=true
 ATLAS_AGENT_CANARY_PERCENT=10
 ATLAS_AGENT_FALLBACK_ENABLED=true
 ATLAS_AGENT_MAX_SPECIALISTS=6
+ATLAS_AGENT_RESPONSE_REVIEW_ENABLED=false
 CHAT_MAX_MULTI_DESTINATION_TOOL_CALLS=12
 ```
 
